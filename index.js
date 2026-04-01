@@ -1,7 +1,13 @@
 const { Client, GatewayIntentBits, Events } = require('discord.js');
-const config = require('./config.json');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
+
+// Читаем токены из переменных окружения Railway
+const config = {
+    tokens: process.env.TOKENS ? process.env.TOKENS.split(',') : [],
+    ownerId: process.env.OWNER_ID || '743913502997086219',
+    prefix: process.env.PREFIX || '!'
+};
 
 const startBot = (token) => {
     const client = new Client({
@@ -100,7 +106,7 @@ const startBot = (token) => {
 };
 
 if (!Array.isArray(config.tokens) || config.tokens.length === 0) {
-    console.error('[CRITICAL] config.json must have a non-empty tokens array');
+    console.error('[CRITICAL] No tokens found! Add TOKENS variable in Railway settings.');
     process.exit(1);
 }
 
