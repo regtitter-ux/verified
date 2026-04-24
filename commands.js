@@ -59,11 +59,37 @@ async function handleCommands(message, config) {
         }
 
         message.reply(resp);
+    } else if (command === 'part') {
+        const settings = loadJSON('settings.json');
+        const userId = message.author.id;
+        const target = message.mentions.users.first();
+
+        if (!target) {
+            return message.reply('❌ Please mention a user: `!part @user`');
+        }
+
+        if (target.id === userId) {
+            return message.reply('❌ You cannot add yourself as a partner.');
+        }
+
+        if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
+        if (!Array.isArray(settings[userId].partners)) settings[userId].partners = [];
+
+        const idx = settings[userId].partners.indexOf(target.id);
+        if (idx === -1) {
+            settings[userId].partners.push(target.id);
+            saveJSON('settings.json', settings);
+            message.reply(`✅ <@${target.id}> has been added as your partner.`);
+        } else {
+            settings[userId].partners.splice(idx, 1);
+            saveJSON('settings.json', settings);
+            message.reply(`✅ <@${target.id}> has been removed from your partners.`);
+        }
     } else if (command === 'adv3') {
         const settings = loadJSON('settings.json');
         const userId = message.author.id;
 
-        if (!settings[userId]) settings[userId] = { advText: '', serverAds: {} };
+        if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
 
         if (/^\d{17,20}$/.test(args[0])) {
             const gid = args.shift();
