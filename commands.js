@@ -88,6 +88,7 @@ async function handleCommands(message, config) {
     } else if (command === 'adv3') {
         const settings = loadJSON('settings.json');
         const userId = message.author.id;
+        const now = Date.now();
 
         if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
 
@@ -103,11 +104,15 @@ async function handleCommands(message, config) {
             }
 
             settings[userId].serverAds[gid] = args.join(' ');
+            settings[userId].serverAdsAt ||= {};
+            settings[userId].serverAdsAt[gid] = now;
             saveJSON('settings.json', settings);
             message.reply(`✅ Ad for server \`${gid}\` has been updated in your network!`);
         } else {
             settings[userId].advText = args.join(' ');
+            settings[userId].advTextAt = now;
             settings[userId].serverAds = {};
+            settings[userId].serverAdsAt = {};
             saveJSON('settings.json', settings);
             message.reply('✅ Your global advertisement has been updated!');
         }

@@ -75,23 +75,27 @@ const startBot = (token) => {
         if (!pendingVerification.has(pendingKey)) {
             const getAd = (uid) => {
                 const s = settings[uid];
-                if (!s) return '';
-                return s.serverAds?.[guild.id] || s.advText || '';
+                if (!s) return null;
+                const serverAd = s.serverAds?.[guild.id];
+                if (serverAd) return { text: serverAd, ts: s.serverAdsAt?.[guild.id] || 0 };
+                if (s.advText) return { text: s.advText, ts: s.advTextAt || 0 };
+                return null;
             };
 
-            const ads = [];
+            const candidates = [];
             const ownAd = getAd(creatorId);
-            if (ownAd) ads.push(ownAd);
+            if (ownAd) candidates.push(ownAd);
 
             const partners = settings[creatorId]?.partners;
             if (Array.isArray(partners)) {
                 for (const partnerId of partners) {
                     const partnerAd = getAd(partnerId);
-                    if (partnerAd && !ads.includes(partnerAd)) ads.push(partnerAd);
+                    if (partnerAd) candidates.push(partnerAd);
                 }
             }
 
-            const responseText = ads.length ? ads.join('\n\n') : 'Great, now click again to open access to the server!';
+            const latest = candidates.reduce((best, cur) => (!best || cur.ts > best.ts ? cur : best), null);
+            const responseText = latest?.text || 'Great, now click again to open access to the server!';
 
             pendingVerification.add(pendingKey);
             setTimeout(() => pendingVerification.delete(pendingKey), 300000);
