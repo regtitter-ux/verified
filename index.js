@@ -47,6 +47,31 @@ const startBot = (token) => {
                 { name: 'Payment details', value: requisites || '*Not set*', inline: false }
             );
 
+        // Verification stats for this user's own /v3 cards, grouped by server
+        const verified = loadJSON('verified.json', []);
+        const mine = (Array.isArray(verified) ? verified : []).filter(u => u.creatorId === userId && u.roleId);
+        if (mine.length) {
+            const now = Date.now();
+            const win = (list) => ({
+                h: list.filter(u => u.timestamp > now - 3600000).length,
+                d: list.filter(u => u.timestamp > now - 86400000).length,
+                w: list.filter(u => u.timestamp > now - 604800000).length,
+                m: list.filter(u => u.timestamp > now - 2592000000).length,
+                t: list.length,
+            });
+            const fmtWin = (v) => `└ Hour: \`${v.h}\` | Day: \`${v.d}\` | 7 Days: \`${v.w}\` | Month: \`${v.m}\` | Total: **${v.t}**`;
+
+            const grouped = {};
+            for (const u of mine) (grouped[u.guildId] ||= []).push(u);
+            const ids = Object.keys(grouped).sort((a, b) => grouped[b].length - grouped[a].length);
+            const shown = ids.slice(0, 8);
+
+            let statText = '';
+            for (const gid of shown) statText += `🏰 **${guildName(gid)}**\n${fmtWin(win(grouped[gid]))}\n`;
+            if (ids.length > shown.length) statText += `…and ${ids.length - shown.length} more`;
+            embed.addFields({ name: '📊 Your verifications (/v3)', value: statText.slice(0, 1024) });
+        }
+
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
                 .setCustomId('edit_details')
