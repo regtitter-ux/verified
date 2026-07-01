@@ -183,13 +183,14 @@ async function dmOwner(clients, ownerId, payload) {
     return false;
 }
 
-// /done — used as a reply to a withdrawal request, with a photo attached.
+// Complete a withdrawal by replying to its request embed with a photo (no command needed).
 // Marks the request completed, attaches the proof photo, and DMs the owner.
-// Returns true if the message was a `done` command (handled), false otherwise.
+// Returns true if the message was handled as a proof, false otherwise.
 async function handleDone(message, clients) {
-    const content = message.content.trim().toLowerCase();
-    if (content !== '!done' && content !== '/done' && content !== 'done') return false;
-    if (!message.reference?.messageId) return false; // not a reply → not the done command
+    if (!message.reference?.messageId) return false; // must be a reply
+
+    const photo = message.attachments.find(a => (a.contentType || '').startsWith('image/')) || message.attachments.first();
+    if (!photo) return false; // no photo → not a proof
 
     const reqMsg = await message.channel.messages.fetch(message.reference.messageId).catch(() => null);
     const footer = reqMsg?.embeds?.[0]?.footer?.text || '';
@@ -203,16 +204,7 @@ async function handleDone(message, clients) {
     const withdrawalId = fm[2];
 
     const isAdmin = message.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
-    if (!isAdmin && message.author.id !== MANUAL_USER) {
-        await message.reply('❌ You cannot confirm withdrawals.').catch(() => null);
-        return true;
-    }
-
-    const photo = message.attachments.find(a => (a.contentType || '').startsWith('image/')) || message.attachments.first();
-    if (!photo) {
-        await message.reply('❌ Attach a proof photo with the command.').catch(() => null);
-        return true;
-    }
+    if (!isAdmin && message.author.id !== MANUAL_USER) return false; // not staff → ignore
 
     const w = completeWithdrawal(ownerId, withdrawalId);
     if (!w) {
