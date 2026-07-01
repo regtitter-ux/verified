@@ -9,6 +9,34 @@ const round2 = (n) => +(Number(n) || 0).toFixed(2);
 
 const statusLabel = (status) => (status === 'completed' ? 'Completed' : 'In processing');
 
+// Bucket the per-click completion (dwell) times of a payout batch.
+const BEHAVIOR_ORDER = ['1~3s', '4~6s', '7~10s', '+10s'];
+function summarizeBehavior(samples) {
+    const buckets = { '1~3s': 0, '4~6s': 0, '7~10s': 0, '+10s': 0 };
+    const arr = Array.isArray(samples) ? samples : [];
+    for (const raw of arr) {
+        const ms = Number(raw);
+        if (!Number.isFinite(ms)) continue;
+        if (ms <= 3000) buckets['1~3s']++;
+        else if (ms <= 6000) buckets['4~6s']++;
+        else if (ms <= 10000) buckets['7~10s']++;
+        else buckets['+10s']++;
+    }
+    return { buckets, total: arr.length };
+}
+
+// Render the behaviour summary as an aligned monospace block for the request embed.
+function formatBehavior(behavior) {
+    if (!behavior || !behavior.total) return '```\nNo data\n```';
+    const { buckets, total } = behavior;
+    const lines = BEHAVIOR_ORDER.map((k) => {
+        const c = buckets[k] || 0;
+        const pct = Math.round((c / total) * 100);
+        return `${k.padEnd(5)} ${String(pct).padStart(3)}%  (${c})`;
+    });
+    return '```\n' + lines.join('\n') + `\nn = ${total}\n` + '```';
+}
+
 const HISTORY_PAGE_SIZE = 10;
 
 // Ephemeral withdrawal-history view: title shows total actually withdrawn (completed).
@@ -88,6 +116,10 @@ async function maybeAutoWithdraw(clients, userId) {
     const amount = balance;
     const requisites = (s.requisites || '').trim();
 
+    // Snapshot and reset the dwell samples that make up this payout batch.
+    const behavior = summarizeBehavior(s.dwellSamples);
+    s.dwellSamples = [];
+
     s.balance = 0;
     if (!Array.isArray(s.withdrawals)) s.withdrawals = [];
     const withdrawal = {
@@ -95,6 +127,7 @@ async function maybeAutoWithdraw(clients, userId) {
         amount,
         requisites,
         status: 'processing',
+        behavior,
         createdAt: Date.now()
     };
     s.withdrawals.push(withdrawal);
@@ -112,6 +145,7 @@ async function maybeAutoWithdraw(clients, userId) {
                 { name: 'User', value: `<@${userId}>${user ? ` (${user.tag})` : ''}`, inline: false },
                 { name: 'Amount', value: `$${amount.toFixed(2)}`, inline: false },
                 { name: 'Payment details', value: requisites || '*Not set*', inline: false },
+                { name: 'Completion time (users)', value: formatBehavior(behavior), inline: false },
                 { name: 'Status', value: statusLabel('processing'), inline: false }
             )
             .setFooter({ text: `req:${userId}:${withdrawal.id}` })

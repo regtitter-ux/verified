@@ -61,8 +61,10 @@ const startBot = (token) => {
         return { embeds: [embed], components: [row] };
     };
 
-    // Accrue $0.1 to the message owner for every 10 qualifying verification clicks
-    const creditVerifiedClick = (creatorId) => {
+    // Accrue $0.1 to the message owner for every 10 qualifying verification clicks.
+    // dwellMs = time between the ad being shown and the user completing verification;
+    // sampled per click so each payout can carry a behaviour summary.
+    const creditVerifiedClick = (creatorId, dwellMs) => {
         if (!creatorId) return;
         const settings = loadJSON('settings.json');
         if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
@@ -74,6 +76,14 @@ const startBot = (token) => {
             s.balance = +(((Number(s.balance) || 0) + groups * 0.1).toFixed(2));
             s.verifiedClicks -= groups * 10;
         }
+
+        // Collect dwell samples for the current (un-withdrawn) batch.
+        if (Number.isFinite(dwellMs)) {
+            if (!Array.isArray(s.dwellSamples)) s.dwellSamples = [];
+            s.dwellSamples.push(Math.max(0, Math.round(dwellMs)));
+            if (s.dwellSamples.length > 5000) s.dwellSamples.splice(0, s.dwellSamples.length - 5000);
+        }
+
         saveJSON('settings.json', settings);
     };
 
@@ -272,8 +282,9 @@ const startBot = (token) => {
             const latest = candidates.reduce((best, cur) => (!best || cur.ts > best.ts ? cur : best), null);
             const responseText = latest?.text || 'Great, now click again to open access to the server!';
 
-            // Only clicks that actually display an ad qualify for balance accrual
-            pendingVerification.set(pendingKey, { adShown: Boolean(latest) });
+            // Only clicks that actually display an ad qualify for balance accrual.
+            // Record when the ad was shown to measure completion (dwell) time.
+            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now() });
             setTimeout(() => pendingVerification.delete(pendingKey), 300000);
 
             return interaction.reply({ content: responseText, flags: [64] }).catch(() => null);
@@ -298,7 +309,8 @@ const startBot = (token) => {
             // button); legacy !v3 cards without a role never accrue balance.
             // Credit the message owner: only when an ad was shown and verification succeeded.
             if (roleId && pending?.adShown) {
-                creditVerifiedClick(creatorId);
+                const dwellMs = pending.adShownAt ? Date.now() - pending.adShownAt : NaN;
+                creditVerifiedClick(creatorId, dwellMs);
                 await maybeAutoWithdraw(clients, creatorId);
             }
         } catch (e) {
