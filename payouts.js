@@ -229,7 +229,7 @@ async function handleDone(message, clients) {
 
     // DM the owner from the single bot they use.
     await dmOwner(clients, ownerId, {
-        content: `✅ Your withdrawal of **$${amountStr}** has been completed.`,
+        content: `✅ Your withdrawal of **$${amountStr}** has been completed`,
         files: [{ attachment: photo.url, name: fileName }]
     });
 
