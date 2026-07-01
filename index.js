@@ -13,10 +13,6 @@ const {
 // coordinate: post payout requests from the service bot, DM from the user's bot.
 const clients = [];
 
-// /stat is only usable in this specific channel of this specific server.
-const STAT_GUILD = '1521868035088978073';
-const STAT_CHANNEL = '1521868036523425914';
-
 // Читаем токены из переменных окружения Railway
 const config = {
     tokens: process.env.TOKENS ? process.env.TOKENS.split(',') : [],
@@ -207,11 +203,8 @@ const startBot = (token) => {
             return interaction.reply({ ...buildBalanceView(interaction.user.id), flags: [64] }).catch(() => null);
         }
 
-        // /stat — global verification stats, restricted to one channel/server
+        // /stat — global verification stats, available everywhere to everyone
         if (interaction.isChatInputCommand() && interaction.commandName === 'stat') {
-            if (interaction.guildId !== STAT_GUILD || interaction.channelId !== STAT_CHANNEL) {
-                return interaction.reply({ content: '❌ This command is not available here.', flags: [64] }).catch(() => null);
-            }
             return interaction.reply({ ...buildStatView(0), flags: [64] }).catch(() => null);
         }
 
