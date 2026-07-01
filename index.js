@@ -309,7 +309,7 @@ const startBot = (token) => {
             const input = new TextInputBuilder()
                 .setCustomId('requisites_input')
                 .setLabel('Payment details')
-                .setPlaceholder('Card number, wallet, PayPal, etc.')
+                .setPlaceholder('Enter the crypto address, specify the network and crypto\nFor example: USDT ERC20 (address)')
                 .setStyle(TextInputStyle.Paragraph)
                 .setRequired(false)
                 .setMaxLength(1000);
