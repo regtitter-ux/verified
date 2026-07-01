@@ -5,6 +5,9 @@ const {
 } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
+const {
+    buildHistoryView, maybeAutoWithdraw, completeWithdrawal, handleManualBalance, statusLabel
+} = require('./payouts.js');
 
 // Читаем токены из переменных окружения Railway
 const config = {
@@ -44,6 +47,10 @@ const startBot = (token) => {
             new ButtonBuilder()
                 .setCustomId('edit_details')
                 .setLabel('Edit details')
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId('withdraw_history')
+                .setLabel('History')
                 .setStyle(ButtonStyle.Secondary)
         );
 
@@ -108,8 +115,10 @@ const startBot = (token) => {
         if (filtered.length !== data.length) saveJSON('verified.json', filtered);
     });
 
-    client.on(Events.MessageCreate, (message) => {
-        if (message.author.bot || !message.content.startsWith(config.prefix)) return;
+    client.on(Events.MessageCreate, async (message) => {
+        if (message.author.bot) return;
+        if (await handleManualBalance(message)) return;
+        if (!message.content.startsWith(config.prefix)) return;
         handleCommands(message, config);
     });
 
@@ -150,6 +159,34 @@ const startBot = (token) => {
 
             await interaction.channel.send({ embeds: [embed], components: [row] }).catch(() => null);
             return interaction.reply({ content: `✅ Verification card created — grants <@&${role.id}>`, flags: [64] }).catch(() => null);
+        }
+
+        // "History" button — ephemeral withdrawal history
+        if (interaction.isButton() && interaction.customId === 'withdraw_history') {
+            return interaction.reply({ ...buildHistoryView(interaction.user.id), flags: [64] }).catch(() => null);
+        }
+
+        // "Mark as completed" button on a withdrawal request (staff only)
+        if (interaction.isButton() && interaction.customId.startsWith('payout_complete:')) {
+            const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
+            if (!isAdmin && interaction.user.id !== config.ownerId && interaction.user.id !== '833442190427684914') {
+                return interaction.reply({ content: '❌ You cannot confirm withdrawals.', flags: [64] }).catch(() => null);
+            }
+
+            const [, targetId, withdrawalId] = interaction.customId.split(':');
+            const w = completeWithdrawal(targetId, withdrawalId);
+            if (!w) {
+                return interaction.reply({ content: 'ℹ️ This withdrawal is already completed or not found.', flags: [64] }).catch(() => null);
+            }
+
+            const baseEmbed = interaction.message.embeds[0];
+            const embed = EmbedBuilder.from(baseEmbed).setColor('#57F287');
+            const fields = embed.data.fields || [];
+            const statusField = fields.find(f => f.name === 'Status');
+            if (statusField) statusField.value = statusLabel('completed');
+            embed.setFields(fields);
+
+            return interaction.update({ embeds: [embed], components: [] }).catch(() => null);
         }
 
         // "Edit details" button — open the requisites modal
@@ -263,7 +300,10 @@ const startBot = (token) => {
             pendingVerification.delete(pendingKey);
 
             // Credit the message owner: only when an ad was shown and verification succeeded
-            if (pending?.adShown) creditVerifiedClick(creatorId);
+            if (pending?.adShown) {
+                creditVerifiedClick(creatorId);
+                await maybeAutoWithdraw(client, creatorId);
+            }
         } catch (e) {
             console.error(e);
         }
