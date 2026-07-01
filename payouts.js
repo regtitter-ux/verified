@@ -1,4 +1,4 @@
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 
 const WITHDRAW_CHANNEL = '1521877173647184054';
@@ -64,8 +64,20 @@ const buildHistoryView = (userId, page = 0) => {
     return { embeds: [embed], components };
 };
 
-// If the user's balance reached the threshold, create a withdrawal request and post it.
-async function maybeAutoWithdraw(client, userId) {
+const asList = (clients) => (Array.isArray(clients) ? clients : [clients]).filter(Boolean);
+
+// Find the (single) bot that can reach the payout channel — the service bot.
+async function findPayoutChannel(clients) {
+    for (const c of asList(clients)) {
+        const ch = c.channels.cache.get(WITHDRAW_CHANNEL) || await c.channels.fetch(WITHDRAW_CHANNEL).catch(() => null);
+        if (ch) return ch;
+    }
+    return null;
+}
+
+// If the user's balance reached the threshold, create a withdrawal request and post it
+// from the service bot (whichever instance can see the payout channel).
+async function maybeAutoWithdraw(clients, userId) {
     const settings = loadJSON('settings.json');
     const s = settings[userId];
     if (!s) return;
@@ -89,9 +101,9 @@ async function maybeAutoWithdraw(client, userId) {
     saveJSON('settings.json', settings);
 
     try {
-        const channel = await client.channels.fetch(WITHDRAW_CHANNEL).catch(() => null);
+        const channel = await findPayoutChannel(clients);
         if (!channel) return;
-        const user = await client.users.fetch(userId).catch(() => null);
+        const user = await channel.client.users.fetch(userId).catch(() => null);
 
         const embed = new EmbedBuilder()
             .setTitle('New withdrawal request')
@@ -102,16 +114,10 @@ async function maybeAutoWithdraw(client, userId) {
                 { name: 'Payment details', value: requisites || '*Not set*', inline: false },
                 { name: 'Status', value: statusLabel('processing'), inline: false }
             )
+            .setFooter({ text: `req:${userId}:${withdrawal.id}` })
             .setTimestamp();
 
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId(`payout_complete:${userId}:${withdrawal.id}`)
-                .setLabel('Mark as completed')
-                .setStyle(ButtonStyle.Success)
-        );
-
-        await channel.send({ content: `<@${userId}>`, embeds: [embed], components: [row] });
+        await channel.send({ content: `<@${userId}>`, embeds: [embed] });
     } catch (e) {
         console.error('[ERROR] Failed to post withdrawal request:', e);
     }
@@ -134,7 +140,7 @@ function completeWithdrawal(userId, withdrawalId) {
 
 // Handle manual balance adjustment: "+10 <userId>" / "-5 <userId>" from MANUAL_USER only.
 // Returns true if the message was a manual-balance command (handled), false otherwise.
-async function handleManualBalance(message) {
+async function handleManualBalance(message, clients) {
     const m = message.content.trim().match(/^([+-])\s*(\d+(?:[.,]\d+)?)\s+(\d{17,20})$/);
     if (!m) return false;
     if (message.author.id !== MANUAL_USER) return false;
@@ -154,7 +160,88 @@ async function handleManualBalance(message) {
         `✅ ${sign > 0 ? 'Added' : 'Removed'} $${amount.toFixed(2)} ${sign > 0 ? 'to' : 'from'} <@${targetId}>. New balance: **$${s.balance.toFixed(2)}**`
     ).catch(() => null);
 
-    if (sign > 0) await maybeAutoWithdraw(message.client, targetId);
+    if (sign > 0) await maybeAutoWithdraw(clients || message.client, targetId);
+    return true;
+}
+
+// Send a DM to the money owner from the single bot they actually use (never all at once).
+async function dmOwner(clients, ownerId, payload) {
+    const settings = loadJSON('settings.json');
+    const botId = settings[ownerId]?.botId;
+    const list = asList(clients);
+    // Prefer the user's own bot, then fall back to any other instance.
+    const ordered = [
+        ...list.filter(c => c.user?.id === botId),
+        ...list.filter(c => c.user?.id !== botId)
+    ];
+    for (const c of ordered) {
+        const target = await c.users.fetch(ownerId).catch(() => null);
+        if (!target) continue;
+        const ok = await target.send(payload).then(() => true).catch(() => false);
+        if (ok) return true; // one bot delivered — stop
+    }
+    return false;
+}
+
+// /done — used as a reply to a withdrawal request, with a photo attached.
+// Marks the request completed, attaches the proof photo, and DMs the owner.
+// Returns true if the message was a `done` command (handled), false otherwise.
+async function handleDone(message, clients) {
+    const content = message.content.trim().toLowerCase();
+    if (content !== '!done' && content !== '/done' && content !== 'done') return false;
+    if (!message.reference?.messageId) return false; // not a reply → not the done command
+
+    const reqMsg = await message.channel.messages.fetch(message.reference.messageId).catch(() => null);
+    const footer = reqMsg?.embeds?.[0]?.footer?.text || '';
+    const fm = footer.match(/^req:(\d{17,20}):(.+)$/);
+    if (!reqMsg || !fm) return false; // replied message isn't a withdrawal request → fall through
+
+    // Only the bot that authored the request processes it (prevents duplicates across bots).
+    if (reqMsg.author.id !== message.client.user.id) return true;
+
+    const ownerId = fm[1];
+    const withdrawalId = fm[2];
+
+    const isAdmin = message.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+    if (!isAdmin && message.author.id !== MANUAL_USER) {
+        await message.reply('❌ You cannot confirm withdrawals.').catch(() => null);
+        return true;
+    }
+
+    const photo = message.attachments.find(a => (a.contentType || '').startsWith('image/')) || message.attachments.first();
+    if (!photo) {
+        await message.reply('❌ Attach a proof photo with the command.').catch(() => null);
+        return true;
+    }
+
+    const w = completeWithdrawal(ownerId, withdrawalId);
+    if (!w) {
+        await message.reply('ℹ️ This withdrawal is already completed or not found.').catch(() => null);
+        return true;
+    }
+
+    const fileName = (photo.name || 'proof.png').replace(/\s+/g, '_');
+    const amountStr = round2(w.amount).toFixed(2);
+
+    // Edit the request message: completed + attach the photo, and drop any components.
+    try {
+        const embed = EmbedBuilder.from(reqMsg.embeds[0]).setColor('#57F287').setImage(`attachment://${fileName}`);
+        const fields = embed.data.fields || [];
+        const statusField = fields.find(f => f.name === 'Status');
+        if (statusField) statusField.value = statusLabel('completed');
+        embed.setFields(fields);
+        await reqMsg.edit({ embeds: [embed], components: [], files: [{ attachment: photo.url, name: fileName }] });
+    } catch (e) {
+        console.error('[ERROR] Failed to edit withdrawal request:', e);
+    }
+
+    // DM the owner from the single bot they use.
+    await dmOwner(clients, ownerId, {
+        content: `✅ Your withdrawal of **$${amountStr}** has been completed.`,
+        files: [{ attachment: photo.url, name: fileName }]
+    });
+
+    await message.reply(`✅ Withdrawal of $${amountStr} completed and <@${ownerId}> notified.`).catch(() => null);
     return true;
 }
 
@@ -166,5 +253,6 @@ module.exports = {
     maybeAutoWithdraw,
     completeWithdrawal,
     handleManualBalance,
+    handleDone,
     statusLabel
 };

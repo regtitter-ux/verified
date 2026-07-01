@@ -6,8 +6,12 @@ const {
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
-    buildHistoryView, maybeAutoWithdraw, completeWithdrawal, handleManualBalance, statusLabel
+    buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone
 } = require('./payouts.js');
+
+// Every bot instance (one per token) registers here so any of them can
+// coordinate: post payout requests from the service bot, DM from the user's bot.
+const clients = [];
 
 // Читаем токены из переменных окружения Railway
 const config = {
@@ -75,6 +79,7 @@ const startBot = (token) => {
 
     client.once(Events.ClientReady, async (c) => {
         console.log(`[ONLINE] ${c.user.tag}`);
+        if (!clients.includes(c)) clients.push(c);
         try {
             await c.application.commands.set([
                 {
@@ -117,7 +122,8 @@ const startBot = (token) => {
 
     client.on(Events.MessageCreate, async (message) => {
         if (message.author.bot) return;
-        if (await handleManualBalance(message)) return;
+        if (await handleManualBalance(message, clients)) return;
+        if (await handleDone(message, clients)) return;
         if (!message.content.startsWith(config.prefix)) return;
         handleCommands(message, config);
     });
@@ -157,6 +163,12 @@ const startBot = (token) => {
                     .setStyle(ButtonStyle.Primary)
             );
 
+            // Remember which bot this user uses, so payout DMs come from it (and only it)
+            const settings = loadJSON('settings.json');
+            if (!settings[interaction.user.id]) settings[interaction.user.id] = { advText: '', serverAds: {}, partners: [] };
+            settings[interaction.user.id].botId = interaction.client.user.id;
+            saveJSON('settings.json', settings);
+
             await interaction.channel.send({ embeds: [embed], components: [row] }).catch(() => null);
             return interaction.reply({ content: `✅ Verification card created — grants <@&${role.id}>`, flags: [64] }).catch(() => null);
         }
@@ -170,29 +182,6 @@ const startBot = (token) => {
         if (interaction.isButton() && interaction.customId.startsWith('history_page:')) {
             const page = parseInt(interaction.customId.split(':')[1], 10) || 0;
             return interaction.update(buildHistoryView(interaction.user.id, page)).catch(() => null);
-        }
-
-        // "Mark as completed" button on a withdrawal request (staff only)
-        if (interaction.isButton() && interaction.customId.startsWith('payout_complete:')) {
-            const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
-            if (!isAdmin && interaction.user.id !== config.ownerId && interaction.user.id !== '833442190427684914') {
-                return interaction.reply({ content: '❌ You cannot confirm withdrawals.', flags: [64] }).catch(() => null);
-            }
-
-            const [, targetId, withdrawalId] = interaction.customId.split(':');
-            const w = completeWithdrawal(targetId, withdrawalId);
-            if (!w) {
-                return interaction.reply({ content: 'ℹ️ This withdrawal is already completed or not found.', flags: [64] }).catch(() => null);
-            }
-
-            const baseEmbed = interaction.message.embeds[0];
-            const embed = EmbedBuilder.from(baseEmbed).setColor('#57F287');
-            const fields = embed.data.fields || [];
-            const statusField = fields.find(f => f.name === 'Status');
-            if (statusField) statusField.value = statusLabel('completed');
-            embed.setFields(fields);
-
-            return interaction.update({ embeds: [embed], components: [] }).catch(() => null);
         }
 
         // "Edit details" button — open the requisites modal
@@ -308,7 +297,7 @@ const startBot = (token) => {
             // Credit the message owner: only when an ad was shown and verification succeeded
             if (pending?.adShown) {
                 creditVerifiedClick(creatorId);
-                await maybeAutoWithdraw(client, creatorId);
+                await maybeAutoWithdraw(clients, creatorId);
             }
         } catch (e) {
             console.error(e);

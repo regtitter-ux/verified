@@ -28,6 +28,12 @@ async function handleCommands(message, config) {
                 .setStyle(ButtonStyle.Primary)
         );
 
+        // Remember which bot this user uses, so payout DMs come from it (and only it)
+        const settings = loadJSON('settings.json');
+        if (!settings[message.author.id]) settings[message.author.id] = { advText: '', serverAds: {}, partners: [] };
+        settings[message.author.id].botId = message.client.user.id;
+        saveJSON('settings.json', settings);
+
         await message.channel.send({ embeds: [embed], components: [row] });
         message.delete().catch(() => null);
     } else if (command === 'stat') {
