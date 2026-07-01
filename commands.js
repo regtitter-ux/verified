@@ -1,4 +1,4 @@
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField } = require('discord.js');
+const { PermissionsBitField } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 
 async function handleCommands(message, config) {
@@ -9,34 +9,7 @@ async function handleCommands(message, config) {
         return;
     }
 
-    if (command === 'v3') {
-        const icon = message.guild.iconURL({ dynamic: true });
-
-        const embed = new EmbedBuilder()
-            .setAuthor({ name: message.guild.name, iconURL: icon })
-            .setTitle('Get verified!')
-            .setDescription('To gain full access to the server, you must complete verification\nClick the button')
-            .setThumbnail(icon)
-            .setColor('#5865F2')
-            .setFooter({ text: `Created by: ${message.author.id}` });
-
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('start_verif_guild')
-                .setLabel('Start Verification')
-                .setEmoji('🔐')
-                .setStyle(ButtonStyle.Primary)
-        );
-
-        // Remember which bot this user uses, so payout DMs come from it (and only it)
-        const settings = loadJSON('settings.json');
-        if (!settings[message.author.id]) settings[message.author.id] = { advText: '', serverAds: {}, partners: [] };
-        settings[message.author.id].botId = message.client.user.id;
-        saveJSON('settings.json', settings);
-
-        await message.channel.send({ embeds: [embed], components: [row] });
-        message.delete().catch(() => null);
-    } else if (command === 'stat') {
+    if (command === 'stat') {
         const stats = loadJSON('verified.json', []);
         const entries = Array.isArray(stats) ? stats : [];
         const userEntries = entries.filter(u => u.creatorId === message.author.id || message.author.id === config.ownerId);

@@ -41,11 +41,20 @@ const startBot = (token) => {
 
         const embed = new EmbedBuilder()
             .setTitle('Your balance')
-            .setColor('#57F287')
+            .setColor(requisites ? '#57F287' : '#FEE75C')
             .addFields(
                 { name: 'Balance', value: `**$${balance.toFixed(2)}**`, inline: false },
                 { name: 'Payment details', value: requisites || '*Not set*', inline: false }
             );
+
+        // Prominent nudge to add payment details when they're missing
+        if (!requisites) {
+            embed.addFields({
+                name: '​',
+                value: '🔴 **Set your payment details to receive withdrawals — tap “Edit details” below.**',
+                inline: false
+            });
+        }
 
         // Verification stats for this user's own /v3 cards, grouped by server
         const verified = loadJSON('verified.json', []);
@@ -69,7 +78,7 @@ const startBot = (token) => {
             let statText = '';
             for (const gid of shown) statText += `🏰 **${guildName(gid)}**\n${fmtWin(win(grouped[gid]))}\n`;
             if (ids.length > shown.length) statText += `…and ${ids.length - shown.length} more`;
-            embed.addFields({ name: '📊 Your verifications (/v3)', value: statText.slice(0, 1024) });
+            embed.addFields({ name: '📊 Your verifications', value: statText.slice(0, 1024) });
         }
 
         const row = new ActionRowBuilder().addComponents(
@@ -177,7 +186,7 @@ const startBot = (token) => {
                     description: 'Show your balance and payment details'
                 },
                 {
-                    name: 'v3',
+                    name: 'verification',
                     description: 'Create a verification card',
                     options: [
                         {
@@ -242,8 +251,8 @@ const startBot = (token) => {
             return interaction.update(buildStatView(page)).catch(() => null);
         }
 
-        // /v3 — create a verification card bound to a specific role
-        if (interaction.isChatInputCommand() && interaction.commandName === 'v3') {
+        // /verification — create a verification card bound to a specific role
+        if (interaction.isChatInputCommand() && interaction.commandName === 'verification') {
             const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
             if (!isAdmin && interaction.user.id !== config.ownerId) {
                 return interaction.reply({ content: '❌ You need administrator permissions to use this.', flags: [64] }).catch(() => null);
