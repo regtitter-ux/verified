@@ -1,7 +1,7 @@
 const {
     Client, GatewayIntentBits, Events,
     EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-    ModalBuilder, TextInputBuilder, TextInputStyle
+    ModalBuilder, TextInputBuilder, TextInputStyle, PermissionsBitField
 } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
@@ -69,12 +69,26 @@ const startBot = (token) => {
     client.once(Events.ClientReady, async (c) => {
         console.log(`[ONLINE] ${c.user.tag}`);
         try {
-            await c.application.commands.create({
-                name: 'bal',
-                description: 'Show your balance and payment details'
-            });
+            await c.application.commands.set([
+                {
+                    name: 'bal',
+                    description: 'Show your balance and payment details'
+                },
+                {
+                    name: 'v3',
+                    description: 'Create a verification card',
+                    options: [
+                        {
+                            name: 'role',
+                            description: 'Role to grant after passing verification',
+                            type: 8, // ROLE
+                            required: true
+                        }
+                    ]
+                }
+            ]);
         } catch (e) {
-            console.error('[ERROR] Failed to register /bal command:', e);
+            console.error('[ERROR] Failed to register slash commands:', e);
         }
     });
 
@@ -103,6 +117,39 @@ const startBot = (token) => {
         // /bal — ephemeral balance + payment details
         if (interaction.isChatInputCommand() && interaction.commandName === 'bal') {
             return interaction.reply({ ...buildBalanceView(interaction.user.id), flags: [64] }).catch(() => null);
+        }
+
+        // /v3 — create a verification card bound to a specific role
+        if (interaction.isChatInputCommand() && interaction.commandName === 'v3') {
+            const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
+            if (!isAdmin && interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ You need administrator permissions to use this.', flags: [64] }).catch(() => null);
+            }
+
+            const role = interaction.options.getRole('role');
+            if (!role) {
+                return interaction.reply({ content: '❌ Role not found.', flags: [64] }).catch(() => null);
+            }
+
+            const icon = interaction.guild.iconURL({ dynamic: true });
+            const embed = new EmbedBuilder()
+                .setAuthor({ name: interaction.guild.name, iconURL: icon })
+                .setTitle('Get verified!')
+                .setDescription('To gain full access to the server, you must complete verification\nClick the button')
+                .setThumbnail(icon)
+                .setColor('#5865F2')
+                .setFooter({ text: `Created by: ${interaction.user.id}` });
+
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`start_verif_guild:${role.id}`)
+                    .setLabel('Start Verification')
+                    .setEmoji('🔐')
+                    .setStyle(ButtonStyle.Primary)
+            );
+
+            await interaction.channel.send({ embeds: [embed], components: [row] }).catch(() => null);
+            return interaction.reply({ content: `✅ Verification card created — grants <@&${role.id}>`, flags: [64] }).catch(() => null);
         }
 
         // "Edit details" button — open the requisites modal
@@ -138,7 +185,7 @@ const startBot = (token) => {
             return interaction.update(buildBalanceView(interaction.user.id)).catch(() => null);
         }
 
-        if (!interaction.isButton() || interaction.customId !== 'start_verif_guild') return;
+        if (!interaction.isButton() || !interaction.customId.startsWith('start_verif_guild')) return;
 
         const settings = loadJSON('settings.json');
         const verified = loadJSON('verified.json', []);
@@ -147,7 +194,12 @@ const startBot = (token) => {
         const footerText = message.embeds[0]?.footer?.text || '';
         const creatorId = footerText.replace('Created by: ', '').trim();
 
-        const verifiedRole = guild.roles.cache.find(r => r.name === 'Verified');
+        // Card-specific role is encoded in the button id: "start_verif_guild:<roleId>"
+        // Legacy cards without a role fall back to a role named "Verified".
+        const roleId = interaction.customId.includes(':') ? interaction.customId.split(':')[1] : null;
+        const verifiedRole = roleId
+            ? guild.roles.cache.get(roleId)
+            : guild.roles.cache.find(r => r.name === 'Verified');
         const unverifiedRole = guild.roles.cache.find(r => r.name.toLowerCase() === 'unverified');
 
         const isInData = verified.some(u => u.id === user.id && u.guildId === guild.id);
@@ -161,7 +213,7 @@ const startBot = (token) => {
             return interaction.reply({ content: "✅ You're already verified", flags: [64] }).catch(() => null);
         }
 
-        const pendingKey = `${user.id}_${guild.id}`;
+        const pendingKey = `${user.id}_${guild.id}_${roleId || 'v'}`;
 
         if (!pendingVerification.has(pendingKey)) {
             const getAd = (uid) => {
@@ -205,8 +257,8 @@ const startBot = (token) => {
                 await member.roles.remove(unverifiedRole).catch(() => null);
             }
 
-            const updated = verified.filter(u => !(u.id === user.id && u.guildId === guild.id));
-            updated.push({ id: user.id, guildId: guild.id, creatorId, timestamp: Date.now() });
+            const updated = verified.filter(u => !(u.id === user.id && u.guildId === guild.id && (u.roleId || null) === roleId));
+            updated.push({ id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() });
             saveJSON('verified.json', updated);
             pendingVerification.delete(pendingKey);
 
