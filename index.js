@@ -294,8 +294,10 @@ const startBot = (token) => {
             saveJSON('verified.json', updated);
             pendingVerification.delete(pendingKey);
 
-            // Credit the message owner: only when an ad was shown and verification succeeded
-            if (pending?.adShown) {
+            // Monetization applies only to /v3 cards (which encode a roleId in the
+            // button); legacy !v3 cards without a role never accrue balance.
+            // Credit the message owner: only when an ad was shown and verification succeeded.
+            if (roleId && pending?.adShown) {
                 creditVerifiedClick(creatorId);
                 await maybeAutoWithdraw(clients, creatorId);
             }
