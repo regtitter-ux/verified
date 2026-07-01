@@ -33,7 +33,7 @@ const startBot = (token) => {
         const requisites = (s.requisites || '').trim();
 
         const embed = new EmbedBuilder()
-            .setTitle('💰 Your balance')
+            .setTitle('Your balance')
             .setColor('#57F287')
             .addFields(
                 { name: 'Balance', value: `**$${balance.toFixed(2)}**`, inline: false },
@@ -44,7 +44,6 @@ const startBot = (token) => {
             new ButtonBuilder()
                 .setCustomId('edit_details')
                 .setLabel('Edit details')
-                .setEmoji('✏️')
                 .setStyle(ButtonStyle.Secondary)
         );
 
