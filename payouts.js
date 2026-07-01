@@ -233,7 +233,6 @@ async function handleDone(message, clients) {
         files: [{ attachment: photo.url, name: fileName }]
     });
 
-    await message.reply(`✅ Withdrawal of $${amountStr} completed and <@${ownerId}> notified.`).catch(() => null);
     return true;
 }
 
