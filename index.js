@@ -203,8 +203,11 @@ const startBot = (token) => {
             return interaction.reply({ ...buildBalanceView(interaction.user.id), flags: [64] }).catch(() => null);
         }
 
-        // /stat — global verification stats, available everywhere to everyone
+        // /stat — global verification stats, bot owner only (usable anywhere)
         if (interaction.isChatInputCommand() && interaction.commandName === 'stat') {
+            if (interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
+            }
             return interaction.reply({ ...buildStatView(0), flags: [64] }).catch(() => null);
         }
 
