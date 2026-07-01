@@ -161,9 +161,15 @@ const startBot = (token) => {
             return interaction.reply({ content: `✅ Verification card created — grants <@&${role.id}>`, flags: [64] }).catch(() => null);
         }
 
-        // "History" button — ephemeral withdrawal history
+        // "History" button — ephemeral withdrawal history (first page)
         if (interaction.isButton() && interaction.customId === 'withdraw_history') {
-            return interaction.reply({ ...buildHistoryView(interaction.user.id), flags: [64] }).catch(() => null);
+            return interaction.reply({ ...buildHistoryView(interaction.user.id, 0), flags: [64] }).catch(() => null);
+        }
+
+        // History pagination
+        if (interaction.isButton() && interaction.customId.startsWith('history_page:')) {
+            const page = parseInt(interaction.customId.split(':')[1], 10) || 0;
+            return interaction.update(buildHistoryView(interaction.user.id, page)).catch(() => null);
         }
 
         // "Mark as completed" button on a withdrawal request (staff only)

@@ -9,8 +9,11 @@ const round2 = (n) => +(Number(n) || 0).toFixed(2);
 
 const statusLabel = (status) => (status === 'completed' ? 'Completed' : 'In processing');
 
-// Ephemeral withdrawal-history view: title shows total actually withdrawn (completed)
-const buildHistoryView = (userId) => {
+const HISTORY_PAGE_SIZE = 10;
+
+// Ephemeral withdrawal-history view: title shows total actually withdrawn (completed).
+// Paginated at 10 withdrawals per page with prev/next buttons.
+const buildHistoryView = (userId, page = 0) => {
     const settings = loadJSON('settings.json');
     const list = Array.isArray(settings[userId]?.withdrawals) ? settings[userId].withdrawals : [];
 
@@ -18,25 +21,47 @@ const buildHistoryView = (userId) => {
         list.filter(w => w.status === 'completed').reduce((sum, w) => sum + (Number(w.amount) || 0), 0)
     );
 
+    const sorted = [...list].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    const pageCount = Math.max(1, Math.ceil(sorted.length / HISTORY_PAGE_SIZE));
+    const current = Math.min(Math.max(0, page), pageCount - 1);
+
     const embed = new EmbedBuilder()
         .setTitle(`Withdrawal history — $${totalWithdrawn.toFixed(2)} withdrawn`)
         .setColor('#5865F2');
 
-    if (list.length === 0) {
+    if (sorted.length === 0) {
         embed.setDescription('*No withdrawal requests yet.*');
-    } else {
-        const recent = [...list].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 15);
-        for (const w of recent) {
-            const ts = Math.floor((w.createdAt || 0) / 1000);
-            embed.addFields({
-                name: `$${round2(w.amount).toFixed(2)} — ${statusLabel(w.status)}`,
-                value: ts ? `<t:${ts}:f>` : '​',
-                inline: false
-            });
-        }
+        return { embeds: [embed], components: [] };
     }
 
-    return { embeds: [embed] };
+    const slice = sorted.slice(current * HISTORY_PAGE_SIZE, current * HISTORY_PAGE_SIZE + HISTORY_PAGE_SIZE);
+    for (const w of slice) {
+        const ts = Math.floor((w.createdAt || 0) / 1000);
+        embed.addFields({
+            name: `$${round2(w.amount).toFixed(2)} — ${statusLabel(w.status)}`,
+            value: ts ? `<t:${ts}:f>` : '​',
+            inline: false
+        });
+    }
+    embed.setFooter({ text: `Page ${current + 1}/${pageCount}` });
+
+    const components = [];
+    if (pageCount > 1) {
+        components.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`history_page:${current - 1}`)
+                .setLabel('◀ Prev')
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(current === 0),
+            new ButtonBuilder()
+                .setCustomId(`history_page:${current + 1}`)
+                .setLabel('Next ▶')
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(current >= pageCount - 1)
+        ));
+    }
+
+    return { embeds: [embed], components };
 };
 
 // If the user's balance reached the threshold, create a withdrawal request and post it.
