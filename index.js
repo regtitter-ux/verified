@@ -13,6 +13,10 @@ const {
 // coordinate: post payout requests from the service bot, DM from the user's bot.
 const clients = [];
 
+// /stat is only usable in this specific channel of this specific server.
+const STAT_GUILD = '1521868035088978073';
+const STAT_CHANNEL = '1521868036523425914';
+
 // Читаем токены из переменных окружения Railway
 const config = {
     tokens: process.env.TOKENS ? process.env.TOKENS.split(',') : [],
@@ -61,6 +65,61 @@ const startBot = (token) => {
         return { embeds: [embed], components: [row] };
     };
 
+    // Resolve a guild name across all bot instances (verified.json spans every bot).
+    const guildName = (gid) => {
+        for (const c of clients) {
+            const g = c.guilds.cache.get(gid);
+            if (g) return g.name;
+        }
+        return 'Unknown Server';
+    };
+
+    // Global verification stats (only /v3 cards, ads or not), paginated 10 guilds/page.
+    const buildStatView = (page = 0) => {
+        const verified = loadJSON('verified.json', []);
+        const entries = (Array.isArray(verified) ? verified : []).filter(u => u.roleId);
+        const now = Date.now();
+
+        const win = (list) => ({
+            h: list.filter(u => u.timestamp > now - 3600000).length,
+            d: list.filter(u => u.timestamp > now - 86400000).length,
+            w: list.filter(u => u.timestamp > now - 604800000).length,
+            m: list.filter(u => u.timestamp > now - 2592000000).length,
+            t: list.length,
+        });
+        const fmtWin = (v) => `└ Hour: \`${v.h}\` | Day: \`${v.d}\` | 7 Days: \`${v.w}\` | Month: \`${v.m}\` | Total: **${v.t}**`;
+
+        const grouped = {};
+        for (const u of entries) (grouped[u.guildId] ||= []).push(u);
+        const guildIds = Object.keys(grouped).sort((a, b) => grouped[b].length - grouped[a].length);
+
+        const PAGE = 10;
+        const pageCount = Math.max(1, Math.ceil(guildIds.length / PAGE));
+        const cur = Math.min(Math.max(0, page), pageCount - 1);
+
+        let text = '📊 **Verification statistics:**\n\n';
+        text += `🏰 **All servers:**\n${fmtWin(win(entries))}\n\n`;
+
+        if (guildIds.length === 0) {
+            text += '*No verification data yet.*';
+        } else {
+            for (const gid of guildIds.slice(cur * PAGE, cur * PAGE + PAGE)) {
+                text += `🏰 **${guildName(gid)}** (${gid})\n${fmtWin(win(grouped[gid]))}\n\n`;
+            }
+            if (pageCount > 1) text += `Page ${cur + 1}/${pageCount}`;
+        }
+
+        const components = [];
+        if (pageCount > 1) {
+            components.push(new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`stat_page:${cur - 1}`).setLabel('◀ Prev').setStyle(ButtonStyle.Secondary).setDisabled(cur === 0),
+                new ButtonBuilder().setCustomId(`stat_page:${cur + 1}`).setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(cur >= pageCount - 1)
+            ));
+        }
+
+        return { content: text, components };
+    };
+
     // Accrue $0.1 to the message owner for every 10 qualifying verification clicks.
     // dwellMs = time between the ad being shown and the user completing verification;
     // sampled per click so each payout can carry a behaviour summary.
@@ -107,6 +166,10 @@ const startBot = (token) => {
                             required: true
                         }
                     ]
+                },
+                {
+                    name: 'stat',
+                    description: 'Verification statistics'
                 }
             ]);
         } catch (e) {
@@ -142,6 +205,20 @@ const startBot = (token) => {
         // /bal — ephemeral balance + payment details
         if (interaction.isChatInputCommand() && interaction.commandName === 'bal') {
             return interaction.reply({ ...buildBalanceView(interaction.user.id), flags: [64] }).catch(() => null);
+        }
+
+        // /stat — global verification stats, restricted to one channel/server
+        if (interaction.isChatInputCommand() && interaction.commandName === 'stat') {
+            if (interaction.guildId !== STAT_GUILD || interaction.channelId !== STAT_CHANNEL) {
+                return interaction.reply({ content: '❌ This command is not available here.', flags: [64] }).catch(() => null);
+            }
+            return interaction.reply({ ...buildStatView(0), flags: [64] }).catch(() => null);
+        }
+
+        // /stat pagination
+        if (interaction.isButton() && interaction.customId.startsWith('stat_page:')) {
+            const page = parseInt(interaction.customId.split(':')[1], 10) || 0;
+            return interaction.update(buildStatView(page)).catch(() => null);
         }
 
         // /v3 — create a verification card bound to a specific role
