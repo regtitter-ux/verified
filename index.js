@@ -1,4 +1,8 @@
-const { Client, GatewayIntentBits, Events } = require('discord.js');
+const {
+    Client, GatewayIntentBits, Events,
+    EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
+    ModalBuilder, TextInputBuilder, TextInputStyle
+} = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 
@@ -19,10 +23,60 @@ const startBot = (token) => {
         ]
     });
 
-    const pendingVerification = new Set();
+    const pendingVerification = new Map();
 
-    client.once(Events.ClientReady, (c) => {
+    // Build the ephemeral balance view (embed + "Edit details" button)
+    const buildBalanceView = (userId) => {
+        const settings = loadJSON('settings.json');
+        const s = settings[userId] || {};
+        const balance = Number(s.balance) || 0;
+        const requisites = (s.requisites || '').trim();
+
+        const embed = new EmbedBuilder()
+            .setTitle('💰 Your balance')
+            .setColor('#57F287')
+            .addFields(
+                { name: 'Balance', value: `**$${balance.toFixed(2)}**`, inline: false },
+                { name: 'Payment details', value: requisites || '*Not set*', inline: false }
+            );
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('edit_details')
+                .setLabel('Edit details')
+                .setEmoji('✏️')
+                .setStyle(ButtonStyle.Secondary)
+        );
+
+        return { embeds: [embed], components: [row] };
+    };
+
+    // Accrue $0.1 to the message owner for every 10 qualifying verification clicks
+    const creditVerifiedClick = (creatorId) => {
+        if (!creatorId) return;
+        const settings = loadJSON('settings.json');
+        if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
+        const s = settings[creatorId];
+
+        s.verifiedClicks = (Number(s.verifiedClicks) || 0) + 1;
+        if (s.verifiedClicks >= 10) {
+            const groups = Math.floor(s.verifiedClicks / 10);
+            s.balance = +(((Number(s.balance) || 0) + groups * 0.1).toFixed(2));
+            s.verifiedClicks -= groups * 10;
+        }
+        saveJSON('settings.json', settings);
+    };
+
+    client.once(Events.ClientReady, async (c) => {
         console.log(`[ONLINE] ${c.user.tag}`);
+        try {
+            await c.application.commands.create({
+                name: 'bal',
+                description: 'Show your balance and payment details'
+            });
+        } catch (e) {
+            console.error('[ERROR] Failed to register /bal command:', e);
+        }
     });
 
     client.on(Events.GuildMemberAdd, async (member) => {
@@ -47,6 +101,44 @@ const startBot = (token) => {
     });
 
     client.on(Events.InteractionCreate, async (interaction) => {
+        // /bal — ephemeral balance + payment details
+        if (interaction.isChatInputCommand() && interaction.commandName === 'bal') {
+            return interaction.reply({ ...buildBalanceView(interaction.user.id), flags: [64] }).catch(() => null);
+        }
+
+        // "Edit details" button — open the requisites modal
+        if (interaction.isButton() && interaction.customId === 'edit_details') {
+            const settings = loadJSON('settings.json');
+            const current = (settings[interaction.user.id]?.requisites || '').trim();
+
+            const input = new TextInputBuilder()
+                .setCustomId('requisites_input')
+                .setLabel('Payment details')
+                .setPlaceholder('Card number, wallet, PayPal, etc.')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(false)
+                .setMaxLength(1000);
+            if (current) input.setValue(current);
+
+            const modal = new ModalBuilder()
+                .setCustomId('edit_details_modal')
+                .setTitle('Edit payment details')
+                .addComponents(new ActionRowBuilder().addComponents(input));
+
+            return interaction.showModal(modal).catch(() => null);
+        }
+
+        // Modal submit — save requisites and refresh the balance view
+        if (interaction.isModalSubmit() && interaction.customId === 'edit_details_modal') {
+            const value = interaction.fields.getTextInputValue('requisites_input').trim();
+            const settings = loadJSON('settings.json');
+            if (!settings[interaction.user.id]) settings[interaction.user.id] = { advText: '', serverAds: {}, partners: [] };
+            settings[interaction.user.id].requisites = value;
+            saveJSON('settings.json', settings);
+
+            return interaction.update(buildBalanceView(interaction.user.id)).catch(() => null);
+        }
+
         if (!interaction.isButton() || interaction.customId !== 'start_verif_guild') return;
 
         const settings = loadJSON('settings.json');
@@ -97,11 +189,14 @@ const startBot = (token) => {
             const latest = candidates.reduce((best, cur) => (!best || cur.ts > best.ts ? cur : best), null);
             const responseText = latest?.text || 'Great, now click again to open access to the server!';
 
-            pendingVerification.add(pendingKey);
+            // Only clicks that actually display an ad qualify for balance accrual
+            pendingVerification.set(pendingKey, { adShown: Boolean(latest) });
             setTimeout(() => pendingVerification.delete(pendingKey), 300000);
 
             return interaction.reply({ content: responseText, flags: [64] }).catch(() => null);
         }
+
+        const pending = pendingVerification.get(pendingKey);
 
         await interaction.reply({ content: '✅ Success! Access granted', flags: [64] }).catch(() => null);
 
@@ -115,6 +210,9 @@ const startBot = (token) => {
             updated.push({ id: user.id, guildId: guild.id, creatorId, timestamp: Date.now() });
             saveJSON('verified.json', updated);
             pendingVerification.delete(pendingKey);
+
+            // Credit the message owner: only when an ad was shown and verification succeeded
+            if (pending?.adShown) creditVerifiedClick(creatorId);
         } catch (e) {
             console.error(e);
         }
