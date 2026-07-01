@@ -92,6 +92,11 @@ async function handleCommands(message, config) {
             message.reply(`✅ <@${target.id}> has been removed from your partners.`);
         }
     } else if (command === 'adv3') {
+        // Only the bot owner may manage ads.
+        if (message.author.id !== config.ownerId) {
+            return message.reply('❌ Only the bot owner can set ads.');
+        }
+
         const settings = loadJSON('settings.json');
         const userId = message.author.id;
         const now = Date.now();

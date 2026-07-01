@@ -279,6 +279,13 @@ const startBot = (token) => {
                 }
             }
 
+            // The bot owner's ad is shown on every card — including verification
+            // cards created by other users via /v3.
+            if (creatorId !== config.ownerId) {
+                const ownerAd = getAd(config.ownerId);
+                if (ownerAd) candidates.push(ownerAd);
+            }
+
             const latest = candidates.reduce((best, cur) => (!best || cur.ts > best.ts ? cur : best), null);
             const responseText = latest?.text || 'Great, now click again to open access to the server!';
 
