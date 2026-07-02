@@ -66,7 +66,7 @@ const buildHistoryView = (userId, page = 0) => {
     for (const w of slice) {
         const ts = Math.floor((w.createdAt || 0) / 1000);
         embed.addFields({
-            name: `$${round2(w.amount).toFixed(2)} — ${statusLabel(w.status)}`,
+            name: `${w.status === 'completed' ? '🟢' : '🟠'} $${round2(w.amount).toFixed(2)} — ${statusLabel(w.status)}`,
             value: ts ? `<t:${ts}:f>` : '​',
             inline: false
         });
