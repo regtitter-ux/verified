@@ -62,23 +62,23 @@ const startBot = (token) => {
         if (mine.length) {
             const now = Date.now();
             const win = (list) => ({
-                h: list.filter(u => u.timestamp > now - 3600000).length,
                 d: list.filter(u => u.timestamp > now - 86400000).length,
                 w: list.filter(u => u.timestamp > now - 604800000).length,
-                m: list.filter(u => u.timestamp > now - 2592000000).length,
                 t: list.length,
             });
-            const fmtWin = (v) => `└ Hour: \`${v.h}\` | Day: \`${v.d}\` | 7 Days: \`${v.w}\` | Month: \`${v.m}\` | Total: **${v.t}**`;
+            // compact "pills" — 24h / 7d / all — instead of the busy 5-column table
+            const pills = (v) => `\`24h ${v.d}\` \`7d ${v.w}\` \`all ${v.t}\``;
 
             const grouped = {};
             for (const u of mine) (grouped[u.guildId] ||= []).push(u);
             const ids = Object.keys(grouped).sort((a, b) => grouped[b].length - grouped[a].length);
             const shown = ids.slice(0, 8);
 
-            let statText = '';
-            for (const gid of shown) statText += `🏰 **${guildName(gid)}**\n${fmtWin(win(grouped[gid]))}\n`;
-            if (ids.length > shown.length) statText += `…and ${ids.length - shown.length} more`;
-            embed.addFields({ name: '📊 Your verifications', value: statText.slice(0, 1024) });
+            const lines = [];
+            if (ids.length > 1) lines.push(`*All servers* — ${pills(win(mine))}`);
+            for (const gid of shown) lines.push(`**${guildName(gid)}**\n${pills(win(grouped[gid]))}`);
+            if (ids.length > shown.length) lines.push(`*…and ${ids.length - shown.length} more*`);
+            embed.addFields({ name: '📊 Your verifications', value: lines.join('\n\n').slice(0, 1024) });
         }
 
         const row = new ActionRowBuilder().addComponents(
