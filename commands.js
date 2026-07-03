@@ -78,15 +78,8 @@ async function handleCommands(message, config) {
 
         if (/^\d{17,20}$/.test(args[0])) {
             const gid = args.shift();
-            const targetGuild = message.client.guilds.cache.get(gid);
-
-            if (targetGuild) {
-                const memberInTarget = await targetGuild.members.fetch(userId).catch(() => null);
-                if (!memberInTarget || !memberInTarget.permissions.has(PermissionsBitField.Flags.Administrator)) {
-                    return message.reply('❌ You do not have administrator permissions on the specified server.');
-                }
-            }
-
+            // Owner-only command — the owner may set an ad for any server,
+            // including ones where they don't have administrator permissions.
             settings[userId].serverAds[gid] = args.join(' ');
             settings[userId].serverAdsAt ||= {};
             settings[userId].serverAdsAt[gid] = now;
