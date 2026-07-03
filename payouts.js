@@ -4,6 +4,7 @@ const { loadJSON, saveJSON } = require('./database.js');
 const WITHDRAW_CHANNEL = '1521877173647184054';
 const THRESHOLD = 10;                       // auto-withdraw once balance reaches this
 const MANUAL_USER = '833442190427684914';   // only this user may adjust balances manually
+const ADMIN_BOT_ID = process.env.ADMIN_BOT_ID || '1514533989434789998'; // authors payout requests
 
 const round2 = (n) => +(Number(n) || 0).toFixed(2);
 
@@ -121,9 +122,15 @@ const buildHistoryView = (userId, page = 0) => {
 
 const asList = (clients) => (Array.isArray(clients) ? clients : [clients]).filter(Boolean);
 
-// Find the (single) bot that can reach the payout channel — the service bot.
+// Find a bot that can reach the payout channel — prefer the admin bot so it authors
+// the request and can later process the photo/text reply that completes it.
 async function findPayoutChannel(clients) {
-    for (const c of asList(clients)) {
+    const list = asList(clients);
+    const ordered = [
+        ...list.filter(c => c.user?.id === ADMIN_BOT_ID),
+        ...list.filter(c => c.user?.id !== ADMIN_BOT_ID)
+    ];
+    for (const c of ordered) {
         const ch = c.channels.cache.get(WITHDRAW_CHANNEL) || await c.channels.fetch(WITHDRAW_CHANNEL).catch(() => null);
         if (ch) return ch;
     }

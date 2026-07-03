@@ -19,18 +19,25 @@ const clients = [];
 const config = {
     tokens: process.env.TOKENS ? process.env.TOKENS.split(',') : [],
     ownerId: process.env.OWNER_ID || '743913502997086219',
+    adminBotId: process.env.ADMIN_BOT_ID || '1514533989434789998',
     prefix: process.env.PREFIX || '!'
 };
 
+// A bot token encodes its own user id in the first (base64) segment.
+const botIdFromToken = (token) => {
+    try { return Buffer.from(String(token).split('.')[0], 'base64').toString('utf8'); }
+    catch { return ''; }
+};
+
 const startBot = (token) => {
-    const client = new Client({
-        intents: [
-            GatewayIntentBits.Guilds,
-            GatewayIntentBits.GuildMembers,
-            GatewayIntentBits.GuildMessages,
-            GatewayIntentBits.MessageContent
-        ]
-    });
+    // Only the admin bot reads message content (! commands, +/- balance, payout replies).
+    // Every other bot runs on the single non-privileged "Guilds" intent, so tokens you
+    // add later work without requesting privileged intents.
+    const isAdminBot = botIdFromToken(token) === config.adminBotId;
+    const intents = [GatewayIntentBits.Guilds];
+    if (isAdminBot) intents.push(GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent);
+
+    const client = new Client({ intents });
 
     const pendingVerification = new Map();
 
@@ -237,29 +244,17 @@ const startBot = (token) => {
         }
     });
 
-    client.on(Events.GuildMemberAdd, async (member) => {
-        try {
-            const role = member.guild.roles.cache.find(r => r.name.toLowerCase() === 'unverified');
-            if (role?.editable) await member.roles.add(role).catch(() => null);
-        } catch (e) {
-            console.error('[ERROR] Auto-role failed:', e);
-        }
-    });
-
-    client.on(Events.GuildMemberRemove, (member) => {
-        const data = loadJSON('verified.json', []);
-        if (!Array.isArray(data)) return;
-        const filtered = data.filter(u => !(u.id === member.id && u.guildId === member.guild.id));
-        if (filtered.length !== data.length) saveJSON('verified.json', filtered);
-    });
-
-    client.on(Events.MessageCreate, async (message) => {
-        if (message.author.bot) return;
-        if (await handleManualBalance(message, clients)) return;
-        if (await handleDone(message, clients)) return;
-        if (!message.content.startsWith(config.prefix)) return;
-        handleCommands(message, config);
-    });
+    // Admin features (! commands, +/- balance, payout-request replies) live on the
+    // admin bot only — the only instance with the Message Content intent.
+    if (isAdminBot) {
+        client.on(Events.MessageCreate, async (message) => {
+            if (message.author.bot) return;
+            if (await handleManualBalance(message, clients)) return;
+            if (await handleDone(message, clients)) return;
+            if (!message.content.startsWith(config.prefix)) return;
+            handleCommands(message, config);
+        });
+    }
 
     client.on(Events.InteractionCreate, async (interaction) => {
         // /bal — ephemeral balance + payment details (optional id: owner may view others)
