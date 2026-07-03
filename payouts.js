@@ -187,7 +187,8 @@ async function handleManualBalance(message, clients) {
     if (!settings[targetId]) settings[targetId] = { advText: '', serverAds: {}, partners: [] };
     const s = settings[targetId];
 
-    s.balance = Math.max(0, round2((Number(s.balance) || 0) + sign * amount));
+    // Manual adjustments may drive the balance negative (e.g. clawing back an overpayment).
+    s.balance = round2((Number(s.balance) || 0) + sign * amount);
     saveJSON('settings.json', settings);
 
     await message.reply(
