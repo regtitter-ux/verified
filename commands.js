@@ -1,5 +1,6 @@
 const { PermissionsBitField } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
+const { createApiKey } = require('./api.js');
 
 async function handleCommands(message, config) {
     const args = message.content.slice(config.prefix.length).trim().split(/ +/);
@@ -93,6 +94,45 @@ async function handleCommands(message, config) {
             saveJSON('settings.json', settings);
             message.reply('✅ Your global advertisement has been updated!');
         }
+    } else if (command === 'apikey') {
+        // Owner-only: manage partner API keys (each key maps to a user's balance).
+        if (message.author.id !== config.ownerId) {
+            return message.reply('❌ Only the bot owner can manage API keys.');
+        }
+        const keys = loadJSON('apikeys.json');
+        const sub = (args.shift() || '').toLowerCase();
+
+        if (sub === 'new') {
+            const uid = args.shift();
+            if (!/^\d{17,20}$/.test(uid || '')) {
+                return message.reply('❌ Usage: `!apikey new <userId> [name]`');
+            }
+            const name = args.join(' ');
+            const key = createApiKey(uid, name);
+            const dmText =
+                `🔑 **API key** for <@${uid}> (\`${uid}\`)${name ? ` — ${name}` : ''}\n` +
+                `\`\`\`\n${key}\n\`\`\`\n` +
+                `Header: \`Authorization: Bearer ${key}\`\nKeep it secret. Revoke with \`!apikey revoke <key>\`.`;
+            const sent = await message.author.send(dmText).then(() => true).catch(() => false);
+            return message.reply(sent
+                ? '✅ API key created and sent to your DMs.'
+                : `✅ API key created (couldn't DM you):\n\`${key}\``);
+        }
+        if (sub === 'list') {
+            const entries = Object.entries(keys);
+            if (!entries.length) return message.reply('No API keys yet.');
+            const lines = entries.map(([k, v]) =>
+                `• \`${k.slice(0, 6)}…${k.slice(-4)}\` → <@${v.userId}>${v.name ? ` (${v.name})` : ''}`);
+            return message.reply(lines.join('\n').slice(0, 1900));
+        }
+        if (sub === 'revoke') {
+            const k = args.shift();
+            if (!k || !keys[k]) return message.reply('❌ Key not found. Usage: `!apikey revoke <full-key>`');
+            delete keys[k];
+            saveJSON('apikeys.json', keys);
+            return message.reply('✅ API key revoked.');
+        }
+        return message.reply('Usage: `!apikey new <userId> [name]` · `!apikey list` · `!apikey revoke <key>`');
     }
 }
 

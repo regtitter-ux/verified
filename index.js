@@ -9,6 +9,7 @@ const {
     buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone,
     globalBehavior, formatBehavior
 } = require('./payouts.js');
+const { startApiServer } = require('./api.js');
 
 // Every bot instance (one per token) registers here so any of them can
 // coordinate: post payout requests from the service bot, DM from the user's bot.
@@ -561,3 +562,6 @@ if (!Array.isArray(config.tokens) || config.tokens.length === 0) {
 }
 
 config.tokens.forEach(startBot);
+
+// Partner REST API (same balance/verify system). Shares the live `clients` array.
+startApiServer(clients, config);

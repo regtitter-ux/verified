@@ -319,5 +319,7 @@ module.exports = {
     handleDone,
     statusLabel,
     globalBehavior,
-    formatBehavior
+    formatBehavior,
+    summarizeBehavior,
+    BEHAVIOR_ORDER
 };
