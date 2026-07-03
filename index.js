@@ -215,7 +215,7 @@ const startBot = (token) => {
                     ]
                 },
                 {
-                    name: 'verification',
+                    name: 'verify',
                     description: 'Create a verification card',
                     options: [
                         {
@@ -292,7 +292,7 @@ const startBot = (token) => {
         }
 
         // /verification — create a verification card bound to a specific role
-        if (interaction.isChatInputCommand() && interaction.commandName === 'verification') {
+        if (interaction.isChatInputCommand() && interaction.commandName === 'verify') {
             const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
             if (!isAdmin && interaction.user.id !== config.ownerId) {
                 return interaction.reply({ content: '❌ You need administrator permissions to use this.', flags: [64] }).catch(() => null);
