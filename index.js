@@ -6,7 +6,8 @@ const {
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
-    buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone
+    buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone,
+    globalBehavior, formatBehavior
 } = require('./payouts.js');
 
 // Every bot instance (one per token) registers here so any of them can
@@ -145,7 +146,8 @@ const startBot = (token) => {
         const cur = Math.min(Math.max(0, page), pageCount - 1);
 
         let text = '📊 **Verification statistics:**\n\n';
-        text += `🏰 **All servers:**\n${fmtWin(win(entries))}\n\n`;
+        text += `🏰 **All servers:**\n${fmtWin(win(entries))}\n`;
+        text += `⏱️ **Completion time (users) — all servers:**\n${formatBehavior(globalBehavior(loadJSON('settings.json')))}\n`;
 
         if (guildIds.length === 0) {
             text += '*No verification data yet.*';

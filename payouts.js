@@ -37,6 +37,27 @@ function formatBehavior(behavior) {
     return '```\n' + lines.join('\n') + `\nn = ${total}\n` + '```';
 }
 
+// Aggregate the completion-time distribution across ALL users / servers (all-time).
+// Rebuilt from every payout's stored behaviour plus each user's current un-withdrawn samples.
+function globalBehavior(settings) {
+    const buckets = { '1~3s': 0, '4~6s': 0, '7~10s': 0, '+10s': 0 };
+    let total = 0;
+    for (const uid of Object.keys(settings || {})) {
+        const s = settings[uid] || {};
+        for (const w of (Array.isArray(s.withdrawals) ? s.withdrawals : [])) {
+            const b = w.behavior;
+            if (b && b.buckets) {
+                for (const k of BEHAVIOR_ORDER) buckets[k] += Number(b.buckets[k]) || 0;
+                total += Number(b.total) || 0;
+            }
+        }
+        const cur = summarizeBehavior(s.dwellSamples);
+        for (const k of BEHAVIOR_ORDER) buckets[k] += cur.buckets[k];
+        total += cur.total;
+    }
+    return { buckets, total };
+}
+
 const HISTORY_PAGE_SIZE = 10;
 
 // Ephemeral withdrawal-history view: title shows total actually withdrawn (completed).
@@ -280,5 +301,7 @@ module.exports = {
     completeWithdrawal,
     handleManualBalance,
     handleDone,
-    statusLabel
+    statusLabel,
+    globalBehavior,
+    formatBehavior
 };
