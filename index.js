@@ -7,7 +7,7 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
     buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone,
-    globalBehavior, userBehavior, behaviorChartUrl
+    globalBehavior, userBehavior, baselineExcluding, behaviorChartUrl
 } = require('./payouts.js');
 const { startApiServer } = require('./api.js');
 
@@ -67,7 +67,7 @@ const startBot = (token) => {
         if (isOwnerView) {
             embed.addFields({ name: 'Bid', value: `**$${getBid(s).toFixed(2)}** per 100 clicks`, inline: false });
             const beh = userBehavior(settings, userId);
-            const chart = behaviorChartUrl(beh, `Completion time · n=${beh.total}`);
+            const chart = behaviorChartUrl(beh, `Completion time · n=${beh.total}`, baselineExcluding(settings, userId));
             embed.addFields({ name: '⏱️ Completion time (users)', value: beh.total ? `n = ${beh.total}` : '*No data*', inline: false });
             if (chart) embed.setImage(chart);
         }

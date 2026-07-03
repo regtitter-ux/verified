@@ -46,25 +46,58 @@ function formatBehavior(behavior) {
     return '```\n' + lines.join('\n') + `\nn = ${total}\n` + '```';
 }
 
+// How much one distribution differs from another, as a 0..100% score
+// (total variation distance). 0 = identical shape, 100 = completely different.
+function behaviorDeviation(a, b) {
+    if (!a || !a.total || !b || !b.total) return 0;
+    let tvd = 0;
+    for (const k of BEHAVIOR_ORDER) {
+        tvd += Math.abs((a.buckets[k] || 0) / a.total - (b.buckets[k] || 0) / b.total);
+    }
+    return Math.round((tvd / 2) * 100);
+}
+
 // Render the completion-time distribution as a bar-chart image (QuickChart, no local deps).
-// Returns an image URL you can drop into embed.setImage(), or null when there's no data.
-function behaviorChartUrl(behavior, title) {
+// When `baseline` (the average across everyone else) is given, overlays it as a red line
+// and adds a deviation indicator so anomalies (e.g. click-inflation) stand out.
+// Returns an image URL for embed.setImage(), or null when there's no data.
+function behaviorChartUrl(behavior, title, baseline) {
     if (!behavior || !behavior.total) return null;
+    const userCounts = BEHAVIOR_ORDER.map(k => behavior.buckets[k] || 0);
+    const datasets = [{ type: 'bar', label: 'This user', data: userCounts, backgroundColor: '#a020f0' }];
+
+    let subtitle = null;
+    let subtitleColor = '#666';
+    const hasBase = baseline && baseline.total;
+    if (hasBase) {
+        // Average shape scaled to this user's sample size, drawn as a reference line.
+        const expected = BEHAVIOR_ORDER.map(k => +(((baseline.buckets[k] || 0) / baseline.total) * behavior.total).toFixed(2));
+        datasets.push({
+            type: 'line', label: 'Average', data: expected,
+            borderColor: '#ff3b3b', backgroundColor: 'transparent',
+            borderWidth: 2, pointRadius: 3, pointBackgroundColor: '#ff3b3b', fill: false, tension: 0.3
+        });
+        const dev = behaviorDeviation(behavior, baseline);
+        const tag = dev >= 35 ? 'anomalous ⚠' : dev >= 15 ? 'elevated' : 'normal';
+        subtitle = `Deviation from average: ${dev}% · ${tag}`;
+        subtitleColor = dev >= 35 ? '#c0392b' : dev >= 15 ? '#b9770e' : '#3a8a3a';
+    }
+
     const cfg = {
         type: 'bar',
-        data: {
-            labels: BEHAVIOR_ORDER,
-            datasets: [{ data: BEHAVIOR_ORDER.map(k => behavior.buckets[k] || 0), backgroundColor: '#a020f0' }]
-        },
+        data: { labels: BEHAVIOR_ORDER, datasets },
         options: {
             plugins: {
-                legend: { display: false },
-                title: { display: true, text: title || `Completion time · n=${behavior.total}` }
+                legend: { display: hasBase },
+                title: { display: true, text: title || `Completion time · n=${behavior.total}` },
+                subtitle: subtitle
+                    ? { display: true, text: subtitle, color: subtitleColor, font: { size: 13, weight: 'bold' }, padding: { bottom: 6 } }
+                    : { display: false }
             },
             scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
         }
     };
-    return 'https://quickchart.io/chart?v=3&bkg=white&w=560&h=320&c=' + encodeURIComponent(JSON.stringify(cfg));
+    return 'https://quickchart.io/chart?v=3&bkg=white&w=560&h=340&c=' + encodeURIComponent(JSON.stringify(cfg));
 }
 
 // Aggregate the completion-time distribution across ALL users / servers (all-time).
@@ -110,6 +143,15 @@ function userBehavior(settings, userId) {
     for (const k of BEHAVIOR_ORDER) buckets[k] += cur.buckets[k];
     total += cur.total;
     return { buckets, total };
+}
+
+// The "average" to compare one user against: everyone else's distribution combined.
+function baselineExcluding(settings, userId) {
+    const g = globalBehavior(settings);
+    const u = userBehavior(settings, userId);
+    const buckets = {};
+    for (const k of BEHAVIOR_ORDER) buckets[k] = Math.max(0, (g.buckets[k] || 0) - (u.buckets[k] || 0));
+    return { buckets, total: Math.max(0, g.total - u.total) };
 }
 
 const HISTORY_PAGE_SIZE = 10;
@@ -232,7 +274,7 @@ async function maybeAutoWithdraw(clients, userId) {
             .setFooter({ text: `req:${userId}:${withdrawal.id}` })
             .setTimestamp();
 
-        const chart = behaviorChartUrl(behavior, `Completion time · n=${behavior.total}`);
+        const chart = behaviorChartUrl(behavior, `Completion time · n=${behavior.total}`, baselineExcluding(settings, userId));
         if (chart) embed.setImage(chart);
 
         await channel.send({ content: `<@${userId}>`, embeds: [embed] });
@@ -377,6 +419,7 @@ module.exports = {
     statusLabel,
     globalBehavior,
     userBehavior,
+    baselineExcluding,
     formatBehavior,
     behaviorChartUrl,
     summarizeBehavior,
