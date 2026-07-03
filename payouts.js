@@ -10,9 +10,9 @@ const round2 = (n) => +(Number(n) || 0).toFixed(2);
 const statusLabel = (status) => (status === 'completed' ? 'Completed' : 'In processing');
 
 // Bucket the per-click completion (dwell) times of a payout batch.
-const BEHAVIOR_ORDER = ['1~3s', '4~6s', '7~10s', '+10s'];
+const BEHAVIOR_ORDER = ['1~3s', '4~6s', '7~10s', '11~20s', '21~30s', '+31s'];
 function summarizeBehavior(samples) {
-    const buckets = { '1~3s': 0, '4~6s': 0, '7~10s': 0, '+10s': 0 };
+    const buckets = { '1~3s': 0, '4~6s': 0, '7~10s': 0, '11~20s': 0, '21~30s': 0, '+31s': 0 };
     const arr = Array.isArray(samples) ? samples : [];
     for (const raw of arr) {
         const ms = Number(raw);
@@ -20,7 +20,9 @@ function summarizeBehavior(samples) {
         if (ms <= 3000) buckets['1~3s']++;
         else if (ms <= 6000) buckets['4~6s']++;
         else if (ms <= 10000) buckets['7~10s']++;
-        else buckets['+10s']++;
+        else if (ms <= 20000) buckets['11~20s']++;
+        else if (ms <= 30000) buckets['21~30s']++;
+        else buckets['+31s']++;
     }
     return { buckets, total: arr.length };
 }
@@ -32,7 +34,7 @@ function formatBehavior(behavior) {
     const lines = BEHAVIOR_ORDER.map((k) => {
         const c = buckets[k] || 0;
         const pct = Math.round((c / total) * 100);
-        return `${k.padEnd(5)} ${String(pct).padStart(3)}%  (${c})`;
+        return `${k.padEnd(6)} ${String(pct).padStart(3)}%  (${c})`;
     });
     return '```\n' + lines.join('\n') + `\nn = ${total}\n` + '```';
 }
@@ -40,14 +42,18 @@ function formatBehavior(behavior) {
 // Aggregate the completion-time distribution across ALL users / servers (all-time).
 // Rebuilt from every payout's stored behaviour plus each user's current un-withdrawn samples.
 function globalBehavior(settings) {
-    const buckets = { '1~3s': 0, '4~6s': 0, '7~10s': 0, '+10s': 0 };
+    const buckets = { '1~3s': 0, '4~6s': 0, '7~10s': 0, '11~20s': 0, '21~30s': 0, '+31s': 0 };
     let total = 0;
     for (const uid of Object.keys(settings || {})) {
         const s = settings[uid] || {};
         for (const w of (Array.isArray(s.withdrawals) ? s.withdrawals : [])) {
             const b = w.behavior;
             if (b && b.buckets) {
-                for (const k of BEHAVIOR_ORDER) buckets[k] += Number(b.buckets[k]) || 0;
+                for (const [k, v] of Object.entries(b.buckets)) {
+                    // fold the old single "+10s" bucket into the new "+31s" one
+                    const key = buckets[k] !== undefined ? k : (k === '+10s' ? '+31s' : null);
+                    if (key) buckets[key] += Number(v) || 0;
+                }
                 total += Number(b.total) || 0;
             }
         }
@@ -245,9 +251,6 @@ async function dmOwner(clients, ownerId, payload) {
 async function handleDone(message, clients) {
     if (!message.reference?.messageId) return false; // must be a reply
 
-    const photo = message.attachments.find(a => (a.contentType || '').startsWith('image/')) || message.attachments.first();
-    if (!photo) return false; // no photo → not a proof
-
     const reqMsg = await message.channel.messages.fetch(message.reference.messageId).catch(() => null);
     const footer = reqMsg?.embeds?.[0]?.footer?.text || '';
     const fm = footer.match(/^req:(\d{17,20}):(.+)$/);
@@ -262,32 +265,45 @@ async function handleDone(message, clients) {
     const isAdmin = message.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
     if (!isAdmin && message.author.id !== MANUAL_USER) return false; // not staff → ignore
 
+    // Proof can be a photo (screenshot) OR text (e.g. a redeemable check link).
+    const photo = message.attachments.find(a => (a.contentType || '').startsWith('image/')) || message.attachments.first();
+    const proofText = (message.content || '').trim();
+    if (!photo && !proofText) return false; // nothing to attach as proof
+
     const w = completeWithdrawal(ownerId, withdrawalId);
     if (!w) {
         await message.reply('ℹ️ This withdrawal is already completed or not found.').catch(() => null);
         return true;
     }
 
-    const fileName = (photo.name || 'proof.png').replace(/\s+/g, '_');
     const amountStr = round2(w.amount).toFixed(2);
+    const fileName = photo ? (photo.name || 'proof.png').replace(/\s+/g, '_') : null;
 
-    // Edit the request message: completed + attach the photo, and drop any components.
+    // Edit the request message: completed + proof (photo or text), and drop any components.
     try {
-        const embed = EmbedBuilder.from(reqMsg.embeds[0]).setColor('#57F287').setImage(`attachment://${fileName}`);
+        const embed = EmbedBuilder.from(reqMsg.embeds[0]).setColor('#57F287');
         const fields = embed.data.fields || [];
         const statusField = fields.find(f => f.name === 'Status');
         if (statusField) statusField.value = statusLabel('completed');
         embed.setFields(fields);
-        await reqMsg.edit({ embeds: [embed], components: [], files: [{ attachment: photo.url, name: fileName }] });
+
+        let files = [];
+        if (photo) {
+            embed.setImage(`attachment://${fileName}`);
+            files = [{ attachment: photo.url, name: fileName }];
+        } else {
+            embed.addFields({ name: 'Check', value: proofText.slice(0, 1024), inline: false });
+        }
+        await reqMsg.edit({ embeds: [embed], components: [], files });
     } catch (e) {
         console.error('[ERROR] Failed to edit withdrawal request:', e);
     }
 
     // DM the owner from the single bot they use.
-    await dmOwner(clients, ownerId, {
-        content: `✅ Your withdrawal of **$${amountStr}** has been completed`,
-        files: [{ attachment: photo.url, name: fileName }]
-    });
+    const dm = { content: `✅ Your withdrawal of **$${amountStr}** has been completed` };
+    if (photo) dm.files = [{ attachment: photo.url, name: fileName }];
+    else dm.content += `\n${proofText}`;
+    await dmOwner(clients, ownerId, dm);
 
     return true;
 }
