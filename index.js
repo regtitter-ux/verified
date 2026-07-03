@@ -33,22 +33,34 @@ const startBot = (token) => {
     const pendingVerification = new Map();
 
     // Build the ephemeral balance view (embed + "Edit details" button)
-    const buildBalanceView = (userId) => {
+    const getBid = (s) => (Number.isFinite(Number(s?.bid)) ? Number(s.bid) : 1); // $ per 100 clicks (default $1)
+
+    const buildBalanceView = (userId, viewerId = userId) => {
         const settings = loadJSON('settings.json');
         const s = settings[userId] || {};
         const balance = Number(s.balance) || 0;
         const requisites = (s.requisites || '').trim();
+        const isSelf = userId === viewerId;
+        const isOwnerView = viewerId === config.ownerId;
 
         const embed = new EmbedBuilder()
-            .setTitle('Your balance')
-            .setColor(requisites ? '#57F287' : '#FEE75C')
-            .addFields(
-                { name: 'Balance', value: `**$${balance.toFixed(2)}**`, inline: false },
-                { name: 'Payment details', value: requisites || '*Not set*', inline: false }
-            );
+            .setTitle(isSelf ? 'Your balance' : 'User balance')
+            .setColor(requisites ? '#57F287' : '#FEE75C');
 
-        // Prominent nudge to add payment details when they're missing
-        if (!requisites) {
+        if (!isSelf) embed.addFields({ name: 'User', value: `<@${userId}> \`${userId}\``, inline: false });
+
+        embed.addFields(
+            { name: 'Balance', value: `**$${balance.toFixed(2)}**`, inline: false },
+            { name: 'Payment details', value: requisites || '*Not set*', inline: false }
+        );
+
+        // Owner-only: current per-100-clicks rate for this user
+        if (isOwnerView) {
+            embed.addFields({ name: 'Bid', value: `**$${getBid(s).toFixed(2)}** per 100 clicks`, inline: false });
+        }
+
+        // Prominent nudge to add payment details when they're missing (self view only)
+        if (!requisites && isSelf) {
             embed.addFields({
                 name: '​',
                 value: '🔴 **Set your payment details to receive withdrawals — tap “Edit details” below.**',
@@ -78,21 +90,26 @@ const startBot = (token) => {
             let statText = '';
             for (const gid of shown) statText += `🏰 **${guildName(gid)}**\n${fmtWin(win(grouped[gid]))}\n`;
             if (ids.length > shown.length) statText += `…and ${ids.length - shown.length} more`;
-            embed.addFields({ name: '📊 Your verifications', value: statText.slice(0, 1024) });
+            embed.addFields({ name: isSelf ? '📊 Your verifications' : '📊 Verifications', value: statText.slice(0, 1024) });
         }
 
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('edit_details')
-                .setLabel('Edit details')
-                .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-                .setCustomId('withdraw_history')
-                .setLabel('History')
-                .setStyle(ButtonStyle.Secondary)
-        );
+        const components = [];
+        // Self-service buttons only on your own balance
+        if (isSelf) {
+            components.push(new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('edit_details').setLabel('Edit details').setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder().setCustomId('withdraw_history').setLabel('History').setStyle(ButtonStyle.Secondary)
+            ));
+        }
+        // Owner controls (for whichever user is being viewed)
+        if (isOwnerView) {
+            components.push(new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`owner_change_bal:${userId}`).setLabel('Change the balance').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId(`owner_set_bid:${userId}`).setLabel('Bid').setStyle(ButtonStyle.Primary)
+            ));
+        }
 
-        return { embeds: [embed], components: [row] };
+        return { embeds: [embed], components };
     };
 
     // Resolve a guild name across all bot instances (verified.json spans every bot).
@@ -159,10 +176,12 @@ const startBot = (token) => {
         if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
         const s = settings[creatorId];
 
+        // Pay this creator's own rate (bid = $ per 100 clicks, default $1) in 10-click steps.
+        const perTen = getBid(s) / 10;
         s.verifiedClicks = (Number(s.verifiedClicks) || 0) + 1;
         if (s.verifiedClicks >= 10) {
             const groups = Math.floor(s.verifiedClicks / 10);
-            s.balance = +(((Number(s.balance) || 0) + groups * 0.1).toFixed(2));
+            s.balance = +(((Number(s.balance) || 0) + groups * perTen).toFixed(2));
             s.verifiedClicks -= groups * 10;
         }
 
@@ -183,7 +202,15 @@ const startBot = (token) => {
             await c.application.commands.set([
                 {
                     name: 'bal',
-                    description: 'Show your balance and payment details'
+                    description: 'Show your balance and payment details',
+                    options: [
+                        {
+                            name: 'id',
+                            description: 'View another user\'s balance by their ID (bot owner only)',
+                            type: 3, // STRING
+                            required: false
+                        }
+                    ]
                 },
                 {
                     name: 'verification',
@@ -232,9 +259,20 @@ const startBot = (token) => {
     });
 
     client.on(Events.InteractionCreate, async (interaction) => {
-        // /bal — ephemeral balance + payment details
+        // /bal — ephemeral balance + payment details (optional id: owner may view others)
         if (interaction.isChatInputCommand() && interaction.commandName === 'bal') {
-            return interaction.reply({ ...buildBalanceView(interaction.user.id), flags: [64] }).catch(() => null);
+            const idParam = (interaction.options.getString('id') || '').trim();
+            let targetId = interaction.user.id;
+            if (idParam) {
+                if (interaction.user.id !== config.ownerId) {
+                    return interaction.reply({ content: '❌ Only the bot owner can view other users\' balances.', flags: [64] }).catch(() => null);
+                }
+                if (!/^\d{17,20}$/.test(idParam)) {
+                    return interaction.reply({ content: '❌ Invalid user ID.', flags: [64] }).catch(() => null);
+                }
+                targetId = idParam;
+            }
+            return interaction.reply({ ...buildBalanceView(targetId, interaction.user.id), flags: [64] }).catch(() => null);
         }
 
         // /stat — global verification stats, bot owner only (usable anywhere)
@@ -332,6 +370,84 @@ const startBot = (token) => {
             saveJSON('settings.json', settings);
 
             return interaction.update(buildBalanceView(interaction.user.id)).catch(() => null);
+        }
+
+        // Owner: "Change the balance" button — open modal (amount with +/- prefix)
+        if (interaction.isButton() && interaction.customId.startsWith('owner_change_bal:')) {
+            if (interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
+            }
+            const targetId = interaction.customId.split(':')[1];
+            const input = new TextInputBuilder()
+                .setCustomId('change_bal_input')
+                .setLabel('Amount (with + or - in front)')
+                .setPlaceholder('e.g. +100 or -50')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true)
+                .setMaxLength(20);
+            const modal = new ModalBuilder()
+                .setCustomId(`change_bal_modal:${targetId}`)
+                .setTitle('Change the balance')
+                .addComponents(new ActionRowBuilder().addComponents(input));
+            return interaction.showModal(modal).catch(() => null);
+        }
+
+        // Owner: "Bid" button — open modal (rate in $ per 100 clicks)
+        if (interaction.isButton() && interaction.customId.startsWith('owner_set_bid:')) {
+            if (interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
+            }
+            const targetId = interaction.customId.split(':')[1];
+            const settings = loadJSON('settings.json');
+            const input = new TextInputBuilder()
+                .setCustomId('bid_input')
+                .setLabel('Bid — $ per 100 clicks')
+                .setPlaceholder('e.g. 1 or 1.5')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true)
+                .setMaxLength(12)
+                .setValue(String(getBid(settings[targetId] || {})));
+            const modal = new ModalBuilder()
+                .setCustomId(`set_bid_modal:${targetId}`)
+                .setTitle('Set bid (per 100 clicks)')
+                .addComponents(new ActionRowBuilder().addComponents(input));
+            return interaction.showModal(modal).catch(() => null);
+        }
+
+        // Owner: apply balance change from modal
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('change_bal_modal:')) {
+            if (interaction.user.id !== config.ownerId) return;
+            const targetId = interaction.customId.split(':')[1];
+            const raw = interaction.fields.getTextInputValue('change_bal_input').trim();
+            const m = raw.match(/^([+-])\s*(\d+(?:[.,]\d+)?)$/);
+            if (!m) {
+                return interaction.reply({ content: '❌ Enter a number with + or - in front, e.g. `+100` or `-50`.', flags: [64] }).catch(() => null);
+            }
+            const sign = m[1] === '-' ? -1 : 1;
+            const amount = Number(m[2].replace(',', '.'));
+            const settings = loadJSON('settings.json');
+            if (!settings[targetId]) settings[targetId] = { advText: '', serverAds: {}, partners: [] };
+            settings[targetId].balance = +(((Number(settings[targetId].balance) || 0) + sign * amount).toFixed(2));
+            saveJSON('settings.json', settings);
+
+            if (sign > 0) await maybeAutoWithdraw(clients, targetId).catch(() => null);
+            return interaction.update(buildBalanceView(targetId, interaction.user.id)).catch(() => null);
+        }
+
+        // Owner: set this user's bid from modal
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('set_bid_modal:')) {
+            if (interaction.user.id !== config.ownerId) return;
+            const targetId = interaction.customId.split(':')[1];
+            const raw = interaction.fields.getTextInputValue('bid_input').trim().replace(',', '.');
+            const bid = Number(raw);
+            if (!Number.isFinite(bid) || bid < 0) {
+                return interaction.reply({ content: '❌ Enter a valid number, e.g. `1` or `1.5`.', flags: [64] }).catch(() => null);
+            }
+            const settings = loadJSON('settings.json');
+            if (!settings[targetId]) settings[targetId] = { advText: '', serverAds: {}, partners: [] };
+            settings[targetId].bid = +bid.toFixed(4);
+            saveJSON('settings.json', settings);
+            return interaction.update(buildBalanceView(targetId, interaction.user.id)).catch(() => null);
         }
 
         if (!interaction.isButton() || !interaction.customId.startsWith('start_verif_guild')) return;
