@@ -7,7 +7,7 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
     buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone,
-    globalBehavior, formatBehavior
+    globalBehavior, userBehavior, behaviorChartUrl
 } = require('./payouts.js');
 const { startApiServer } = require('./api.js');
 
@@ -63,9 +63,13 @@ const startBot = (token) => {
             { name: 'Payment details', value: requisites || '*Not set*', inline: false }
         );
 
-        // Owner-only: current per-100-clicks rate for this user
+        // Owner-only: current per-100-clicks rate + this user's completion-time chart
         if (isOwnerView) {
             embed.addFields({ name: 'Bid', value: `**$${getBid(s).toFixed(2)}** per 100 clicks`, inline: false });
+            const beh = userBehavior(settings, userId);
+            const chart = behaviorChartUrl(beh, `Completion time · n=${beh.total}`);
+            embed.addFields({ name: '⏱️ Completion time (users)', value: beh.total ? `n = ${beh.total}` : '*No data*', inline: false });
+            if (chart) embed.setImage(chart);
         }
 
         // Prominent nudge to add payment details when they're missing (self view only)
@@ -155,7 +159,6 @@ const startBot = (token) => {
 
         let text = '📊 **Verification statistics:**\n\n';
         text += `🏰 **All servers:**\n${fmtWin(win(entries))}\n`;
-        text += `⏱️ **Completion time (users) — all servers:**\n${formatBehavior(globalBehavior(loadJSON('settings.json')))}\n`;
 
         if (guildIds.length === 0) {
             text += '*No verification data yet.*';
@@ -174,7 +177,14 @@ const startBot = (token) => {
             ));
         }
 
-        return { content: text, components };
+        // Global completion-time distribution as a bar-chart image.
+        const gb = globalBehavior(loadJSON('settings.json'));
+        const gbChart = behaviorChartUrl(gb, `Completion time · all servers · n=${gb.total}`);
+        const embeds = gbChart
+            ? [new EmbedBuilder().setColor('#a020f0').setTitle('⏱️ Completion time (users)').setImage(gbChart)]
+            : [];
+
+        return { content: text, embeds, components };
     };
 
     // Accrue $0.1 to the message owner for every 10 qualifying verification clicks.

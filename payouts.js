@@ -11,9 +11,12 @@ const round2 = (n) => +(Number(n) || 0).toFixed(2);
 const statusLabel = (status) => (status === 'completed' ? 'Completed' : 'In processing');
 
 // Bucket the per-click completion (dwell) times of a payout batch.
-const BEHAVIOR_ORDER = ['1~3s', '4~6s', '7~10s', '11~20s', '21~30s', '+31s'];
+const BEHAVIOR_ORDER = ['1~3s', '4~6s', '7~10s', '11~20s', '21~30s', '31~40s', '41~50s', '51~60s', '+1m'];
+// Map removed/legacy buckets from older stored payouts onto the current ones.
+const LEGACY_BUCKET = { '+10s': '11~20s', '+31s': '31~40s' };
+const newBuckets = () => BEHAVIOR_ORDER.reduce((o, k) => (o[k] = 0, o), {});
 function summarizeBehavior(samples) {
-    const buckets = { '1~3s': 0, '4~6s': 0, '7~10s': 0, '11~20s': 0, '21~30s': 0, '+31s': 0 };
+    const buckets = newBuckets();
     const arr = Array.isArray(samples) ? samples : [];
     for (const raw of arr) {
         const ms = Number(raw);
@@ -23,7 +26,10 @@ function summarizeBehavior(samples) {
         else if (ms <= 10000) buckets['7~10s']++;
         else if (ms <= 20000) buckets['11~20s']++;
         else if (ms <= 30000) buckets['21~30s']++;
-        else buckets['+31s']++;
+        else if (ms <= 40000) buckets['31~40s']++;
+        else if (ms <= 50000) buckets['41~50s']++;
+        else if (ms <= 60000) buckets['51~60s']++;
+        else buckets['+1m']++;
     }
     return { buckets, total: arr.length };
 }
@@ -40,10 +46,31 @@ function formatBehavior(behavior) {
     return '```\n' + lines.join('\n') + `\nn = ${total}\n` + '```';
 }
 
+// Render the completion-time distribution as a bar-chart image (QuickChart, no local deps).
+// Returns an image URL you can drop into embed.setImage(), or null when there's no data.
+function behaviorChartUrl(behavior, title) {
+    if (!behavior || !behavior.total) return null;
+    const cfg = {
+        type: 'bar',
+        data: {
+            labels: BEHAVIOR_ORDER,
+            datasets: [{ data: BEHAVIOR_ORDER.map(k => behavior.buckets[k] || 0), backgroundColor: '#a020f0' }]
+        },
+        options: {
+            plugins: {
+                legend: { display: false },
+                title: { display: true, text: title || `Completion time · n=${behavior.total}` }
+            },
+            scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+        }
+    };
+    return 'https://quickchart.io/chart?v=3&bkg=white&w=560&h=320&c=' + encodeURIComponent(JSON.stringify(cfg));
+}
+
 // Aggregate the completion-time distribution across ALL users / servers (all-time).
 // Rebuilt from every payout's stored behaviour plus each user's current un-withdrawn samples.
 function globalBehavior(settings) {
-    const buckets = { '1~3s': 0, '4~6s': 0, '7~10s': 0, '11~20s': 0, '21~30s': 0, '+31s': 0 };
+    const buckets = newBuckets();
     let total = 0;
     for (const uid of Object.keys(settings || {})) {
         const s = settings[uid] || {};
@@ -51,8 +78,7 @@ function globalBehavior(settings) {
             const b = w.behavior;
             if (b && b.buckets) {
                 for (const [k, v] of Object.entries(b.buckets)) {
-                    // fold the old single "+10s" bucket into the new "+31s" one
-                    const key = buckets[k] !== undefined ? k : (k === '+10s' ? '+31s' : null);
+                    const key = buckets[k] !== undefined ? k : (LEGACY_BUCKET[k] || null);
                     if (key) buckets[key] += Number(v) || 0;
                 }
                 total += Number(b.total) || 0;
@@ -62,6 +88,27 @@ function globalBehavior(settings) {
         for (const k of BEHAVIOR_ORDER) buckets[k] += cur.buckets[k];
         total += cur.total;
     }
+    return { buckets, total };
+}
+
+// Completion-time distribution for a single user (their payouts + current samples).
+function userBehavior(settings, userId) {
+    const s = (settings || {})[userId] || {};
+    const buckets = newBuckets();
+    let total = 0;
+    for (const w of (Array.isArray(s.withdrawals) ? s.withdrawals : [])) {
+        const b = w.behavior;
+        if (b && b.buckets) {
+            for (const [k, v] of Object.entries(b.buckets)) {
+                const key = buckets[k] !== undefined ? k : (LEGACY_BUCKET[k] || null);
+                if (key) buckets[key] += Number(v) || 0;
+            }
+            total += Number(b.total) || 0;
+        }
+    }
+    const cur = summarizeBehavior(s.dwellSamples);
+    for (const k of BEHAVIOR_ORDER) buckets[k] += cur.buckets[k];
+    total += cur.total;
     return { buckets, total };
 }
 
@@ -179,11 +226,14 @@ async function maybeAutoWithdraw(clients, userId) {
                 { name: 'User', value: `<@${userId}>${user ? ` (${user.tag})` : ''}`, inline: false },
                 { name: 'Amount', value: `$${amount.toFixed(2)}`, inline: false },
                 { name: 'Payment details', value: requisites || '*Not set*', inline: false },
-                { name: 'Completion time (users)', value: formatBehavior(behavior), inline: false },
+                { name: 'Completion time (users)', value: behavior.total ? `n = ${behavior.total}` : '*No data*', inline: false },
                 { name: 'Status', value: statusLabel('processing'), inline: false }
             )
             .setFooter({ text: `req:${userId}:${withdrawal.id}` })
             .setTimestamp();
+
+        const chart = behaviorChartUrl(behavior, `Completion time · n=${behavior.total}`);
+        if (chart) embed.setImage(chart);
 
         await channel.send({ content: `<@${userId}>`, embeds: [embed] });
     } catch (e) {
@@ -326,7 +376,9 @@ module.exports = {
     handleDone,
     statusLabel,
     globalBehavior,
+    userBehavior,
     formatBehavior,
+    behaviorChartUrl,
     summarizeBehavior,
     BEHAVIOR_ORDER
 };

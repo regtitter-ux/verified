@@ -7,7 +7,7 @@
 const http = require('http');
 const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
-const { maybeAutoWithdraw, summarizeBehavior, BEHAVIOR_ORDER } = require('./payouts.js');
+const { maybeAutoWithdraw, userBehavior } = require('./payouts.js');
 
 const getBid = (s) => (Number.isFinite(Number(s?.bid)) ? Number(s.bid) : 1); // $ per 100 clicks
 const money = (n) => +(Number(n) || 0).toFixed(2);
@@ -76,27 +76,6 @@ function userStats(userId) {
     return { total: win(mine), perGuild };
 }
 
-// Completion-time distribution for one user (past payouts + current samples).
-function userBehavior(userId) {
-    const s = loadJSON('settings.json')[userId] || {};
-    const buckets = {};
-    BEHAVIOR_ORDER.forEach(k => (buckets[k] = 0));
-    let total = 0;
-    for (const w of (Array.isArray(s.withdrawals) ? s.withdrawals : [])) {
-        const b = w.behavior;
-        if (b && b.buckets) {
-            for (const [k, v] of Object.entries(b.buckets)) {
-                const key = buckets[k] !== undefined ? k : (k === '+10s' ? '+31s' : null);
-                if (key) buckets[key] += Number(v) || 0;
-            }
-            total += Number(b.total) || 0;
-        }
-    }
-    const cur = summarizeBehavior(s.dwellSamples);
-    for (const k of BEHAVIOR_ORDER) buckets[k] += cur.buckets[k] || 0;
-    total += cur.total;
-    return { buckets, total };
-}
 
 const DOCS = {
     name: 'Verification API',
@@ -197,7 +176,7 @@ function startApiServer(clients, config) {
             }
 
             if (p === '/api/stats' && req.method === 'GET') {
-                return send(res, 200, { verifications: userStats(userId), completionTime: userBehavior(userId) });
+                return send(res, 200, { verifications: userStats(userId), completionTime: userBehavior(loadJSON('settings.json'), userId) });
             }
 
             if (p === '/api/withdrawals' && req.method === 'GET') {
