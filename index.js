@@ -8,12 +8,12 @@ const { handleCommands } = require('./commands.js');
 const {
     buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone
 } = require('./payouts.js');
-const { startApiServer } = require('./api.js');
+const { startApiServer, createApiKey } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep } = require('./joincheck.js');
-const { getTemplate, setTemplate } = require('./adtemplate.js');
+const { getTemplate, setTemplate, applyTemplate } = require('./adtemplate.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
-const { enabled: cryptoPayEnabled } = require('./cryptopay.js');
+const cryptopay = require('./cryptopay.js');
 
 // Every bot instance (one per token) registers here so any of them can
 // coordinate: post payout requests from the service bot, DM from the user's bot.
@@ -80,7 +80,7 @@ const startBot = (token) => {
             const autoOn = Boolean(s.autoPayout);
             embed.addFields({
                 name: 'Auto-payout (USDT check)',
-                value: `${autoOn ? '🟢 On' : '⚪ Off'}${cryptoPayEnabled() ? '' : ' · *Crypto Pay not configured*'}`,
+                value: `${autoOn ? '🟢 On' : '⚪ Off'}${cryptopay.enabled() ? '' : ' · *Crypto Pay not configured*'}`,
                 inline: false
             });
         }
@@ -300,6 +300,55 @@ const startBot = (token) => {
                         }
                     ]
                 });
+                // Slash versions of the text (!) admin commands.
+                const adminPerm = PermissionsBitField.Flags.Administrator.toString();
+                commands.push(
+                    {
+                        name: 'partner',
+                        description: 'Add or remove a partner (their ads show on your cards)',
+                        default_member_permissions: adminPerm,
+                        options: [{ name: 'user', description: 'Partner to add/remove', type: 6, required: true }] // USER
+                    },
+                    {
+                        name: 'ad',
+                        description: 'Set your verification ad (a link fills the {link} template; text is used as-is)',
+                        default_member_permissions: adminPerm,
+                        options: [
+                            { name: 'text', description: 'Sponsor link or full ad text', type: 3, required: true },
+                            { name: 'server', description: 'Server ID (optional) — ad only for that server', type: 3, required: false }
+                        ]
+                    },
+                    {
+                        name: 'apikey',
+                        description: 'Manage partner API keys',
+                        default_member_permissions: adminPerm,
+                        options: [
+                            {
+                                name: 'new', description: 'Create a key for a user', type: 1, // SUB_COMMAND
+                                options: [
+                                    { name: 'user', description: 'User whose balance the key credits', type: 6, required: true },
+                                    { name: 'name', description: 'Label for the key', type: 3, required: false }
+                                ]
+                            },
+                            { name: 'list', description: 'List existing API keys', type: 1 },
+                            {
+                                name: 'revoke', description: 'Revoke an API key', type: 1,
+                                options: [{ name: 'key', description: 'Full key to revoke', type: 3, required: true }]
+                            }
+                        ]
+                    },
+                    {
+                        name: 'cryptobalance',
+                        description: 'Show the Crypto Pay app balance (funds available for payouts)',
+                        default_member_permissions: adminPerm
+                    },
+                    {
+                        name: 'cryptofund',
+                        description: 'Create a USDT invoice to top up the Crypto Pay app balance',
+                        default_member_permissions: adminPerm,
+                        options: [{ name: 'amount', description: 'USDT amount', type: 10, required: true }] // NUMBER
+                    }
+                );
             }
             await c.application.commands.set(commands);
         } catch (e) {
@@ -384,6 +433,140 @@ const startBot = (token) => {
             const where = gid ? `server \`${gid}\`` : 'all servers (default)';
             return interaction.reply({
                 content: `✅ Ad text for ${where} saved.\nNow \`!adv3 ${gid ? gid + ' ' : ''}<link>\` fills the link into \`{link}\`.`,
+                flags: [64]
+            }).catch(() => null);
+        }
+
+        // /partner — add/remove a partner (slash version of !part). Admin or owner.
+        if (interaction.isChatInputCommand() && interaction.commandName === 'partner') {
+            const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
+            if (!isAdmin && interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ You need administrator permissions to use this.', flags: [64] }).catch(() => null);
+            }
+            const target = interaction.options.getUser('user');
+            if (!target) return interaction.reply({ content: '❌ User not found.', flags: [64] }).catch(() => null);
+            if (target.id === interaction.user.id) return interaction.reply({ content: '❌ You cannot add yourself as a partner.', flags: [64] }).catch(() => null);
+            const settings = loadJSON('settings.json');
+            const uid = interaction.user.id;
+            if (!settings[uid]) settings[uid] = { advText: '', serverAds: {}, partners: [] };
+            if (!Array.isArray(settings[uid].partners)) settings[uid].partners = [];
+            const idx = settings[uid].partners.indexOf(target.id);
+            let msg;
+            if (idx === -1) { settings[uid].partners.push(target.id); msg = `✅ <@${target.id}> has been added as your partner.`; }
+            else { settings[uid].partners.splice(idx, 1); msg = `✅ <@${target.id}> has been removed from your partners.`; }
+            saveJSON('settings.json', settings);
+            return interaction.reply({ content: msg, flags: [64] }).catch(() => null);
+        }
+
+        // /ad — set your ad (slash version of !adv3). Owner-only.
+        if (interaction.isChatInputCommand() && interaction.commandName === 'ad') {
+            if (interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ Only the bot owner can set ads.', flags: [64] }).catch(() => null);
+            }
+            const gid = (interaction.options.getString('server') || '').trim();
+            if (gid && !/^\d{17,20}$/.test(gid)) {
+                return interaction.reply({ content: '❌ Invalid server ID.', flags: [64] }).catch(() => null);
+            }
+            const text = interaction.options.getString('text') || '';
+            const settings = loadJSON('settings.json');
+            const uid = interaction.user.id;
+            const now = Date.now();
+            if (!settings[uid]) settings[uid] = { advText: '', serverAds: {}, partners: [] };
+            const finalText = applyTemplate(gid || null, text);
+            const preview = finalText ? `\n\`\`\`\n${finalText.slice(0, 500)}\n\`\`\`` : '';
+            if (gid) {
+                settings[uid].serverAds[gid] = finalText;
+                settings[uid].serverAdsAt ||= {};
+                settings[uid].serverAdsAt[gid] = now;
+                saveJSON('settings.json', settings);
+                return interaction.reply({ content: `✅ Ad for server \`${gid}\` has been updated!${preview}`, flags: [64] }).catch(() => null);
+            }
+            settings[uid].advText = finalText;
+            settings[uid].advTextAt = now;
+            settings[uid].serverAds = {};
+            settings[uid].serverAdsAt = {};
+            saveJSON('settings.json', settings);
+            return interaction.reply({ content: `✅ Your global advertisement has been updated!${preview}`, flags: [64] }).catch(() => null);
+        }
+
+        // /apikey new|list|revoke — slash version of !apikey. Owner-only.
+        if (interaction.isChatInputCommand() && interaction.commandName === 'apikey') {
+            if (interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ Only the bot owner can manage API keys.', flags: [64] }).catch(() => null);
+            }
+            const sub = interaction.options.getSubcommand();
+            if (sub === 'new') {
+                const target = interaction.options.getUser('user');
+                const name = interaction.options.getString('name') || '';
+                const key = createApiKey(target.id, name);
+                const dmText =
+                    `🔑 **API key** for <@${target.id}> (\`${target.id}\`)${name ? ` — ${name}` : ''}\n` +
+                    `\`\`\`\n${key}\n\`\`\`\n` +
+                    `Header: \`Authorization: Bearer ${key}\`\nKeep it secret. Revoke with \`/apikey revoke\`.`;
+                const sent = await interaction.user.send(dmText).then(() => true).catch(() => false);
+                return interaction.reply({ content: sent ? '✅ API key created and sent to your DMs.' : `✅ API key created (couldn't DM you):\n\`${key}\``, flags: [64] }).catch(() => null);
+            }
+            if (sub === 'list') {
+                const keys = loadJSON('apikeys.json');
+                const entries = Object.entries(keys);
+                if (!entries.length) return interaction.reply({ content: 'No API keys yet.', flags: [64] }).catch(() => null);
+                const lines = entries.map(([k, v]) => `• \`${k.slice(0, 6)}…${k.slice(-4)}\` → <@${v.userId}>${v.name ? ` (${v.name})` : ''}`);
+                return interaction.reply({ content: lines.join('\n').slice(0, 1900), flags: [64] }).catch(() => null);
+            }
+            if (sub === 'revoke') {
+                const keys = loadJSON('apikeys.json');
+                const k = interaction.options.getString('key');
+                if (!k || !keys[k]) return interaction.reply({ content: '❌ Key not found.', flags: [64] }).catch(() => null);
+                delete keys[k];
+                saveJSON('apikeys.json', keys);
+                return interaction.reply({ content: '✅ API key revoked.', flags: [64] }).catch(() => null);
+            }
+        }
+
+        // /cryptobalance — slash version. Owner-only.
+        if (interaction.isChatInputCommand() && interaction.commandName === 'cryptobalance') {
+            if (interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
+            }
+            if (!cryptopay.enabled()) {
+                return interaction.reply({ content: '⚠️ Crypto Pay is not configured. Set the `CRYPTO_PAY_TOKEN` environment variable.', flags: [64] }).catch(() => null);
+            }
+            const net = cryptopay.HOST === 'pay.crypt.bot' ? 'mainnet' : 'testnet';
+            const bal = await cryptopay.call('getBalance').catch((e) => ({ __err: e.message }));
+            if (!Array.isArray(bal)) {
+                let hint = '';
+                if (/unauthor/i.test(bal?.__err || '')) {
+                    hint = `\nThe token was rejected — make sure \`CRYPTO_PAY_TOKEN\` matches the network (currently **${net}**) and has no extra spaces.`;
+                }
+                return interaction.reply({ content: `❌ Couldn't fetch balance${bal?.__err ? ` (${bal.__err})` : ''}.${hint}`, flags: [64] }).catch(() => null);
+            }
+            const nonZero = bal.filter((b) => Number(b.available) > 0 || Number(b.onhold) > 0);
+            const rows = (nonZero.length ? nonZero : bal).map((b) => {
+                const onhold = Number(b.onhold) > 0 ? ` (on hold: ${b.onhold})` : '';
+                return `• **${b.currency_code}**: \`${b.available}\`${onhold}`;
+            });
+            return interaction.reply({ content: `💰 **Crypto Pay app balance** (${net}):\n${rows.join('\n') || '*empty*'}`, flags: [64] }).catch(() => null);
+        }
+
+        // /cryptofund — slash version. Owner-only.
+        if (interaction.isChatInputCommand() && interaction.commandName === 'cryptofund') {
+            if (interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
+            }
+            if (!cryptopay.enabled()) {
+                return interaction.reply({ content: '⚠️ Crypto Pay is not configured. Set the `CRYPTO_PAY_TOKEN` environment variable.', flags: [64] }).catch(() => null);
+            }
+            const n = Number(interaction.options.getNumber('amount'));
+            if (!Number.isFinite(n) || n <= 0) {
+                return interaction.reply({ content: '❌ Enter a valid amount, e.g. `50`.', flags: [64] }).catch(() => null);
+            }
+            const inv = await cryptopay.createUsdtInvoice(n.toFixed(2)).catch((e) => ({ __err: e.message }));
+            const url = inv && (inv.bot_invoice_url || inv.mini_app_invoice_url || inv.pay_url);
+            if (!url) {
+                return interaction.reply({ content: `❌ Couldn't create invoice${inv?.__err ? ` (${inv.__err})` : ''}.`, flags: [64] }).catch(() => null);
+            }
+            return interaction.reply({
+                content: `🧾 Pay this invoice from your @CryptoBot **wallet** to top up the app balance (a ~3% fee applies):\n${url}\nAfter paying, verify with \`/cryptobalance\`.`,
                 flags: [64]
             }).catch(() => null);
         }
