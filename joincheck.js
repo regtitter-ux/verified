@@ -13,6 +13,7 @@
 // `guild.members.fetch(id)` needs no privileged gateway intent, so every public
 // bot stays intent-free (no Server Members intent required anywhere).
 const { loadJSON, saveJSON } = require('./database.js');
+const { logFunds } = require('./fundslog.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -85,7 +86,7 @@ async function isMember(bot, guildId, userId) {
 // Credit the card owner for one confirmed join (at their join-check rate) and
 // remember the payout — plus the granted role — so both can be reversed if the
 // user later leaves the sponsor server.
-function creditJoin(creatorId, guildId, userId, cardGuildId, roleId) {
+function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId) {
     const settings = loadJSON('settings.json');
     if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
     const s = settings[creatorId];
@@ -97,10 +98,11 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId) {
     const arr = Array.isArray(list) ? list : [];
     arr.push({
         id: newId(), userId, guildId, creatorId, amount: perJoin,
-        cardGuildId: cardGuildId || null, roleId: roleId || null,
+        cardGuildId: cardGuildId || null, roleId: roleId || null, channelId: channelId || null,
         ts: Date.now(), status: 'joined'
     });
     saveJSON('joinlinks.json', arr);
+    return perJoin;
 }
 
 // Periodic reconciliation: for every still-joined record, re-check membership via
@@ -138,6 +140,12 @@ async function sweepOnce(clients) {
         rec.status = 'left';
         rec.leftAt = Date.now();
         changed = true;
+
+        await logFunds(clients, {
+            type: 'debit', creatorId: rec.creatorId, userId: rec.userId,
+            guildId: rec.cardGuildId, channelId: rec.channelId, amount: rec.amount,
+            reason: 'Clawback — user left sponsor server'
+        });
 
         // Undo the verification itself: strip the granted role and drop the verified
         // record, so leaving the sponsor server fully reverses the verification.

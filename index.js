@@ -11,6 +11,7 @@ const {
 const { startApiServer } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep } = require('./joincheck.js');
 const { getTemplate, setTemplate } = require('./adtemplate.js');
+const { logFunds } = require('./fundslog.js');
 
 // Every bot instance (one per token) registers here so any of them can
 // coordinate: post payout requests from the service bot, DM from the user's bot.
@@ -196,6 +197,7 @@ const startBot = (token) => {
         }
 
         saveJSON('settings.json', settings);
+        return getBid(s) / 100; // this verification's worth ($ bid / 100 clicks)
     };
 
     client.once(Events.ClientReady, async (c) => {
@@ -639,12 +641,21 @@ const startBot = (token) => {
             // button); legacy !v3 cards without a role never accrue balance.
             // Credit the message owner: only when an ad was shown and verification succeeded.
             if (roleId && pending?.adShown) {
+                const channelId = message.channelId; // channel the verification card lives in
                 if (sponsor) {
                     // Confirmed member of the sponsor server: pay the join-check rate,
                     // reversible on leave (role + payout), see joincheck.js.
-                    creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId);
+                    const amount = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId);
+                    await logFunds(clients, {
+                        type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
+                        amount, reason: 'Join verified'
+                    });
                 } else {
-                    creditVerifiedClick(creatorId);
+                    const amount = creditVerifiedClick(creatorId);
+                    await logFunds(clients, {
+                        type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
+                        amount, reason: 'Verification'
+                    });
                 }
                 await maybeAutoWithdraw(clients, creatorId);
             }
