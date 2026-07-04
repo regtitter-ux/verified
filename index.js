@@ -13,6 +13,7 @@ const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheck
 const { getTemplate, setTemplate } = require('./adtemplate.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
+const { enabled: cryptoPayEnabled } = require('./cryptopay.js');
 
 // Every bot instance (one per token) registers here so any of them can
 // coordinate: post payout requests from the service bot, DM from the user's bot.
@@ -74,6 +75,12 @@ const startBot = (token) => {
             embed.addFields({
                 name: `Referrals (${refs.length})`,
                 value: refs.length ? refs.map((id) => `<@${id}>`).join(' ').slice(0, 1024) : '*None*',
+                inline: false
+            });
+            const autoOn = Boolean(s.autoPayout);
+            embed.addFields({
+                name: 'Auto-payout (USDT check)',
+                value: `${autoOn ? '🟢 On' : '⚪ Off'}${cryptoPayEnabled() ? '' : ' · *Crypto Pay not configured*'}`,
                 inline: false
             });
         }
@@ -145,7 +152,11 @@ const startBot = (token) => {
                 new ButtonBuilder().setCustomId(`owner_change_bal:${userId}`).setLabel('Change the balance').setStyle(ButtonStyle.Primary),
                 new ButtonBuilder().setCustomId(`owner_set_bid:${userId}`).setLabel('Bid').setStyle(ButtonStyle.Primary),
                 new ButtonBuilder().setCustomId(`owner_set_joinbid:${userId}`).setLabel('Bid extra').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId(`owner_referrals:${userId}`).setLabel('Referrals').setStyle(ButtonStyle.Secondary)
+                new ButtonBuilder().setCustomId(`owner_referrals:${userId}`).setLabel('Referrals').setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId(`owner_toggle_autopay:${userId}`)
+                    .setLabel(s.autoPayout ? 'Auto-payout: On' : 'Auto-payout: Off')
+                    .setStyle(s.autoPayout ? ButtonStyle.Success : ButtonStyle.Secondary)
             ));
         }
 
@@ -614,6 +625,19 @@ const startBot = (token) => {
                 .setTitle('Referrals (10% of their withdrawals)')
                 .addComponents(new ActionRowBuilder().addComponents(input));
             return interaction.showModal(modal).catch(() => null);
+        }
+
+        // Owner: toggle fully-automatic USDT-check payouts for this user
+        if (interaction.isButton() && interaction.customId.startsWith('owner_toggle_autopay:')) {
+            if (interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
+            }
+            const targetId = interaction.customId.split(':')[1];
+            const settings = loadJSON('settings.json');
+            if (!settings[targetId]) settings[targetId] = { advText: '', serverAds: {}, partners: [] };
+            settings[targetId].autoPayout = !settings[targetId].autoPayout;
+            saveJSON('settings.json', settings);
+            return interaction.update(buildBalanceView(targetId, interaction.user.id)).catch(() => null);
         }
 
         // Owner: apply balance change from modal

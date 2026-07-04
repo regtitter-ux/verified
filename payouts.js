@@ -2,6 +2,7 @@ const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsB
 const { loadJSON, saveJSON } = require('./database.js');
 const { logFunds } = require('./fundslog.js');
 const { REFERRAL_RATE } = require('./referral.js'); // referrer earns 10% of each referred user's withdrawal
+const cryptopay = require('./cryptopay.js');
 
 const WITHDRAW_CHANNEL = '1521877173647184054';
 const THRESHOLD = 10;                       // auto-withdraw once balance reaches this
@@ -123,6 +124,17 @@ async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
     if (balance < THRESHOLD) return;
 
     const amount = balance;
+
+    // Fully-automatic USDT payout — only for users the owner opted in (s.autoPayout)
+    // and only when Crypto Pay is configured. Reserve the balance atomically first
+    // (set 0 + save, before any await) so a concurrent trigger can't double-pay.
+    if (cryptopay.enabled() && s.autoPayout) {
+        s.balance = 0;
+        saveJSON('settings.json', settings);
+        return autoPayViaCheck(clients, userId, amount, _seen);
+    }
+
+    // ---- Manual flow: file a request for staff to complete ----
     const requisites = (s.requisites || '').trim();
 
     s.balance = 0;
@@ -160,6 +172,91 @@ async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
         await channel.send({ content: `<@${userId}>`, embeds: [embed] });
     } catch (e) {
         console.error('[ERROR] Failed to post withdrawal request:', e);
+    }
+}
+
+// Put a reserved amount back on the user's balance (payout failed/deferred).
+function refundReserved(userId, amount) {
+    const settings = loadJSON('settings.json');
+    if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
+    settings[userId].balance = round2((Number(settings[userId].balance) || 0) + amount);
+    saveJSON('settings.json', settings);
+}
+
+// Notify the money owner that a payout was deferred — throttled to once per 6h so a
+// persistently under-funded app doesn't DM-spam on every new credit.
+async function alertPayoutDeferred(clients, userId, amount, why) {
+    const settings = loadJSON('settings.json');
+    const now = Date.now();
+    if (settings[userId] && settings[userId]._payoutAlertAt && now - settings[userId]._payoutAlertAt < 6 * 3600000) return;
+    if (settings[userId]) { settings[userId]._payoutAlertAt = now; saveJSON('settings.json', settings); }
+    await dmOwner(clients, userId, {
+        content: `⚠️ Your auto-payout of **$${amount.toFixed(2)} USDT** is delayed: ${why}. It will retry automatically on your next earnings.`
+    }).catch(() => null);
+    console.error(`[CRYPTOPAY] payout deferred for ${userId}: ${why}`);
+}
+
+// The balance was already reserved (set to 0). Issue a USDT check and deliver the
+// claim link to the user; on any failure, refund the reservation so it retries later.
+async function autoPayViaCheck(clients, userId, amount, _seen) {
+    // Make sure the app actually has the funds before issuing the check.
+    const available = await cryptopay.usdtAvailable().catch(() => null);
+    if (available === null) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'Crypto Pay is unreachable'); }
+    if (available < amount) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, `insufficient app USDT balance (have $${round2(available).toFixed(2)})`); }
+
+    let check;
+    try {
+        check = await cryptopay.createUsdtCheck(amount);
+    } catch (e) {
+        refundReserved(userId, amount);
+        return alertPayoutDeferred(clients, userId, amount, `check creation failed (${e.message})`);
+    }
+
+    // Record the completed withdrawal.
+    const settings = loadJSON('settings.json');
+    if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
+    if (!Array.isArray(settings[userId].withdrawals)) settings[userId].withdrawals = [];
+    const withdrawal = {
+        id: `${userId}-${Date.now()}`,
+        amount,
+        status: 'completed',
+        method: 'cryptopay_check',
+        checkId: check.check_id,
+        createdAt: Date.now(),
+        completedAt: Date.now()
+    };
+    settings[userId].withdrawals.push(withdrawal);
+    saveJSON('settings.json', settings);
+
+    // Referral: pay whoever referred this user 10% of the (now completed) withdrawal.
+    payReferral(clients, userId, amount, _seen);
+
+    // Deliver the claim link privately to the user (this IS the payout).
+    const url = check.bot_check_url || `https://t.me/${cryptopay.HOST === 'pay.crypt.bot' ? 'CryptoBot' : 'CryptoTestnetBot'}?start=check_${check.check_id}`;
+    await dmOwner(clients, userId, {
+        content: `✅ Your withdrawal of **$${amount.toFixed(2)} USDT** is ready.\nClaim it in @CryptoBot: ${url}`
+    }).catch(() => null);
+
+    // Audit record in the payout channel — WITHOUT the claim link (that goes only to the user).
+    try {
+        const channel = await findPayoutChannel(clients);
+        if (channel) {
+            const user = await channel.client.users.fetch(userId).catch(() => null);
+            const embed = new EmbedBuilder()
+                .setTitle('Withdrawal auto-paid (USDT check)')
+                .setColor('#57F287')
+                .addFields(
+                    { name: 'User', value: `<@${userId}>${user ? ` (${user.tag})` : ''}`, inline: false },
+                    { name: 'Amount', value: `$${amount.toFixed(2)}`, inline: false },
+                    { name: 'Check ID', value: `\`${check.check_id}\``, inline: false },
+                    { name: 'Status', value: statusLabel('completed'), inline: false }
+                )
+                .setFooter({ text: `auto:${userId}:${withdrawal.id}` })
+                .setTimestamp();
+            await channel.send({ embeds: [embed] });
+        }
+    } catch (e) {
+        console.error('[CRYPTOPAY] audit post failed:', e.message);
     }
 }
 
