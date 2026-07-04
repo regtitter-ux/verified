@@ -184,8 +184,19 @@ const startBot = (token) => {
         const pageCount = Math.max(1, Math.ceil(guildIds.length / PAGE));
         const cur = Math.min(Math.max(0, page), pageCount - 1);
 
+        // Financial load: total sum currently sitting on every user's balance (net of debts).
+        const allSettings = loadJSON('settings.json');
+        let outstanding = 0, withBalance = 0;
+        for (const uid of Object.keys(allSettings || {})) {
+            const b = Number(allSettings[uid]?.balance) || 0;
+            outstanding += b;
+            if (b > 0) withBalance++;
+        }
+        outstanding = +outstanding.toFixed(2);
+
         let text = '**Verification statistics:**\n\n';
         text += `**All servers:**\n${fmtWin(win(entries))}\n\n`;
+        text += `**Outstanding balances:** \`$${outstanding.toFixed(2)}\` across ${withBalance} accounts\n\n`;
 
         if (guildIds.length === 0) {
             text += '*No verification data yet.*';
