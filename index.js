@@ -219,7 +219,7 @@ const startBot = (token) => {
         console.log(`[ONLINE] ${c.user.tag}`);
         if (!clients.includes(c)) clients.push(c);
         try {
-            await c.application.commands.set([
+            const commands = [
                 {
                     name: 'bal',
                     description: 'Show your balance and payment details',
@@ -243,12 +243,17 @@ const startBot = (token) => {
                             required: true
                         }
                     ]
-                },
-                {
+                }
+            ];
+            // /stat (global stats, owner-only) lives on the admin bot only —
+            // public bots don't expose it to avoid confusing their users.
+            if (isAdminBot) {
+                commands.push({
                     name: 'stat',
                     description: 'Verification statistics'
-                }
-            ]);
+                });
+            }
+            await c.application.commands.set(commands);
         } catch (e) {
             console.error('[ERROR] Failed to register slash commands:', e);
         }
