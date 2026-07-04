@@ -14,9 +14,15 @@
 // bot stays intent-free (no Server Members intent required anywhere).
 const { loadJSON, saveJSON } = require('./database.js');
 
-const JOIN_BID = 5;               // $ per 100 successful (joined) verifications
-const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join
+const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
+const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
 const round2 = (n) => +((Number(n) || 0).toFixed(2));
+
+// Per-user join-check rate ($ per 100 joins), overridable via "Bid extra" in /bal.
+const getJoinBid = (s) => {
+    const v = Number(s?.joinBid);
+    return Number.isFinite(v) && v >= 0 ? v : JOIN_BID;
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
@@ -76,13 +82,15 @@ async function isMember(bot, guildId, userId) {
     }
 }
 
-// Credit the card owner for one confirmed join (at $5/100) and remember the
-// payout so it can be reversed if the user later leaves the sponsor server.
-function creditJoin(creatorId, guildId, userId, dwellMs) {
+// Credit the card owner for one confirmed join (at their join-check rate) and
+// remember the payout — plus the granted role — so both can be reversed if the
+// user later leaves the sponsor server.
+function creditJoin(creatorId, guildId, userId, dwellMs, cardGuildId, roleId) {
     const settings = loadJSON('settings.json');
     if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
     const s = settings[creatorId];
-    s.balance = round2((Number(s.balance) || 0) + PER_JOIN);
+    const perJoin = round2(getJoinBid(s) / 100);
+    s.balance = round2((Number(s.balance) || 0) + perJoin);
     if (Number.isFinite(dwellMs)) {
         if (!Array.isArray(s.dwellSamples)) s.dwellSamples = [];
         s.dwellSamples.push(Math.max(0, Math.round(dwellMs)));
@@ -92,7 +100,11 @@ function creditJoin(creatorId, guildId, userId, dwellMs) {
 
     const list = loadJSON('joinlinks.json', []);
     const arr = Array.isArray(list) ? list : [];
-    arr.push({ id: newId(), userId, guildId, creatorId, amount: PER_JOIN, ts: Date.now(), status: 'joined' });
+    arr.push({
+        id: newId(), userId, guildId, creatorId, amount: perJoin,
+        cardGuildId: cardGuildId || null, roleId: roleId || null,
+        ts: Date.now(), status: 'joined'
+    });
     saveJSON('joinlinks.json', arr);
 }
 
@@ -117,21 +129,41 @@ async function sweepOnce(clients) {
     // Re-load fresh so records added during the sweep aren't clobbered.
     const list = loadJSON('joinlinks.json', []);
     const settings = loadJSON('settings.json');
-    let changed = false;
+    let verified = loadJSON('verified.json', []);
+    if (!Array.isArray(verified)) verified = [];
+    let changed = false, verifiedChanged = false;
+
     for (const rec of Array.isArray(list) ? list : []) {
-        if (rec.status === 'joined' && leavers.has(rec.id)) {
-            if (settings[rec.creatorId]) {
-                settings[rec.creatorId].balance = round2((Number(settings[rec.creatorId].balance) || 0) - rec.amount);
+        if (rec.status !== 'joined' || !leavers.has(rec.id)) continue;
+
+        // Reverse the payout (balance may go negative, like manual edits).
+        if (settings[rec.creatorId]) {
+            settings[rec.creatorId].balance = round2((Number(settings[rec.creatorId].balance) || 0) - rec.amount);
+        }
+        rec.status = 'left';
+        rec.leftAt = Date.now();
+        changed = true;
+
+        // Undo the verification itself: strip the granted role and drop the verified
+        // record, so leaving the sponsor server fully reverses the verification.
+        if (rec.cardGuildId && rec.roleId) {
+            const cardBot = clients.find((c) => c.guilds.cache.has(rec.cardGuildId));
+            const g = cardBot?.guilds.cache.get(rec.cardGuildId);
+            if (g) {
+                const m = await g.members.fetch(rec.userId).catch(() => null);
+                if (m && m.roles.cache.has(rec.roleId)) await m.roles.remove(rec.roleId).catch(() => null);
             }
-            rec.status = 'left';
-            rec.leftAt = Date.now();
-            changed = true;
+            const before = verified.length;
+            verified = verified.filter((u) => !(u.id === rec.userId && u.guildId === rec.cardGuildId && (u.roleId || null) === rec.roleId));
+            if (verified.length !== before) verifiedChanged = true;
         }
     }
+
     if (changed) {
         saveJSON('settings.json', settings);
         saveJSON('joinlinks.json', list);
     }
+    if (verifiedChanged) saveJSON('verified.json', verified);
 }
 
 function startJoinCheckSweep(clients) {
@@ -143,7 +175,7 @@ function startJoinCheckSweep(clients) {
 }
 
 module.exports = {
-    JOIN_BID, PER_JOIN,
+    JOIN_BID, PER_JOIN, getJoinBid,
     extractInviteCodes, resolveSponsorPresence, isMember,
     creditJoin, sweepOnce, startJoinCheckSweep
 };

@@ -10,7 +10,7 @@ const {
     globalBehavior, userBehavior, baselineExcluding, behaviorChartUrl
 } = require('./payouts.js');
 const { startApiServer } = require('./api.js');
-const { resolveSponsorPresence, isMember, creditJoin, startJoinCheckSweep } = require('./joincheck.js');
+const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep } = require('./joincheck.js');
 const { getTemplate, setTemplate } = require('./adtemplate.js');
 
 // Every bot instance (one per token) registers here so any of them can
@@ -68,6 +68,7 @@ const startBot = (token) => {
         // Owner-only: current per-100-clicks rate + this user's completion-time chart
         if (isOwnerView) {
             embed.addFields({ name: 'Bid', value: `**$${getBid(s).toFixed(2)}** per 100 clicks`, inline: false });
+            embed.addFields({ name: 'Bid extra (join check)', value: `**$${getJoinBid(s).toFixed(2)}** per 100 joins`, inline: false });
             const beh = userBehavior(settings, userId);
             const chart = behaviorChartUrl(beh, `Completion time · n=${beh.total}`, baselineExcluding(settings, userId));
             embed.addFields({ name: 'Completion time (users)', value: beh.total ? `n = ${beh.total}` : '*No data*', inline: false });
@@ -120,7 +121,8 @@ const startBot = (token) => {
         if (isOwnerView) {
             components.push(new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId(`owner_change_bal:${userId}`).setLabel('Change the balance').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId(`owner_set_bid:${userId}`).setLabel('Bid').setStyle(ButtonStyle.Primary)
+                new ButtonBuilder().setCustomId(`owner_set_bid:${userId}`).setLabel('Bid').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId(`owner_set_joinbid:${userId}`).setLabel('Bid extra').setStyle(ButtonStyle.Primary)
             ));
         }
 
@@ -480,6 +482,28 @@ const startBot = (token) => {
             return interaction.showModal(modal).catch(() => null);
         }
 
+        // Owner: "Bid extra" button — join-check rate ($ per 100 confirmed joins)
+        if (interaction.isButton() && interaction.customId.startsWith('owner_set_joinbid:')) {
+            if (interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
+            }
+            const targetId = interaction.customId.split(':')[1];
+            const settings = loadJSON('settings.json');
+            const input = new TextInputBuilder()
+                .setCustomId('joinbid_input')
+                .setLabel('Bid extra — $ per 100 joins')
+                .setPlaceholder('e.g. 5 or 7.5')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true)
+                .setMaxLength(12)
+                .setValue(String(getJoinBid(settings[targetId] || {})));
+            const modal = new ModalBuilder()
+                .setCustomId(`joinbid_modal:${targetId}`)
+                .setTitle('Bid extra (join check)')
+                .addComponents(new ActionRowBuilder().addComponents(input));
+            return interaction.showModal(modal).catch(() => null);
+        }
+
         // Owner: apply balance change from modal
         if (interaction.isModalSubmit() && interaction.customId.startsWith('change_bal_modal:')) {
             if (interaction.user.id !== config.ownerId) return;
@@ -512,6 +536,22 @@ const startBot = (token) => {
             const settings = loadJSON('settings.json');
             if (!settings[targetId]) settings[targetId] = { advText: '', serverAds: {}, partners: [] };
             settings[targetId].bid = +bid.toFixed(4);
+            saveJSON('settings.json', settings);
+            return interaction.update(buildBalanceView(targetId, interaction.user.id)).catch(() => null);
+        }
+
+        // Owner: set this user's join-check rate from modal
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('joinbid_modal:')) {
+            if (interaction.user.id !== config.ownerId) return;
+            const targetId = interaction.customId.split(':')[1];
+            const raw = interaction.fields.getTextInputValue('joinbid_input').trim().replace(',', '.');
+            const bid = Number(raw);
+            if (!Number.isFinite(bid) || bid < 0) {
+                return interaction.reply({ content: '❌ Enter a valid number, e.g. `5` or `7.5`.', flags: [64] }).catch(() => null);
+            }
+            const settings = loadJSON('settings.json');
+            if (!settings[targetId]) settings[targetId] = { advText: '', serverAds: {}, partners: [] };
+            settings[targetId].joinBid = +bid.toFixed(4);
             saveJSON('settings.json', settings);
             return interaction.update(buildBalanceView(targetId, interaction.user.id)).catch(() => null);
         }
@@ -624,8 +664,9 @@ const startBot = (token) => {
             if (roleId && pending?.adShown) {
                 const dwellMs = pending.adShownAt ? Date.now() - pending.adShownAt : NaN;
                 if (sponsor) {
-                    // Confirmed member of the sponsor server: pay $5/100, reversible on leave.
-                    creditJoin(creatorId, sponsor.guildId, user.id, dwellMs);
+                    // Confirmed member of the sponsor server: pay the join-check rate,
+                    // reversible on leave (role + payout), see joincheck.js.
+                    creditJoin(creatorId, sponsor.guildId, user.id, dwellMs, guild.id, roleId);
                 } else {
                     creditVerifiedClick(creatorId, dwellMs);
                 }
