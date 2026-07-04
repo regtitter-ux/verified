@@ -922,6 +922,18 @@ const startBot = (token) => {
 
         if (!interaction.isButton() || !interaction.customId.startsWith('start_verif_guild')) return;
 
+        // If the bot has been removed from (or never joined) the guild the card
+        // was posted in, Discord still routes button clicks here — but
+        // `interaction.guild` and `interaction.member` are null, so any
+        // `guild.roles.cache…` below would throw before we can reply, and the
+        // user sees the generic "Interaction failed". Fail cleanly instead.
+        if (!interaction.guild || !interaction.member) {
+            return interaction.reply({
+                content: '❌ Бот больше не находится на этом сервере или не может видеть его участников. Обратись к администратору сервера — надо переинвайтить бота с правами `Manage Roles` и `Send Messages`.',
+                flags: [64]
+            }).catch(() => null);
+        }
+
         const settings = loadJSON('settings.json');
         const verified = loadJSON('verified.json', []);
         const { user, guild, member, message } = interaction;
