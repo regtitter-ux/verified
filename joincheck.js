@@ -15,6 +15,7 @@
 const { loadJSON, saveJSON } = require('./database.js');
 const { logFunds } = require('./fundslog.js');
 const { boostedRate, REFERRAL_RATE } = require('./referral.js');
+const { syncHubMember } = require('./hubrole.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -186,6 +187,19 @@ async function finalizeLeavers(clients, leaverIds) {
         saveJSON('joinlinks.json', list);
     }
     if (verifiedChanged) saveJSON('verified.json', verified);
+
+    // Removed verified.json entries may have taken a user below "has any
+    // active verification" — hub-role reconciliation runs after the save so
+    // it reads the fresh state.
+    if (verifiedChanged) {
+        const touched = new Set();
+        for (const rec of Array.isArray(list) ? list : []) {
+            if (idSet.has(rec.id) && rec.userId) touched.add(rec.userId);
+        }
+        for (const uid of touched) {
+            await syncHubMember(clients, uid).catch(() => null);
+        }
+    }
 }
 
 // Periodic reconciliation: for every still-joined record, re-check membership via

@@ -10,6 +10,7 @@ const {
 } = require('./payouts.js');
 const { startApiServer, createApiKey } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave } = require('./joincheck.js');
+const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
@@ -1025,6 +1026,11 @@ const startBot = (token) => {
             saveJSON('verified.json', updated);
             pendingVerification.delete(pendingKey);
 
+            // The user now has an active verification anywhere in the network
+            // — grant the hub-guild role via the admin bot (no-op if they're
+            // not on the hub or the admin bot isn't available).
+            syncHubMember(clients, user.id).catch(() => null);
+
             // Monetization applies only to /v3 cards (which encode a roleId in the
             // button); legacy !v3 cards without a role never accrue balance.
             // Credit the message owner: only when an ad was shown and verification succeeded.
@@ -1069,3 +1075,7 @@ startApiServer(clients, config);
 
 // Join-check reconciliation: reverse payouts when users leave the sponsor server.
 startJoinCheckSweep(clients);
+
+// Hub-role reconciliation: grant HUB_ROLE_ID on HUB_GUILD_ID to every user
+// with an active verification, revoke from anyone without one.
+startHubRoleSync(clients);
