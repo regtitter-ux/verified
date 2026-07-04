@@ -393,6 +393,68 @@ async function handleAdmin(req, res, path, clients, config) {
         }, cors);
     }
 
+    // Balance-settings CRUD — one route per field so the frontend can PUT
+    // just what changed. Balance credits also poke maybeAutoWithdraw so
+    // crossing the payout threshold triggers a check immediately (same
+    // behavior as the /bal "Change the balance" button in Discord).
+    if (path.startsWith('/admin/balances/') && req.method === 'PUT') {
+        const rest = path.slice('/admin/balances/'.length);
+        const [userId, field] = rest.split('/');
+        if (!/^\d{17,20}$/.test(userId)) return send(res, 400, { error: 'bad user id' }, cors);
+
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+
+        const settings = loadJSON('settings.json');
+        if (!settings[userId]) settings[userId] = blankUser();
+        const s = settings[userId];
+
+        if (field === 'balance') {
+            const delta = Number(body.delta);
+            if (!Number.isFinite(delta)) return send(res, 400, { error: 'delta must be a number' }, cors);
+            s.balance = money((Number(s.balance) || 0) + delta);
+            saveJSON('settings.json', settings);
+            if (delta > 0) maybeAutoWithdraw(clients, userId).catch(() => null);
+            return send(res, 200, { ok: true, balance: s.balance }, cors);
+        }
+        if (field === 'bid') {
+            const bid = Number(body.bid);
+            if (!Number.isFinite(bid) || bid < 0) return send(res, 400, { error: 'bad bid' }, cors);
+            s.bid = +bid.toFixed(4);
+            saveJSON('settings.json', settings);
+            return send(res, 200, { ok: true, bid: s.bid }, cors);
+        }
+        if (field === 'joinbid') {
+            const bid = Number(body.joinBid);
+            if (!Number.isFinite(bid) || bid < 0) return send(res, 400, { error: 'bad joinBid' }, cors);
+            s.joinBid = +bid.toFixed(4);
+            saveJSON('settings.json', settings);
+            return send(res, 200, { ok: true, joinBid: s.joinBid }, cors);
+        }
+        if (field === 'autopayout') {
+            s.autoPayout = Boolean(body.autoPayout);
+            saveJSON('settings.json', settings);
+            return send(res, 200, { ok: true, autoPayout: s.autoPayout }, cors);
+        }
+        if (field === 'referrals') {
+            const raw = Array.isArray(body.referrals) ? body.referrals : [];
+            // Accept both an array or a flat blob of newline/space/comma-separated
+            // IDs; keep only valid ones, unique, and not self.
+            const tokens = raw.flatMap((x) => String(x || '').split(/[\s,]+/));
+            const refs = [...new Set(tokens.map((x) => x.trim()).filter((x) => /^\d{17,20}$/.test(x) && x !== userId))];
+            s.referrals = refs;
+            saveJSON('settings.json', settings);
+            return send(res, 200, { ok: true, referrals: refs }, cors);
+        }
+        if (field === 'requisites') {
+            const req = String(body.requisites ?? '').trim().slice(0, 1000);
+            s.requisites = req;
+            saveJSON('settings.json', settings);
+            return send(res, 200, { ok: true, requisites: req }, cors);
+        }
+        return send(res, 404, { error: 'unknown field' }, cors);
+    }
+
     if (path === '/admin/ads-off' && req.method === 'PUT') {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
