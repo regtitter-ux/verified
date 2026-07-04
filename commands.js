@@ -1,6 +1,7 @@
 const { PermissionsBitField } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { createApiKey } = require('./api.js');
+const { applyTemplate } = require('./adtemplate.js');
 
 async function handleCommands(message, config) {
     const args = message.content.slice(config.prefix.length).trim().split(/ +/);
@@ -77,22 +78,27 @@ async function handleCommands(message, config) {
 
         if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
 
-        if (/^\d{17,20}$/.test(args[0])) {
-            const gid = args.shift();
+        // Optional leading server id; the rest is either a bare sponsor link (filled
+        // into the {link} slot of the ad-text template) or literal ad text.
+        const gid = /^\d{17,20}$/.test(args[0]) ? args.shift() : null;
+        const finalText = applyTemplate(gid, args.join(' '));
+        const preview = finalText ? `\n\`\`\`\n${finalText.slice(0, 500)}\n\`\`\`` : '';
+
+        if (gid) {
             // Owner-only command — the owner may set an ad for any server,
             // including ones where they don't have administrator permissions.
-            settings[userId].serverAds[gid] = args.join(' ');
+            settings[userId].serverAds[gid] = finalText;
             settings[userId].serverAdsAt ||= {};
             settings[userId].serverAdsAt[gid] = now;
             saveJSON('settings.json', settings);
-            message.reply(`✅ Ad for server \`${gid}\` has been updated in your network!`);
+            message.reply(`✅ Ad for server \`${gid}\` has been updated in your network!${preview}`);
         } else {
-            settings[userId].advText = args.join(' ');
+            settings[userId].advText = finalText;
             settings[userId].advTextAt = now;
             settings[userId].serverAds = {};
             settings[userId].serverAdsAt = {};
             saveJSON('settings.json', settings);
-            message.reply('✅ Your global advertisement has been updated!');
+            message.reply(`✅ Your global advertisement has been updated!${preview}`);
         }
     } else if (command === 'apikey') {
         // Owner-only: manage partner API keys (each key maps to a user's balance).

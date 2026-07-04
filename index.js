@@ -11,6 +11,7 @@ const {
 } = require('./payouts.js');
 const { startApiServer } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, startJoinCheckSweep } = require('./joincheck.js');
+const { getTemplate, setTemplate } = require('./adtemplate.js');
 
 // Every bot instance (one per token) registers here so any of them can
 // coordinate: post payout requests from the service bot, DM from the user's bot.
@@ -253,6 +254,19 @@ const startBot = (token) => {
                     name: 'stat',
                     description: 'Verification statistics'
                 });
+                commands.push({
+                    name: 'advertising-text',
+                    description: 'Set default verification ad text (use {link} for the sponsor link)',
+                    default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
+                    options: [
+                        {
+                            name: 'id',
+                            description: 'Server ID (optional) — set a template just for that server',
+                            type: 3, // STRING
+                            required: false
+                        }
+                    ]
+                });
             }
             await c.application.commands.set(commands);
         } catch (e) {
@@ -301,6 +315,44 @@ const startBot = (token) => {
         if (interaction.isButton() && interaction.customId.startsWith('stat_page:')) {
             const page = parseInt(interaction.customId.split(':')[1], 10) || 0;
             return interaction.update(buildStatView(page)).catch(() => null);
+        }
+
+        // /advertising-text — set the default ad-text template (global, or per server)
+        if (interaction.isChatInputCommand() && interaction.commandName === 'advertising-text') {
+            const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
+            if (!isAdmin && interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ You need administrator permissions to use this.', flags: [64] }).catch(() => null);
+            }
+            const gid = (interaction.options.getString('id') || '').trim();
+            if (gid && !/^\d{17,20}$/.test(gid)) {
+                return interaction.reply({ content: '❌ Invalid server ID.', flags: [64] }).catch(() => null);
+            }
+            const input = new TextInputBuilder()
+                .setCustomId('adtext_input')
+                .setLabel('Default text — {link} = sponsor link')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(true)
+                .setMaxLength(1500)
+                .setValue(getTemplate(gid || null));
+            const modal = new ModalBuilder()
+                .setCustomId(gid ? `adtext_modal:${gid}` : 'adtext_modal')
+                .setTitle(gid ? `Ad text · server ${gid}` : 'Ad text · default')
+                .addComponents(new ActionRowBuilder().addComponents(input));
+            return interaction.showModal(modal).catch(() => null);
+        }
+
+        // /advertising-text modal submit — save the template
+        if (interaction.isModalSubmit() && (interaction.customId === 'adtext_modal' || interaction.customId.startsWith('adtext_modal:'))) {
+            const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
+            if (!isAdmin && interaction.user.id !== config.ownerId) return;
+            const gid = interaction.customId.includes(':') ? interaction.customId.split(':')[1] : null;
+            const text = interaction.fields.getTextInputValue('adtext_input');
+            setTemplate(gid, text);
+            const where = gid ? `server \`${gid}\`` : 'all servers (default)';
+            return interaction.reply({
+                content: `✅ Ad text for ${where} saved.\nNow \`!adv3 ${gid ? gid + ' ' : ''}<link>\` fills the link into \`{link}\`.`,
+                flags: [64]
+            }).catch(() => null);
         }
 
         // /verification — create a verification card bound to a specific role
