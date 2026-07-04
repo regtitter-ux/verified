@@ -2,6 +2,7 @@ const { PermissionsBitField } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { createApiKey } = require('./api.js');
 const { applyTemplate } = require('./adtemplate.js');
+const cryptopay = require('./cryptopay.js');
 
 async function handleCommands(message, config) {
     const args = message.content.slice(config.prefix.length).trim().split(/ +/);
@@ -139,6 +140,25 @@ async function handleCommands(message, config) {
             return message.reply('✅ API key revoked.');
         }
         return message.reply('Usage: `!apikey new <userId> [name]` · `!apikey list` · `!apikey revoke <key>`');
+    } else if (command === 'cryptobalance' || command === 'cryptobal') {
+        // Owner-only: show the Crypto Pay app's on-hand balance (funds available for payouts).
+        if (message.author.id !== config.ownerId) {
+            return message.reply('❌ Only the bot owner can use this.');
+        }
+        if (!cryptopay.enabled()) {
+            return message.reply('⚠️ Crypto Pay is not configured. Set the `CRYPTO_PAY_TOKEN` environment variable.');
+        }
+        const bal = await cryptopay.call('getBalance').catch((e) => ({ __err: e.message }));
+        if (!Array.isArray(bal)) {
+            return message.reply(`❌ Couldn't fetch balance${bal?.__err ? ` (${bal.__err})` : ''}.`);
+        }
+        const nonZero = bal.filter((b) => Number(b.available) > 0 || Number(b.onhold) > 0);
+        const rows = (nonZero.length ? nonZero : bal).map((b) => {
+            const onhold = Number(b.onhold) > 0 ? ` (on hold: ${b.onhold})` : '';
+            return `• **${b.currency_code}**: \`${b.available}\`${onhold}`;
+        });
+        const net = cryptopay.HOST === 'pay.crypt.bot' ? 'mainnet' : 'testnet';
+        return message.reply(`💰 **Crypto Pay app balance** (${net}):\n${rows.join('\n') || '*empty*'}`);
     }
 }
 
