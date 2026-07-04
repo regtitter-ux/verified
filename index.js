@@ -158,7 +158,7 @@ const startBot = (token) => {
         const cur = Math.min(Math.max(0, page), pageCount - 1);
 
         let text = '📊 **Verification statistics:**\n\n';
-        text += `🏰 **All servers:**\n${fmtWin(win(entries))}\n`;
+        text += `🏰 **All servers:**\n${fmtWin(win(entries))}\n\n`;
 
         if (guildIds.length === 0) {
             text += '*No verification data yet.*';
