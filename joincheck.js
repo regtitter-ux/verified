@@ -152,6 +152,13 @@ async function finalizeLeavers(clients, leaverIds) {
             const refClaw = round2(withdrawnPortion * REFERRAL_RATE);
             if (referrerId && refClaw > 0) {
                 settings[referrerId].balance = round2((Number(settings[referrerId].balance) || 0) - refClaw);
+                // Keep the "unwithdrawn referral bonus" pool in sync — otherwise
+                // this bonus, already clawed back off the balance, would still
+                // be treated as bonus (and excluded from an upstream cut) on
+                // the referrer's next withdrawal. Clamp to 0 for the case
+                // where the referrer already withdrew and drained the pool.
+                const accrued = Number(settings[referrerId].refBonusAccrued) || 0;
+                settings[referrerId].refBonusAccrued = round2(Math.max(0, accrued - refClaw));
                 await logFunds(clients, {
                     type: 'debit', creatorId: referrerId, userId: rec.creatorId,
                     amount: refClaw, reason: 'Referral clawback (referred user reversal)'

@@ -11,6 +11,20 @@ const ADMIN_BOT_ID = process.env.ADMIN_BOT_ID || '1514533989434789998'; // autho
 
 const round2 = (n) => +(Number(n) || 0).toFixed(2);
 
+// A user's `refBonusAccrued` tracks how much of their current balance came
+// from referral bonuses (rather than their own click/join/manual earnings).
+// That portion is excluded from the base used to compute their referrer's
+// 10% — otherwise every level up the chain would earn 10%-of-10% and the
+// platform's referral overhead would compound geometrically. Consuming the
+// pool FIFO at withdrawal time keeps upstream payouts bounded to exactly one
+// level. Mutates `s` in place; returns the eligible portion of `amount`.
+function drainRefBonusPool(s, amount) {
+    const accrued = Number(s?.refBonusAccrued) || 0;
+    const consumed = Math.min(amount, accrued);
+    if (s) s.refBonusAccrued = round2(accrued - consumed);
+    return round2(amount - consumed);
+}
+
 const statusLabel = (status) => (status === 'completed' ? 'Completed' : 'In processing');
 
 const HISTORY_PAGE_SIZE = 10;
@@ -88,7 +102,11 @@ async function findPayoutChannel(clients) {
 // Pay the referrer of `referredId` their cut (10%) of a withdrawal. Whoever lists
 // referredId in their `referrals` earns it; the bonus lands on their balance and
 // can itself trigger their own payout (guarded against referral cycles).
+// `amount` here is the referrer-eligible portion (own earnings only) — the
+// caller has already drained the referred user's `refBonusAccrued` pool so
+// bonuses don't cascade further up the chain.
 function payReferral(clients, referredId, amount, _seen) {
+    if (!(amount > 0)) return;
     const settings = loadJSON('settings.json');
     const referrerId = Object.keys(settings).find(
         (uid) => uid !== referredId && Array.isArray(settings[uid].referrals) && settings[uid].referrals.includes(referredId)
@@ -99,6 +117,9 @@ function payReferral(clients, referredId, amount, _seen) {
     if (bonus <= 0) return;
 
     settings[referrerId].balance = round2((Number(settings[referrerId].balance) || 0) + bonus);
+    // Remember this credit as "bonus, not own earnings" so it will be
+    // excluded from the base when the referrer eventually withdraws.
+    settings[referrerId].refBonusAccrued = round2((Number(settings[referrerId].refBonusAccrued) || 0) + bonus);
     saveJSON('settings.json', settings);
 
     logFunds(clients, {
@@ -130,8 +151,11 @@ async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
     // (set 0 + save, before any await) so a concurrent trigger can't double-pay.
     if (cryptopay.enabled() && s.autoPayout) {
         s.balance = 0;
+        // Bonus-first drain: excludes any referral income from what the
+        // referrer earns 10% on, so referral commissions don't compound.
+        const eligible = drainRefBonusPool(s, amount);
         saveJSON('settings.json', settings);
-        return autoPayViaCheck(clients, userId, amount, _seen);
+        return autoPayViaCheck(clients, userId, amount, _seen, eligible);
     }
 
     // ---- Manual flow: file a request for staff to complete ----
@@ -147,10 +171,12 @@ async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
         createdAt: Date.now()
     };
     s.withdrawals.push(withdrawal);
+    // See drainRefBonusPool comment — own earnings only feed the upstream 10%.
+    const eligible = drainRefBonusPool(s, amount);
     saveJSON('settings.json', settings);
 
-    // Referral: pay whoever referred this user 10% of the withdrawal.
-    payReferral(clients, userId, amount, _seen);
+    // Referral: pay whoever referred this user 10% of the eligible portion.
+    payReferral(clients, userId, eligible, _seen);
 
     try {
         const channel = await findPayoutChannel(clients);
@@ -198,7 +224,9 @@ async function alertPayoutDeferred(clients, userId, amount, why) {
 
 // The balance was already reserved (set to 0). Issue a USDT check and deliver the
 // claim link to the user; on any failure, refund the reservation so it retries later.
-async function autoPayViaCheck(clients, userId, amount, _seen) {
+// `eligibleForReferral` is the portion of `amount` that should feed the referrer's
+// 10% (i.e. `amount` minus any referral bonus the user is withdrawing back out).
+async function autoPayViaCheck(clients, userId, amount, _seen, eligibleForReferral = amount) {
     // Make sure the app actually has the funds before issuing the check.
     const available = await cryptopay.usdtAvailable().catch(() => null);
     if (available === null) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'Crypto Pay is unreachable'); }
@@ -234,8 +262,8 @@ async function autoPayViaCheck(clients, userId, amount, _seen) {
         reason: `Auto-payout (USDT check #${check.check_id})`
     });
 
-    // Referral: pay whoever referred this user 10% of the (now completed) withdrawal.
-    payReferral(clients, userId, amount, _seen);
+    // Referral: pay whoever referred this user 10% of the eligible portion.
+    payReferral(clients, userId, eligibleForReferral, _seen);
 
     // Deliver the claim link privately to the user (this IS the payout).
     const url = check.bot_check_url || `https://t.me/${cryptopay.HOST === 'pay.crypt.bot' ? 'CryptoBot' : 'CryptoTestnetBot'}?start=check_${check.check_id}`;
