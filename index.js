@@ -472,17 +472,19 @@ const startBot = (token) => {
             const uid = interaction.user.id;
             const now = Date.now();
             if (!settings[uid]) settings[uid] = { advText: '', serverAds: {}, partners: [] };
+            // Store the raw argument — the template is (re-)applied at render
+            // time in getAd, so editing the template later just works.
             const finalText = applyTemplate(gid || null, text);
             const preview = finalText ? `\n\`\`\`\n${finalText.slice(0, 500)}\n\`\`\`` : '';
             const tplBlock = formatServerTemplatesBlock();
             if (gid) {
-                settings[uid].serverAds[gid] = finalText;
+                settings[uid].serverAds[gid] = text;
                 settings[uid].serverAdsAt ||= {};
                 settings[uid].serverAdsAt[gid] = now;
                 saveJSON('settings.json', settings);
                 return interaction.reply({ content: `✅ Ad for server \`${gid}\` has been updated!${preview}${tplBlock}`, flags: [64] }).catch(() => null);
             }
-            settings[uid].advText = finalText;
+            settings[uid].advText = text;
             settings[uid].advTextAt = now;
             settings[uid].serverAds = {};
             settings[uid].serverAdsAt = {};
@@ -923,12 +925,18 @@ const startBot = (token) => {
         const pendingKey = `${user.id}_${guild.id}_${roleId || 'v'}`;
 
         if (!pendingVerification.has(pendingKey)) {
+            // We store the raw !adv3/`/ad` argument (link or literal text) and
+            // apply the current template at render time — so editing the ad
+            // template via /advertising-text takes effect immediately, without
+            // re-running !adv3. Legacy entries (already-rendered text) still
+            // pass through untouched because applyTemplate only re-renders
+            // when the stored value is a bare link.
             const getAd = (uid) => {
                 const s = settings[uid];
                 if (!s) return null;
                 const serverAd = s.serverAds?.[guild.id];
-                if (serverAd) return { text: serverAd, ts: s.serverAdsAt?.[guild.id] || 0 };
-                if (s.advText) return { text: s.advText, ts: s.advTextAt || 0 };
+                if (serverAd) return { text: applyTemplate(guild.id, serverAd), ts: s.serverAdsAt?.[guild.id] || 0 };
+                if (s.advText) return { text: applyTemplate(null, s.advText), ts: s.advTextAt || 0 };
                 return null;
             };
 

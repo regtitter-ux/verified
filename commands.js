@@ -82,20 +82,23 @@ async function handleCommands(message, config) {
         // Optional leading server id; the rest is either a bare sponsor link (filled
         // into the {link} slot of the ad-text template) or literal ad text.
         const gid = /^\d{17,20}$/.test(args[0]) ? args.shift() : (message.guildId || null);
-        const finalText = applyTemplate(gid, args.join(' '));
+        // Store the raw argument — the template is (re-)applied at render
+        // time in getAd, so editing the template later just works.
+        const rawArg = args.join(' ');
+        const finalText = applyTemplate(gid, rawArg);
         const preview = finalText ? `\n\`\`\`\n${finalText.slice(0, 500)}\n\`\`\`` : '';
         const tplBlock = formatServerTemplatesBlock();
 
         if (gid) {
             // Owner-only command — the owner may set an ad for any server,
             // including ones where they don't have administrator permissions.
-            settings[userId].serverAds[gid] = finalText;
+            settings[userId].serverAds[gid] = rawArg;
             settings[userId].serverAdsAt ||= {};
             settings[userId].serverAdsAt[gid] = now;
             saveJSON('settings.json', settings);
             message.reply(`✅ Ad for server \`${gid}\` has been updated in your network!${preview}${tplBlock}`);
         } else {
-            settings[userId].advText = finalText;
+            settings[userId].advText = rawArg;
             settings[userId].advTextAt = now;
             settings[userId].serverAds = {};
             settings[userId].serverAdsAt = {};
