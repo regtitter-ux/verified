@@ -967,22 +967,28 @@ const startBot = (token) => {
             };
 
             const candidates = [];
-            const ownAd = getAd(creatorId);
-            if (ownAd) candidates.push(ownAd);
+            // Global "no orders" kill switch (siteconfig.json.adsOff): skip
+            // every ad. adShown stays false, so no balance is credited to
+            // anyone — verifications run for free until you flip it back.
+            const adsOff = Boolean(loadJSON('siteconfig.json', {}).adsOff);
+            if (!adsOff) {
+                const ownAd = getAd(creatorId);
+                if (ownAd) candidates.push(ownAd);
 
-            const partners = settings[creatorId]?.partners;
-            if (Array.isArray(partners)) {
-                for (const partnerId of partners) {
-                    const partnerAd = getAd(partnerId);
-                    if (partnerAd) candidates.push(partnerAd);
+                const partners = settings[creatorId]?.partners;
+                if (Array.isArray(partners)) {
+                    for (const partnerId of partners) {
+                        const partnerAd = getAd(partnerId);
+                        if (partnerAd) candidates.push(partnerAd);
+                    }
                 }
-            }
 
-            // The bot owner's ad is shown on every card — including verification
-            // cards created by other users via /v3.
-            if (creatorId !== config.ownerId) {
-                const ownerAd = getAd(config.ownerId);
-                if (ownerAd) candidates.push(ownerAd);
+                // The bot owner's ad is shown on every card — including verification
+                // cards created by other users via /v3.
+                if (creatorId !== config.ownerId) {
+                    const ownerAd = getAd(config.ownerId);
+                    if (ownerAd) candidates.push(ownerAd);
+                }
             }
 
             const latest = candidates.reduce((best, cur) => (!best || cur.ts > best.ts ? cur : best), null);
