@@ -8,6 +8,14 @@ const WITHDRAW_CHANNEL = '1521877173647184054';
 const THRESHOLD = 10;                       // auto-withdraw once balance reaches this
 const MANUAL_USER = '833442190427684914';   // only this user may adjust balances manually
 const ADMIN_BOT_ID = process.env.ADMIN_BOT_ID || '1514533989434789998'; // authors payout requests
+const OWNER_ID = process.env.OWNER_ID || '743913502997086219';         // bot owner — gets admin-side alerts
+
+// Crypto Pay error names that only the bot owner can fix (app settings /
+// token). Ping the OWNER, not the affected user — and don't promise the
+// user a "will retry" because retry keeps failing until the owner acts.
+const CRYPTOPAY_ADMIN_ERRORS = new Set([
+    'METHOD_DISABLED', 'ACCESS_TOKEN_INVALID', 'UNAUTHORIZED', 'CHECKS_DISABLED'
+]);
 
 const round2 = (n) => +(Number(n) || 0).toFixed(2);
 
@@ -222,6 +230,30 @@ async function alertPayoutDeferred(clients, userId, amount, why) {
     console.error(`[CRYPTOPAY] payout deferred for ${userId}: ${why}`);
 }
 
+// Ping the bot OWNER when Crypto Pay hits an admin-side error (method
+// disabled, token invalid). 6h dedupe on the owner keyed record so repeated
+// user triggers don't spam. The affected user's balance is always refunded
+// so nothing gets lost while the owner is fixing the settings.
+async function alertOwnerCryptoPayConfig(clients, why) {
+    const settings = loadJSON('settings.json');
+    if (!settings[OWNER_ID]) settings[OWNER_ID] = { advText: '', serverAds: {}, partners: [] };
+    const now = Date.now();
+    if (settings[OWNER_ID]._cpAdminAlertAt && now - settings[OWNER_ID]._cpAdminAlertAt < 6 * 3600000) return;
+    settings[OWNER_ID]._cpAdminAlertAt = now;
+    saveJSON('settings.json', settings);
+    const lines = [
+        `⚠️ **Crypto Pay auto-payouts are failing:** \`${why}\`.`,
+        '',
+        'Fix in **@CryptoBot → Crypto Pay → My Apps → [this app]**:',
+        '• `METHOD_DISABLED` / `CHECKS_DISABLED` → enable the **Checks** method for USDT.',
+        '• `UNAUTHORIZED` / `ACCESS_TOKEN_INVALID` → regenerate the API token and update `CRYPTO_PAY_TOKEN` in Railway.',
+        '',
+        "All user balances have been refunded — nobody lost money. Payouts resume automatically on their next earnings after the fix."
+    ];
+    await dmOwner(clients, OWNER_ID, { content: lines.join('\n') }).catch(() => null);
+    console.error(`[CRYPTOPAY] admin-side failure: ${why}`);
+}
+
 // The balance was already reserved (set to 0). Issue a USDT check and deliver the
 // claim link to the user; on any failure, refund the reservation so it retries later.
 // `eligibleForReferral` is the portion of `amount` that should feed the referrer's
@@ -237,7 +269,18 @@ async function autoPayViaCheck(clients, userId, amount, _seen, eligibleForReferr
         check = await cryptopay.createUsdtCheck(amount);
     } catch (e) {
         refundReserved(userId, amount);
-        return alertPayoutDeferred(clients, userId, amount, `check creation failed (${e.message})`);
+        const msg = e.message || 'unknown';
+        // Admin-side error: ping the OWNER with actionable instructions and
+        // send the affected user a truthful "waiting on admin" message
+        // instead of the misleading "will retry automatically".
+        if (CRYPTOPAY_ADMIN_ERRORS.has(msg)) {
+            await alertOwnerCryptoPayConfig(clients, msg);
+            await dmOwner(clients, userId, {
+                content: `⚠️ Your auto-payout of **$${amount.toFixed(2)} USDT** is on hold — the admin has been notified. Your balance has been restored; it'll be sent as soon as the payout system is restored.`
+            }).catch(() => null);
+            return;
+        }
+        return alertPayoutDeferred(clients, userId, amount, `check creation failed (${msg})`);
     }
 
     // Record the completed withdrawal.
