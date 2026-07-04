@@ -81,7 +81,7 @@ async function handleCommands(message, config) {
 
         // Optional leading server id; the rest is either a bare sponsor link (filled
         // into the {link} slot of the ad-text template) or literal ad text.
-        const gid = /^\d{17,20}$/.test(args[0]) ? args.shift() : null;
+        const gid = /^\d{17,20}$/.test(args[0]) ? args.shift() : (message.guildId || null);
         const finalText = applyTemplate(gid, args.join(' '));
         const preview = finalText ? `\n\`\`\`\n${finalText.slice(0, 500)}\n\`\`\`` : '';
 

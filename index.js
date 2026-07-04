@@ -463,7 +463,7 @@ const startBot = (token) => {
             if (interaction.user.id !== config.ownerId) {
                 return interaction.reply({ content: '❌ Only the bot owner can set ads.', flags: [64] }).catch(() => null);
             }
-            const gid = (interaction.options.getString('server') || '').trim();
+            const gid = (interaction.options.getString('server') || interaction.guildId || '').trim();
             if (gid && !/^\d{17,20}$/.test(gid)) {
                 return interaction.reply({ content: '❌ Invalid server ID.', flags: [64] }).catch(() => null);
             }
