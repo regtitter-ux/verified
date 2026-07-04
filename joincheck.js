@@ -85,17 +85,12 @@ async function isMember(bot, guildId, userId) {
 // Credit the card owner for one confirmed join (at their join-check rate) and
 // remember the payout — plus the granted role — so both can be reversed if the
 // user later leaves the sponsor server.
-function creditJoin(creatorId, guildId, userId, dwellMs, cardGuildId, roleId) {
+function creditJoin(creatorId, guildId, userId, cardGuildId, roleId) {
     const settings = loadJSON('settings.json');
     if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
     const s = settings[creatorId];
     const perJoin = round2(getJoinBid(s) / 100);
     s.balance = round2((Number(s.balance) || 0) + perJoin);
-    if (Number.isFinite(dwellMs)) {
-        if (!Array.isArray(s.dwellSamples)) s.dwellSamples = [];
-        s.dwellSamples.push(Math.max(0, Math.round(dwellMs)));
-        if (s.dwellSamples.length > 5000) s.dwellSamples.splice(0, s.dwellSamples.length - 5000);
-    }
     saveJSON('settings.json', settings);
 
     const list = loadJSON('joinlinks.json', []);

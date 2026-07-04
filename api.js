@@ -7,7 +7,7 @@
 const http = require('http');
 const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
-const { maybeAutoWithdraw, userBehavior } = require('./payouts.js');
+const { maybeAutoWithdraw } = require('./payouts.js');
 
 const getBid = (s) => (Number.isFinite(Number(s?.bid)) ? Number(s.bid) : 1); // $ per 100 clicks
 const money = (n) => +(Number(n) || 0).toFixed(2);
@@ -21,7 +21,7 @@ function resolveKey(key) {
 }
 
 // Same crediting rule as /verify: partner's bid ($/100 clicks) paid in 10-click steps.
-function creditClick(userId, dwellMs) {
+function creditClick(userId) {
     const settings = loadJSON('settings.json');
     if (!settings[userId]) settings[userId] = blankUser();
     const s = settings[userId];
@@ -32,11 +32,6 @@ function creditClick(userId, dwellMs) {
         const groups = Math.floor(s.verifiedClicks / 10);
         s.balance = money((Number(s.balance) || 0) + groups * perTen);
         s.verifiedClicks -= groups * 10;
-    }
-    if (Number.isFinite(dwellMs)) {
-        if (!Array.isArray(s.dwellSamples)) s.dwellSamples = [];
-        s.dwellSamples.push(Math.max(0, Math.round(dwellMs)));
-        if (s.dwellSamples.length > 5000) s.dwellSamples.splice(0, s.dwellSamples.length - 5000);
     }
     saveJSON('settings.json', settings);
     return s;
@@ -81,9 +76,9 @@ const DOCS = {
     name: 'Verification API',
     auth: 'Send your API key as `Authorization: Bearer <key>` or `X-API-Key: <key>`.',
     endpoints: {
-        'POST /api/verify/click': 'Record one qualifying verified click (ad shown + verified). Body: { dwellMs?, guildId?, userId? }. Credits your balance at your bid.',
+        'POST /api/verify/click': 'Record one qualifying verified click (ad shown + verified). Body: { guildId?, userId? }. Credits your balance at your bid.',
         'GET /api/balance': 'Your balance, payment details, bid ($/100 clicks) and pending clicks.',
-        'GET /api/stats': 'Your verification stats (per server + time windows) and completion-time distribution.',
+        'GET /api/stats': 'Your verification stats (per server + time windows).',
         'GET /api/requisites': 'Your payment details.',
         'PUT /api/requisites': 'Set payment details. Body: { requisites }.',
         'GET /api/withdrawals': 'Your withdrawal history and total withdrawn.',
@@ -146,8 +141,7 @@ function startApiServer(clients, config) {
             if (p === '/api/verify/click' && req.method === 'POST') {
                 const body = await readBody(req);
                 if (body === null) return send(res, 400, { error: 'Invalid JSON body' });
-                const dwellMs = Number(body.dwellMs);
-                creditClick(userId, Number.isFinite(dwellMs) ? dwellMs : NaN);
+                creditClick(userId);
                 recordVerified(userId, body.guildId, body.userId);
                 await maybeAutoWithdraw(clients, userId).catch(() => null);
                 const s = loadJSON('settings.json')[userId] || {};
@@ -176,7 +170,7 @@ function startApiServer(clients, config) {
             }
 
             if (p === '/api/stats' && req.method === 'GET') {
-                return send(res, 200, { verifications: userStats(userId), completionTime: userBehavior(loadJSON('settings.json'), userId) });
+                return send(res, 200, { verifications: userStats(userId) });
             }
 
             if (p === '/api/withdrawals' && req.method === 'GET') {

@@ -6,8 +6,7 @@ const {
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
-    buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone,
-    globalBehavior, userBehavior, baselineExcluding, behaviorChartUrl
+    buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone
 } = require('./payouts.js');
 const { startApiServer } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep } = require('./joincheck.js');
@@ -65,14 +64,10 @@ const startBot = (token) => {
             { name: 'Payment details', value: requisites || '*Not set*', inline: false }
         );
 
-        // Owner-only: current per-100-clicks rate + this user's completion-time chart
+        // Owner-only: current per-100-clicks rate + join-check rate
         if (isOwnerView) {
             embed.addFields({ name: 'Bid', value: `**$${getBid(s).toFixed(2)}** per 100 clicks`, inline: false });
             embed.addFields({ name: 'Bid extra (join check)', value: `**$${getJoinBid(s).toFixed(2)}** per 100 joins`, inline: false });
-            const beh = userBehavior(settings, userId);
-            const chart = behaviorChartUrl(beh, `Completion time · n=${beh.total}`, baselineExcluding(settings, userId));
-            embed.addFields({ name: 'Completion time (users)', value: beh.total ? `n = ${beh.total}` : '*No data*', inline: false });
-            if (chart) embed.setImage(chart);
         }
 
         // Prominent nudge to add payment details when they're missing (self view only)
@@ -181,20 +176,11 @@ const startBot = (token) => {
             ));
         }
 
-        // Global completion-time distribution as a bar-chart image.
-        const gb = globalBehavior(loadJSON('settings.json'));
-        const gbChart = behaviorChartUrl(gb, `Completion time · all servers · n=${gb.total}`);
-        const embeds = gbChart
-            ? [new EmbedBuilder().setColor('#a020f0').setTitle('Completion time (users)').setImage(gbChart)]
-            : [];
-
-        return { content: text, embeds, components };
+        return { content: text, components };
     };
 
-    // Accrue $0.1 to the message owner for every 10 qualifying verification clicks.
-    // dwellMs = time between the ad being shown and the user completing verification;
-    // sampled per click so each payout can carry a behaviour summary.
-    const creditVerifiedClick = (creatorId, dwellMs) => {
+    // Accrue the creator's bid to the message owner for every 10 qualifying verification clicks.
+    const creditVerifiedClick = (creatorId) => {
         if (!creatorId) return;
         const settings = loadJSON('settings.json');
         if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
@@ -207,13 +193,6 @@ const startBot = (token) => {
             const groups = Math.floor(s.verifiedClicks / 10);
             s.balance = +(((Number(s.balance) || 0) + groups * perTen).toFixed(2));
             s.verifiedClicks -= groups * 10;
-        }
-
-        // Collect dwell samples for the current (un-withdrawn) batch.
-        if (Number.isFinite(dwellMs)) {
-            if (!Array.isArray(s.dwellSamples)) s.dwellSamples = [];
-            s.dwellSamples.push(Math.max(0, Math.round(dwellMs)));
-            if (s.dwellSamples.length > 5000) s.dwellSamples.splice(0, s.dwellSamples.length - 5000);
         }
 
         saveJSON('settings.json', settings);
@@ -619,7 +598,6 @@ const startBot = (token) => {
             const responseText = latest?.text || 'Great, now click again to open access to the server!';
 
             // Only clicks that actually display an ad qualify for balance accrual.
-            // Record when the ad was shown to measure completion (dwell) time.
             pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '' });
             setTimeout(() => pendingVerification.delete(pendingKey), 300000);
 
@@ -637,7 +615,6 @@ const startBot = (token) => {
         if (sponsor) {
             const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
             if (joined !== true) {
-                pending.adShownAt = Date.now(); // reset dwell + keep the pending entry alive
                 return interaction.reply({
                     content: pending.adText || 'Please join the server first, then click again.',
                     flags: [64]
@@ -662,13 +639,12 @@ const startBot = (token) => {
             // button); legacy !v3 cards without a role never accrue balance.
             // Credit the message owner: only when an ad was shown and verification succeeded.
             if (roleId && pending?.adShown) {
-                const dwellMs = pending.adShownAt ? Date.now() - pending.adShownAt : NaN;
                 if (sponsor) {
                     // Confirmed member of the sponsor server: pay the join-check rate,
                     // reversible on leave (role + payout), see joincheck.js.
-                    creditJoin(creatorId, sponsor.guildId, user.id, dwellMs, guild.id, roleId);
+                    creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId);
                 } else {
-                    creditVerifiedClick(creatorId, dwellMs);
+                    creditVerifiedClick(creatorId);
                 }
                 await maybeAutoWithdraw(clients, creatorId);
             }
