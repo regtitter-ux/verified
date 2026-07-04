@@ -60,4 +60,11 @@ async function createUsdtCheck(amount, opts = {}) {
     return call('createCheck', { asset: 'USDT', amount: String(amount), ...opts });
 }
 
-module.exports = { enabled, call, usdtAvailable, createUsdtCheck, HOST };
+// Create a USDT invoice. Paying it from your own @CryptoBot wallet is how you top up
+// the app balance (there's no direct deposit — the app pool is fed by paid invoices).
+// Returns the Invoice object (has bot_invoice_url / mini_app_invoice_url / pay_url).
+async function createUsdtInvoice(amount, opts = {}) {
+    return call('createInvoice', { asset: 'USDT', amount: String(amount), ...opts });
+}
+
+module.exports = { enabled, call, usdtAvailable, createUsdtCheck, createUsdtInvoice, HOST };

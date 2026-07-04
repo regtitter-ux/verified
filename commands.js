@@ -164,6 +164,29 @@ async function handleCommands(message, config) {
             return `• **${b.currency_code}**: \`${b.available}\`${onhold}`;
         });
         return message.reply(`💰 **Crypto Pay app balance** (${net}):\n${rows.join('\n') || '*empty*'}`);
+    } else if (command === 'cryptofund') {
+        // Owner-only: create a USDT invoice to self-pay and top up the app balance
+        // (Crypto Pay apps have no deposit button — the pool is fed by paid invoices).
+        if (message.author.id !== config.ownerId) {
+            return message.reply('❌ Only the bot owner can use this.');
+        }
+        if (!cryptopay.enabled()) {
+            return message.reply('⚠️ Crypto Pay is not configured. Set the `CRYPTO_PAY_TOKEN` environment variable.');
+        }
+        const n = Number((args[0] || '').replace(',', '.'));
+        if (!Number.isFinite(n) || n <= 0) {
+            return message.reply('❌ Usage: `!cryptofund <amount>` — e.g. `!cryptofund 50`');
+        }
+        const inv = await cryptopay.createUsdtInvoice(n.toFixed(2)).catch((e) => ({ __err: e.message }));
+        const url = inv && (inv.bot_invoice_url || inv.mini_app_invoice_url || inv.pay_url);
+        if (!url) {
+            return message.reply(`❌ Couldn't create invoice${inv?.__err ? ` (${inv.__err})` : ''}.`);
+        }
+        return message.reply(
+            `🧾 Pay this invoice from your @CryptoBot **wallet** to top up the app balance ` +
+            `(a ~3% fee applies, so send a bit more than you need):\n${url}\n` +
+            `After paying, verify with \`!cryptobalance\`.`
+        );
     }
 }
 
