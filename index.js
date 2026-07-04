@@ -12,7 +12,7 @@ const { startApiServer } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep } = require('./joincheck.js');
 const { getTemplate, setTemplate } = require('./adtemplate.js');
 const { logFunds } = require('./fundslog.js');
-const { boostActive, boostedRate, BOOST_RATE, BOOST_MS } = require('./referral.js');
+const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 
 // Every bot instance (one per token) registers here so any of them can
 // coordinate: post payout requests from the service bot, DM from the user's bot.
@@ -92,7 +92,7 @@ const startBot = (token) => {
             if (s.referrer) embed.addFields({ name: 'Referrer', value: `<@${s.referrer}>`, inline: false });
             if (boostActive(s)) {
                 const hoursLeft = Math.max(0, Math.ceil((BOOST_MS - (Date.now() - Number(s.referrerAt))) / 3600000));
-                embed.addFields({ name: 'Boosted rate', value: `**$${BOOST_RATE}** per 100 — ${hoursLeft}h left`, inline: false });
+                embed.addFields({ name: 'Boosted rate', value: `**$${BOOST_RATE}** per 100 joins — ${hoursLeft}h left`, inline: false });
             }
         }
 
@@ -215,9 +215,8 @@ const startBot = (token) => {
         const s = settings[creatorId];
 
         // Pay this creator's own rate (bid = $ per 100 clicks, default $1) in 10-click
-        // steps. The referral boost acts as a floor of $7/100 while active.
-        const rate = boostedRate(s, getBid(s));
-        const perTen = rate / 10;
+        // steps. The referral boost applies to join mode only, not plain clicks.
+        const perTen = getBid(s) / 10;
         s.verifiedClicks = (Number(s.verifiedClicks) || 0) + 1;
         if (s.verifiedClicks >= 10) {
             const groups = Math.floor(s.verifiedClicks / 10);
@@ -226,7 +225,7 @@ const startBot = (token) => {
         }
 
         saveJSON('settings.json', settings);
-        return rate / 100; // this verification's worth ($ rate / 100 clicks)
+        return getBid(s) / 100; // this verification's worth ($ bid / 100 clicks)
     };
 
     client.once(Events.ClientReady, async (c) => {
