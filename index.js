@@ -536,6 +536,23 @@ const startBot = (token) => {
 
         const pending = pendingVerification.get(pendingKey);
 
+        // Join-check mode: if the ad points to a server one of our bots is on, the
+        // user must actually be a member before we verify them. Until they join, every
+        // repeat click just re-shows the ad — no role, no payout. ($5/100, see joincheck.js.)
+        const sponsor = (roleId && pending?.adShown)
+            ? await resolveSponsorPresence(clients, pending.adText).catch(() => null)
+            : null;
+        if (sponsor) {
+            const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
+            if (joined !== true) {
+                pending.adShownAt = Date.now(); // reset dwell + keep the pending entry alive
+                return interaction.reply({
+                    content: pending.adText || 'Please join the server first, then click again.',
+                    flags: [64]
+                }).catch(() => null);
+            }
+        }
+
         await interaction.reply({ content: '✅ Success! Access granted', flags: [64] }).catch(() => null);
 
         try {
@@ -554,22 +571,13 @@ const startBot = (token) => {
             // Credit the message owner: only when an ad was shown and verification succeeded.
             if (roleId && pending?.adShown) {
                 const dwellMs = pending.adShownAt ? Date.now() - pending.adShownAt : NaN;
-
-                // If the ad links to a server a network bot sits on, the card runs in
-                // "join check" mode: $5/100, paid only for users actually on that server,
-                // and reversible if they later leave (see joincheck.js).
-                const sponsor = await resolveSponsorPresence(clients, pending.adText).catch(() => null);
                 if (sponsor) {
-                    const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
-                    if (joined === true) {
-                        creditJoin(creatorId, sponsor.guildId, user.id, dwellMs);
-                        await maybeAutoWithdraw(clients, creatorId);
-                    }
-                    // Not a member (or undetermined): role granted, but no payout.
+                    // Confirmed member of the sponsor server: pay $5/100, reversible on leave.
+                    creditJoin(creatorId, sponsor.guildId, user.id, dwellMs);
                 } else {
                     creditVerifiedClick(creatorId, dwellMs);
-                    await maybeAutoWithdraw(clients, creatorId);
                 }
+                await maybeAutoWithdraw(clients, creatorId);
             }
         } catch (e) {
             console.error(e);
