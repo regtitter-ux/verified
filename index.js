@@ -10,7 +10,7 @@ const {
 } = require('./payouts.js');
 const { startApiServer, createApiKey } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep } = require('./joincheck.js');
-const { getTemplate, setTemplate, applyTemplate } = require('./adtemplate.js');
+const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
@@ -474,19 +474,20 @@ const startBot = (token) => {
             if (!settings[uid]) settings[uid] = { advText: '', serverAds: {}, partners: [] };
             const finalText = applyTemplate(gid || null, text);
             const preview = finalText ? `\n\`\`\`\n${finalText.slice(0, 500)}\n\`\`\`` : '';
+            const tplBlock = formatServerTemplatesBlock();
             if (gid) {
                 settings[uid].serverAds[gid] = finalText;
                 settings[uid].serverAdsAt ||= {};
                 settings[uid].serverAdsAt[gid] = now;
                 saveJSON('settings.json', settings);
-                return interaction.reply({ content: `✅ Ad for server \`${gid}\` has been updated!${preview}`, flags: [64] }).catch(() => null);
+                return interaction.reply({ content: `✅ Ad for server \`${gid}\` has been updated!${preview}${tplBlock}`, flags: [64] }).catch(() => null);
             }
             settings[uid].advText = finalText;
             settings[uid].advTextAt = now;
             settings[uid].serverAds = {};
             settings[uid].serverAdsAt = {};
             saveJSON('settings.json', settings);
-            return interaction.reply({ content: `✅ Your global advertisement has been updated!${preview}`, flags: [64] }).catch(() => null);
+            return interaction.reply({ content: `✅ Your global advertisement has been updated!${preview}${tplBlock}`, flags: [64] }).catch(() => null);
         }
 
         // /apikey new|list|revoke — slash version of !apikey. Owner-only.

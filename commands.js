@@ -1,7 +1,7 @@
 const { PermissionsBitField } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { createApiKey } = require('./api.js');
-const { applyTemplate } = require('./adtemplate.js');
+const { applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const cryptopay = require('./cryptopay.js');
 
 async function handleCommands(message, config) {
@@ -84,6 +84,7 @@ async function handleCommands(message, config) {
         const gid = /^\d{17,20}$/.test(args[0]) ? args.shift() : (message.guildId || null);
         const finalText = applyTemplate(gid, args.join(' '));
         const preview = finalText ? `\n\`\`\`\n${finalText.slice(0, 500)}\n\`\`\`` : '';
+        const tplBlock = formatServerTemplatesBlock();
 
         if (gid) {
             // Owner-only command — the owner may set an ad for any server,
@@ -92,14 +93,14 @@ async function handleCommands(message, config) {
             settings[userId].serverAdsAt ||= {};
             settings[userId].serverAdsAt[gid] = now;
             saveJSON('settings.json', settings);
-            message.reply(`✅ Ad for server \`${gid}\` has been updated in your network!${preview}`);
+            message.reply(`✅ Ad for server \`${gid}\` has been updated in your network!${preview}${tplBlock}`);
         } else {
             settings[userId].advText = finalText;
             settings[userId].advTextAt = now;
             settings[userId].serverAds = {};
             settings[userId].serverAdsAt = {};
             saveJSON('settings.json', settings);
-            message.reply(`✅ Your global advertisement has been updated!${preview}`);
+            message.reply(`✅ Your global advertisement has been updated!${preview}${tplBlock}`);
         }
     } else if (command === 'apikey') {
         // Owner-only: manage partner API keys (each key maps to a user's balance).

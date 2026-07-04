@@ -52,4 +52,32 @@ function applyTemplate(gid, rawArg) {
     return arg;
 }
 
-module.exports = { DEFAULT_TEMPLATE, getTemplate, setTemplate, applyTemplate, isLink };
+// List every per-server template override that's currently set (non-empty).
+function listServerTemplates() {
+    const t = load();
+    return Object.entries(t.servers)
+        .filter(([, v]) => typeof v === 'string' && v.trim())
+        .map(([gid, text]) => ({ gid, text }));
+}
+
+// A Discord-ready "📌 Server templates: …" block listing every per-server
+// override. Returns '' when none are set, so callers can just append it.
+function formatServerTemplatesBlock() {
+    const items = listServerTemplates();
+    if (!items.length) return '';
+    const MAX_TOTAL = 1500;
+    const MAX_SNIPPET = 400;
+    let out = '\n\n📌 Server templates:';
+    let shown = 0;
+    for (const { gid, text } of items) {
+        const snippet = text.length > MAX_SNIPPET ? text.slice(0, MAX_SNIPPET) + '…' : text;
+        const chunk = `\n\`${gid}\`\n\`\`\`\n${snippet}\n\`\`\``;
+        if (out.length + chunk.length > MAX_TOTAL) break;
+        out += chunk;
+        shown++;
+    }
+    if (shown < items.length) out += `\n…and ${items.length - shown} more`;
+    return out;
+}
+
+module.exports = { DEFAULT_TEMPLATE, getTemplate, setTemplate, applyTemplate, isLink, listServerTemplates, formatServerTemplatesBlock };
