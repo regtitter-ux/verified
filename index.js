@@ -10,6 +10,7 @@ const {
     globalBehavior, userBehavior, baselineExcluding, behaviorChartUrl
 } = require('./payouts.js');
 const { startApiServer } = require('./api.js');
+const { resolveSponsorPresence, isMember, creditJoin, startJoinCheckSweep } = require('./joincheck.js');
 
 // Every bot instance (one per token) registers here so any of them can
 // coordinate: post payout requests from the service bot, DM from the user's bot.
@@ -527,7 +528,7 @@ const startBot = (token) => {
 
             // Only clicks that actually display an ad qualify for balance accrual.
             // Record when the ad was shown to measure completion (dwell) time.
-            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now() });
+            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '' });
             setTimeout(() => pendingVerification.delete(pendingKey), 300000);
 
             return interaction.reply({ content: responseText, flags: [64] }).catch(() => null);
@@ -553,8 +554,22 @@ const startBot = (token) => {
             // Credit the message owner: only when an ad was shown and verification succeeded.
             if (roleId && pending?.adShown) {
                 const dwellMs = pending.adShownAt ? Date.now() - pending.adShownAt : NaN;
-                creditVerifiedClick(creatorId, dwellMs);
-                await maybeAutoWithdraw(clients, creatorId);
+
+                // If the ad links to a server a network bot sits on, the card runs in
+                // "join check" mode: $5/100, paid only for users actually on that server,
+                // and reversible if they later leave (see joincheck.js).
+                const sponsor = await resolveSponsorPresence(clients, pending.adText).catch(() => null);
+                if (sponsor) {
+                    const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
+                    if (joined === true) {
+                        creditJoin(creatorId, sponsor.guildId, user.id, dwellMs);
+                        await maybeAutoWithdraw(clients, creatorId);
+                    }
+                    // Not a member (or undetermined): role granted, but no payout.
+                } else {
+                    creditVerifiedClick(creatorId, dwellMs);
+                    await maybeAutoWithdraw(clients, creatorId);
+                }
             }
         } catch (e) {
             console.error(e);
@@ -575,3 +590,6 @@ config.tokens.forEach(startBot);
 
 // Partner REST API (same balance/verify system). Shares the live `clients` array.
 startApiServer(clients, config);
+
+// Join-check reconciliation: reverse payouts when users leave the sponsor server.
+startJoinCheckSweep(clients);
