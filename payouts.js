@@ -228,6 +228,12 @@ async function autoPayViaCheck(clients, userId, amount, _seen) {
     settings[userId].withdrawals.push(withdrawal);
     saveJSON('settings.json', settings);
 
+    // Audit log: the payout is a debit off the user's balance.
+    logFunds(clients, {
+        type: 'debit', creatorId: userId, amount,
+        reason: `Auto-payout (USDT check #${check.check_id})`
+    });
+
     // Referral: pay whoever referred this user 10% of the (now completed) withdrawal.
     payReferral(clients, userId, amount, _seen);
 
