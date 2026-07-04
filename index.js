@@ -68,7 +68,7 @@ const startBot = (token) => {
             embed.addFields({ name: 'Bid', value: `**$${getBid(s).toFixed(2)}** per 100 clicks`, inline: false });
             const beh = userBehavior(settings, userId);
             const chart = behaviorChartUrl(beh, `Completion time · n=${beh.total}`, baselineExcluding(settings, userId));
-            embed.addFields({ name: '⏱️ Completion time (users)', value: beh.total ? `n = ${beh.total}` : '*No data*', inline: false });
+            embed.addFields({ name: 'Completion time (users)', value: beh.total ? `n = ${beh.total}` : '*No data*', inline: false });
             if (chart) embed.setImage(chart);
         }
 
@@ -101,9 +101,9 @@ const startBot = (token) => {
             const shown = ids.slice(0, 8);
 
             let statText = '';
-            for (const gid of shown) statText += `🏰 **${guildName(gid)}**\n${fmtWin(win(grouped[gid]))}\n`;
+            for (const gid of shown) statText += `**${guildName(gid)}**\n${fmtWin(win(grouped[gid]))}\n`;
             if (ids.length > shown.length) statText += `…and ${ids.length - shown.length} more`;
-            embed.addFields({ name: isSelf ? '📊 Your verifications' : '📊 Verifications', value: statText.slice(0, 1024) });
+            embed.addFields({ name: isSelf ? 'Your verifications' : 'Verifications', value: statText.slice(0, 1024) });
         }
 
         const components = [];
@@ -157,14 +157,14 @@ const startBot = (token) => {
         const pageCount = Math.max(1, Math.ceil(guildIds.length / PAGE));
         const cur = Math.min(Math.max(0, page), pageCount - 1);
 
-        let text = '📊 **Verification statistics:**\n\n';
-        text += `🏰 **All servers:**\n${fmtWin(win(entries))}\n\n`;
+        let text = '**Verification statistics:**\n\n';
+        text += `**All servers:**\n${fmtWin(win(entries))}\n\n`;
 
         if (guildIds.length === 0) {
             text += '*No verification data yet.*';
         } else {
             for (const gid of guildIds.slice(cur * PAGE, cur * PAGE + PAGE)) {
-                text += `🏰 **${guildName(gid)}** (${gid})\n${fmtWin(win(grouped[gid]))}\n\n`;
+                text += `**${guildName(gid)}** (${gid})\n${fmtWin(win(grouped[gid]))}\n\n`;
             }
             if (pageCount > 1) text += `Page ${cur + 1}/${pageCount}`;
         }
@@ -181,7 +181,7 @@ const startBot = (token) => {
         const gb = globalBehavior(loadJSON('settings.json'));
         const gbChart = behaviorChartUrl(gb, `Completion time · all servers · n=${gb.total}`);
         const embeds = gbChart
-            ? [new EmbedBuilder().setColor('#a020f0').setTitle('⏱️ Completion time (users)').setImage(gbChart)]
+            ? [new EmbedBuilder().setColor('#a020f0').setTitle('Completion time (users)').setImage(gbChart)]
             : [];
 
         return { content: text, embeds, components };
