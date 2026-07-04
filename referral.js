@@ -8,7 +8,7 @@
 // button disappears for that server forever (see serverreferrers.json in index.js).
 const REFERRAL_RATE = 0.10;        // referrer earns 10% of referred user's withdrawals
 const BOOST_RATE = 7;              // $ per 100 verifications while the boost is active
-const BOOST_DAYS = 3;
+const BOOST_DAYS = 7;
 const BOOST_MS = BOOST_DAYS * 24 * 60 * 60 * 1000;
 
 // Is the referral boost still active for this user's settings record?
