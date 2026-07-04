@@ -176,12 +176,14 @@ async function handleAdmin(req, res, path, clients, config) {
             .map(([gid, list]) => ({ gid, name: guildNameOf(clients, gid), ...verifStats(list) }))
             .sort((a, b) => b.total - a.total);
 
-        // Financial: sum of every user's balance = money still owed to creators.
+        // Financial: sum of every user's POSITIVE balance = money still owed
+        // to creators. Negative balances (from sponsor-leave clawbacks) don't
+        // reduce the debt — they represent overpayments the user has to earn
+        // back, not funds available to the platform.
         let outstanding = 0, withBalance = 0;
         for (const u of Object.keys(settings)) {
             const b = Number(settings[u]?.balance) || 0;
-            outstanding += b;
-            if (b > 0) withBalance++;
+            if (b > 0) { outstanding += b; withBalance++; }
         }
 
         return send(res, 200, {
