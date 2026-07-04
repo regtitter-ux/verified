@@ -148,16 +148,21 @@ async function handleCommands(message, config) {
         if (!cryptopay.enabled()) {
             return message.reply('⚠️ Crypto Pay is not configured. Set the `CRYPTO_PAY_TOKEN` environment variable.');
         }
+        const net = cryptopay.HOST === 'pay.crypt.bot' ? 'mainnet' : 'testnet';
         const bal = await cryptopay.call('getBalance').catch((e) => ({ __err: e.message }));
         if (!Array.isArray(bal)) {
-            return message.reply(`❌ Couldn't fetch balance${bal?.__err ? ` (${bal.__err})` : ''}.`);
+            let hint = '';
+            if (/unauthor/i.test(bal?.__err || '')) {
+                hint = `\nThe token was rejected. Make sure \`CRYPTO_PAY_TOKEN\` matches the network — you're currently on **${net}**` +
+                    `${net === 'mainnet' ? ' (a @CryptoTestnetBot token needs `CRYPTO_PAY_TESTNET=1`)' : ' (a @CryptoBot token must NOT have `CRYPTO_PAY_TESTNET` set)'}, and has no extra spaces.`;
+            }
+            return message.reply(`❌ Couldn't fetch balance${bal?.__err ? ` (${bal.__err})` : ''}.${hint}`);
         }
         const nonZero = bal.filter((b) => Number(b.available) > 0 || Number(b.onhold) > 0);
         const rows = (nonZero.length ? nonZero : bal).map((b) => {
             const onhold = Number(b.onhold) > 0 ? ` (on hold: ${b.onhold})` : '';
             return `• **${b.currency_code}**: \`${b.available}\`${onhold}`;
         });
-        const net = cryptopay.HOST === 'pay.crypt.bot' ? 'mainnet' : 'testnet';
         return message.reply(`💰 **Crypto Pay app balance** (${net}):\n${rows.join('\n') || '*empty*'}`);
     }
 }
