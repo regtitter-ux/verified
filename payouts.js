@@ -1,8 +1,7 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { logFunds } = require('./fundslog.js');
-
-const REFERRAL_RATE = 0.10; // referrer earns 10% of each referred user's withdrawal
+const { REFERRAL_RATE } = require('./referral.js'); // referrer earns 10% of each referred user's withdrawal
 
 const WITHDRAW_CHANNEL = '1521877173647184054';
 const THRESHOLD = 10;                       // auto-withdraw once balance reaches this

@@ -14,6 +14,7 @@
 // bot stays intent-free (no Server Members intent required anywhere).
 const { loadJSON, saveJSON } = require('./database.js');
 const { logFunds } = require('./fundslog.js');
+const { boostedRate, REFERRAL_RATE } = require('./referral.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -90,7 +91,8 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId) 
     const settings = loadJSON('settings.json');
     if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
     const s = settings[creatorId];
-    const perJoin = round2(getJoinBid(s) / 100);
+    // Boosted referral rate acts as a floor while active (see referral.js).
+    const perJoin = round2(boostedRate(s, getJoinBid(s)) / 100);
     s.balance = round2((Number(s.balance) || 0) + perJoin);
     saveJSON('settings.json', settings);
 
@@ -134,8 +136,11 @@ async function sweepOnce(clients) {
         if (rec.status !== 'joined' || !leavers.has(rec.id)) continue;
 
         // Reverse the payout (balance may go negative, like manual edits).
+        // The portion that pushes the balance below zero is money already paid out
+        // via a withdrawal — that's the part the referrer earned a bonus on.
+        const before = settings[rec.creatorId] ? (Number(settings[rec.creatorId].balance) || 0) : 0;
         if (settings[rec.creatorId]) {
-            settings[rec.creatorId].balance = round2((Number(settings[rec.creatorId].balance) || 0) - rec.amount);
+            settings[rec.creatorId].balance = round2(before - rec.amount);
         }
         rec.status = 'left';
         rec.leftAt = Date.now();
@@ -146,6 +151,23 @@ async function sweepOnce(clients) {
             guildId: rec.cardGuildId, channelId: rec.channelId, amount: rec.amount,
             reason: 'Clawback — user left sponsor server'
         });
+
+        // If the referrer already got a bonus from these funds (i.e. they were
+        // withdrawn), claw back their 10% share of the withdrawn portion too.
+        const withdrawnPortion = round2(rec.amount - Math.max(0, Math.min(before, rec.amount)));
+        if (withdrawnPortion > 0) {
+            const referrerId = Object.keys(settings).find(
+                (uid) => uid !== rec.creatorId && Array.isArray(settings[uid].referrals) && settings[uid].referrals.includes(rec.creatorId)
+            );
+            const refClaw = round2(withdrawnPortion * REFERRAL_RATE);
+            if (referrerId && refClaw > 0) {
+                settings[referrerId].balance = round2((Number(settings[referrerId].balance) || 0) - refClaw);
+                await logFunds(clients, {
+                    type: 'debit', creatorId: referrerId, userId: rec.creatorId,
+                    amount: refClaw, reason: 'Referral clawback (referred user reversal)'
+                });
+            }
+        }
 
         // Undo the verification itself: strip the granted role and drop the verified
         // record, so leaving the sponsor server fully reverses the verification.

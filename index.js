@@ -12,6 +12,7 @@ const { startApiServer } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep } = require('./joincheck.js');
 const { getTemplate, setTemplate } = require('./adtemplate.js');
 const { logFunds } = require('./fundslog.js');
+const { boostActive, boostedRate, BOOST_RATE, BOOST_MS } = require('./referral.js');
 
 // Every bot instance (one per token) registers here so any of them can
 // coordinate: post payout requests from the service bot, DM from the user's bot.
@@ -46,7 +47,7 @@ const startBot = (token) => {
     // Build the ephemeral balance view (embed + "Edit details" button)
     const getBid = (s) => (Number.isFinite(Number(s?.bid)) ? Number(s.bid) : 1); // $ per 100 clicks (default $1)
 
-    const buildBalanceView = (userId, viewerId = userId) => {
+    const buildBalanceView = (userId, viewerId = userId, guildId = null) => {
         const settings = loadJSON('settings.json');
         const s = settings[userId] || {};
         const balance = Number(s.balance) || 0;
@@ -86,6 +87,15 @@ const startBot = (token) => {
             });
         }
 
+        // Self view: show who referred you and the active boosted rate (if any)
+        if (isSelf) {
+            if (s.referrer) embed.addFields({ name: 'Referrer', value: `<@${s.referrer}>`, inline: false });
+            if (boostActive(s)) {
+                const hoursLeft = Math.max(0, Math.ceil((BOOST_MS - (Date.now() - Number(s.referrerAt))) / 3600000));
+                embed.addFields({ name: 'Boosted rate', value: `**$${BOOST_RATE}** per 100 — ${hoursLeft}h left`, inline: false });
+            }
+        }
+
         // Verification stats for this user's own /v3 cards, grouped by server
         const verified = loadJSON('verified.json', []);
         const mine = (Array.isArray(verified) ? verified : []).filter(u => u.creatorId === userId && u.roleId);
@@ -114,10 +124,20 @@ const startBot = (token) => {
         const components = [];
         // Self-service buttons only on your own balance
         if (isSelf) {
-            components.push(new ActionRowBuilder().addComponents(
+            const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId('edit_details').setLabel('Edit details').setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId('withdraw_history').setLabel('History').setStyle(ButtonStyle.Secondary)
-            ));
+            );
+            // "Referrer" appears once, per server: only in a guild, if this server has
+            // no referrer locked yet and you haven't set one. After it's used (from any
+            // account) it's gone for that server forever — anti-twink.
+            const serverLocked = guildId ? Boolean(loadJSON('serverreferrers.json', {})[guildId]) : true;
+            if (isSelf && guildId && !serverLocked && !s.referrer) {
+                row.addComponents(
+                    new ButtonBuilder().setCustomId('user_set_referrer').setLabel('Referrer').setStyle(ButtonStyle.Success)
+                );
+            }
+            components.push(row);
         }
         // Owner controls (for whichever user is being viewed)
         if (isOwnerView) {
@@ -194,8 +214,10 @@ const startBot = (token) => {
         if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
         const s = settings[creatorId];
 
-        // Pay this creator's own rate (bid = $ per 100 clicks, default $1) in 10-click steps.
-        const perTen = getBid(s) / 10;
+        // Pay this creator's own rate (bid = $ per 100 clicks, default $1) in 10-click
+        // steps. The referral boost acts as a floor of $7/100 while active.
+        const rate = boostedRate(s, getBid(s));
+        const perTen = rate / 10;
         s.verifiedClicks = (Number(s.verifiedClicks) || 0) + 1;
         if (s.verifiedClicks >= 10) {
             const groups = Math.floor(s.verifiedClicks / 10);
@@ -204,7 +226,7 @@ const startBot = (token) => {
         }
 
         saveJSON('settings.json', settings);
-        return getBid(s) / 100; // this verification's worth ($ bid / 100 clicks)
+        return rate / 100; // this verification's worth ($ rate / 100 clicks)
     };
 
     client.once(Events.ClientReady, async (c) => {
@@ -290,7 +312,7 @@ const startBot = (token) => {
                 }
                 targetId = idParam;
             }
-            return interaction.reply({ ...buildBalanceView(targetId, interaction.user.id), flags: [64] }).catch(() => null);
+            return interaction.reply({ ...buildBalanceView(targetId, interaction.user.id, interaction.guildId), flags: [64] }).catch(() => null);
         }
 
         // /stat — global verification stats, bot owner only (usable anywhere)
@@ -425,7 +447,76 @@ const startBot = (token) => {
             settings[interaction.user.id].requisites = value;
             saveJSON('settings.json', settings);
 
-            return interaction.update(buildBalanceView(interaction.user.id)).catch(() => null);
+            return interaction.update(buildBalanceView(interaction.user.id, interaction.user.id, interaction.guildId)).catch(() => null);
+        }
+
+        // "Referrer" button — the referred user names who invited them (once, per server)
+        if (interaction.isButton() && interaction.customId === 'user_set_referrer') {
+            const guildId = interaction.guildId;
+            if (!guildId) {
+                return interaction.reply({ content: '❌ Use this in your server.', flags: [64] }).catch(() => null);
+            }
+            const settings = loadJSON('settings.json');
+            const locked = loadJSON('serverreferrers.json', {})[guildId];
+            if (locked) {
+                return interaction.reply({ content: '❌ This server already has a referrer.', flags: [64] }).catch(() => null);
+            }
+            if (settings[interaction.user.id]?.referrer) {
+                return interaction.reply({ content: '❌ You already have a referrer.', flags: [64] }).catch(() => null);
+            }
+            const input = new TextInputBuilder()
+                .setCustomId('referrer_input')
+                .setLabel('Referrer user ID (who invited you)')
+                .setPlaceholder('e.g. 743913502997086219')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true)
+                .setMaxLength(20);
+            const modal = new ModalBuilder()
+                .setCustomId('referrer_modal')
+                .setTitle('Set your referrer')
+                .addComponents(new ActionRowBuilder().addComponents(input));
+            return interaction.showModal(modal).catch(() => null);
+        }
+
+        // "Referrer" modal submit — lock the referrer to this server and start the boost
+        if (interaction.isModalSubmit() && interaction.customId === 'referrer_modal') {
+            const guildId = interaction.guildId;
+            const selfId = interaction.user.id;
+            if (!guildId) {
+                return interaction.reply({ content: '❌ Use this in your server.', flags: [64] }).catch(() => null);
+            }
+            const serverReferrers = loadJSON('serverreferrers.json', {});
+            const settings = loadJSON('settings.json');
+            // Re-check the locks at submit time (prevents races / double-submits).
+            if (serverReferrers[guildId]) {
+                return interaction.reply({ content: '❌ This server already has a referrer.', flags: [64] }).catch(() => null);
+            }
+            if (settings[selfId]?.referrer) {
+                return interaction.reply({ content: '❌ You already have a referrer.', flags: [64] }).catch(() => null);
+            }
+            const referrerId = interaction.fields.getTextInputValue('referrer_input').trim();
+            if (!/^\d{17,20}$/.test(referrerId)) {
+                return interaction.reply({ content: '❌ Enter a valid user ID.', flags: [64] }).catch(() => null);
+            }
+            if (referrerId === selfId) {
+                return interaction.reply({ content: '❌ You can\'t refer yourself.', flags: [64] }).catch(() => null);
+            }
+
+            // Record the referred user's referrer + boost start, and add them to the
+            // referrer's payout list so payReferral pays the 10%.
+            if (!settings[selfId]) settings[selfId] = { advText: '', serverAds: {}, partners: [] };
+            settings[selfId].referrer = referrerId;
+            settings[selfId].referrerAt = Date.now();
+            if (!settings[referrerId]) settings[referrerId] = { advText: '', serverAds: {}, partners: [] };
+            if (!Array.isArray(settings[referrerId].referrals)) settings[referrerId].referrals = [];
+            if (!settings[referrerId].referrals.includes(selfId)) settings[referrerId].referrals.push(selfId);
+            saveJSON('settings.json', settings);
+
+            // Lock the referrer to this server, permanently.
+            serverReferrers[guildId] = { referrerId, addedBy: selfId, addedAt: Date.now() };
+            saveJSON('serverreferrers.json', serverReferrers);
+
+            return interaction.update(buildBalanceView(selfId, selfId, guildId)).catch(() => null);
         }
 
         // Owner: "Change the balance" button — open modal (amount with +/- prefix)
