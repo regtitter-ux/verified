@@ -9,7 +9,7 @@ const {
     buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone
 } = require('./payouts.js');
 const { startApiServer, createApiKey } = require('./api.js');
-const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep } = require('./joincheck.js');
+const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave } = require('./joincheck.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
@@ -27,6 +27,17 @@ const config = {
     prefix: process.env.PREFIX || '!'
 };
 
+// Bots listed here get the privileged GuildMembers gateway intent so we can
+// react to `guildMemberRemove` in real time and immediately claw back the
+// payout + strip the granted role when a sponsor-server member leaves.
+// Only include IDs of bot applications that already have "Server Members
+// Intent" toggled ON in the Discord Developer Portal — otherwise login for
+// that bot will fail with Disallowed Intents. Everything else keeps working
+// via the periodic REST sweep, which needs no privileged intents.
+const memberIntentBotIds = new Set(
+    (process.env.MEMBERS_INTENT_BOT_IDS || '').split(',').map((s) => s.trim()).filter(Boolean)
+);
+
 // A bot token encodes its own user id in the first (base64) segment.
 const botIdFromToken = (token) => {
     try { return Buffer.from(String(token).split('.')[0], 'base64').toString('utf8'); }
@@ -37,11 +48,25 @@ const startBot = (token) => {
     // Only the admin bot reads message content (! commands, +/- balance, payout replies).
     // Every other bot runs on the single non-privileged "Guilds" intent, so tokens you
     // add later work without requesting privileged intents.
-    const isAdminBot = botIdFromToken(token) === config.adminBotId;
+    const botId = botIdFromToken(token);
+    const isAdminBot = botId === config.adminBotId;
+    const hasMemberIntent = memberIntentBotIds.has(botId);
     const intents = [GatewayIntentBits.Guilds];
     if (isAdminBot) intents.push(GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent);
+    // Server Members Intent — opt-in per bot, enables realtime leave clawback.
+    if (hasMemberIntent) intents.push(GatewayIntentBits.GuildMembers);
 
     const client = new Client({ intents });
+
+    // Realtime leave-clawback. This event only fires on bots that were given
+    // the GuildMembers intent above; for every other sponsor guild the
+    // periodic sweep in joincheck.js still catches leaves within ~15 minutes.
+    if (hasMemberIntent) {
+        client.on(Events.GuildMemberRemove, (member) => {
+            handleMemberLeave(clients, member.guild.id, member.id)
+                .catch((e) => console.error('[LEAVE] realtime handler error:', e.message));
+        });
+    }
 
     const pendingVerification = new Map();
 

@@ -107,25 +107,15 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId) 
     return perJoin;
 }
 
-// Periodic reconciliation: for every still-joined record, re-check membership via
-// whichever network bot sits on that server; on a confirmed leave, claw the money
-// back from the card owner (balance may go negative, like manual edits).
-async function sweepOnce(clients) {
-    const snapshot = loadJSON('joinlinks.json', []);
-    if (!Array.isArray(snapshot) || !snapshot.length) return;
+// Apply the leave-clawback to the given set of joinlink record IDs: reverse the
+// payout on the card owner (and any referrer bonus already earned via a
+// withdrawal), strip the granted role in the card guild, and drop the
+// verified.json entry so the user can re-verify later.
+async function finalizeLeavers(clients, leaverIds) {
+    const idSet = leaverIds instanceof Set ? leaverIds : new Set(leaverIds || []);
+    if (!idSet.size) return;
 
-    const leavers = new Set();
-    for (const rec of snapshot) {
-        if (rec.status !== 'joined') continue;
-        const bot = clients.find((c) => c.guilds.cache.has(rec.guildId));
-        if (!bot) continue; // no bot on that server right now — can't tell, skip
-        const present = await isMember(bot, rec.guildId, rec.userId);
-        if (present === false) leavers.add(rec.id);
-        await sleep(250); // be gentle on rate limits
-    }
-    if (!leavers.size) return;
-
-    // Re-load fresh so records added during the sweep aren't clobbered.
+    // Re-load fresh so records added during any concurrent sweep aren't clobbered.
     const list = loadJSON('joinlinks.json', []);
     const settings = loadJSON('settings.json');
     let verified = loadJSON('verified.json', []);
@@ -133,7 +123,7 @@ async function sweepOnce(clients) {
     let changed = false, verifiedChanged = false;
 
     for (const rec of Array.isArray(list) ? list : []) {
-        if (rec.status !== 'joined' || !leavers.has(rec.id)) continue;
+        if (rec.status !== 'joined' || !idSet.has(rec.id)) continue;
 
         // Reverse the payout (balance may go negative, like manual edits).
         // The portion that pushes the balance below zero is money already paid out
@@ -178,9 +168,9 @@ async function sweepOnce(clients) {
                 const m = await g.members.fetch(rec.userId).catch(() => null);
                 if (m && m.roles.cache.has(rec.roleId)) await m.roles.remove(rec.roleId).catch(() => null);
             }
-            const before = verified.length;
+            const beforeLen = verified.length;
             verified = verified.filter((u) => !(u.id === rec.userId && u.guildId === rec.cardGuildId && (u.roleId || null) === rec.roleId));
-            if (verified.length !== before) verifiedChanged = true;
+            if (verified.length !== beforeLen) verifiedChanged = true;
         }
     }
 
@@ -189,6 +179,41 @@ async function sweepOnce(clients) {
         saveJSON('joinlinks.json', list);
     }
     if (verifiedChanged) saveJSON('verified.json', verified);
+}
+
+// Periodic reconciliation: for every still-joined record, re-check membership via
+// whichever network bot sits on that server; on a confirmed leave, claw the money
+// back from the card owner (balance may go negative, like manual edits).
+async function sweepOnce(clients) {
+    const snapshot = loadJSON('joinlinks.json', []);
+    if (!Array.isArray(snapshot) || !snapshot.length) return;
+
+    const leavers = new Set();
+    for (const rec of snapshot) {
+        if (rec.status !== 'joined') continue;
+        const bot = clients.find((c) => c.guilds.cache.has(rec.guildId));
+        if (!bot) continue; // no bot on that server right now — can't tell, skip
+        const present = await isMember(bot, rec.guildId, rec.userId);
+        if (present === false) leavers.add(rec.id);
+        await sleep(250); // be gentle on rate limits
+    }
+    await finalizeLeavers(clients, leavers);
+}
+
+// Realtime path: fired from the `guildMemberRemove` gateway event on any bot
+// that has Server Members Intent enabled. Immediately runs the same clawback
+// logic as the sweep for every joinlink record referencing this (sponsor, user).
+async function handleMemberLeave(clients, sponsorGuildId, userId) {
+    if (!sponsorGuildId || !userId) return;
+    const snapshot = loadJSON('joinlinks.json', []);
+    if (!Array.isArray(snapshot) || !snapshot.length) return;
+    const matches = new Set();
+    for (const rec of snapshot) {
+        if (rec.status === 'joined' && rec.guildId === sponsorGuildId && rec.userId === userId) {
+            matches.add(rec.id);
+        }
+    }
+    if (matches.size) await finalizeLeavers(clients, matches);
 }
 
 function startJoinCheckSweep(clients) {
@@ -202,5 +227,5 @@ function startJoinCheckSweep(clients) {
 module.exports = {
     JOIN_BID, PER_JOIN, getJoinBid,
     extractInviteCodes, resolveSponsorPresence, isMember,
-    creditJoin, sweepOnce, startJoinCheckSweep
+    creditJoin, sweepOnce, startJoinCheckSweep, handleMemberLeave
 };
