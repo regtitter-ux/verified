@@ -173,8 +173,21 @@ async function handleAdmin(req, res, path, clients, config) {
         const grouped = {};
         for (const u of entries) (grouped[u.guildId] ||= []).push(u);
         const perGuild = Object.entries(grouped)
-            .map(([gid, list]) => ({ gid, name: guildNameOf(clients, gid), ...verifStats(list) }))
-            .sort((a, b) => b.total - a.total);
+            .map(([gid, list]) => ({ gid, name: guildNameOf(clients, gid), ...verifStats(list) }));
+
+        // A server with a per-server ad or per-server ads-off flag but no
+        // verifications yet still needs a row in the "По серверам" table so
+        // the admin can manage its ads/kran from there. Union the two.
+        const knownGids = new Set(perGuild.map((g) => g.gid));
+        const adGids = Object.keys(s.serverAds || {}).filter((g) => typeof s.serverAds[g] === 'string' && s.serverAds[g].trim());
+        const offGids = Object.keys(cfg.serverAdsOff || {}).filter((g) => cfg.serverAdsOff[g]);
+        for (const gid of [...adGids, ...offGids]) {
+            if (!knownGids.has(gid)) {
+                perGuild.push({ gid, name: guildNameOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0 });
+                knownGids.add(gid);
+            }
+        }
+        perGuild.sort((a, b) => b.total - a.total);
 
         // Financial: sum of every user's POSITIVE balance = money still owed
         // to creators. Negative balances (from sponsor-leave clawbacks) don't
@@ -189,6 +202,7 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, {
             adsOff: Boolean(cfg.adsOff),
             adsOffAt: cfg.adsOffAt || 0,
+            serverAdsOff: (cfg.serverAdsOff && typeof cfg.serverAdsOff === 'object') ? cfg.serverAdsOff : {},
             templates: {
                 default: typeof t.default === 'string' ? t.default : '',
                 servers: Object.entries(t.servers || {})
@@ -453,6 +467,23 @@ async function handleAdmin(req, res, path, clients, config) {
             return send(res, 200, { ok: true, requisites: req }, cors);
         }
         return send(res, 404, { error: 'unknown field' }, cors);
+    }
+
+    // Per-server ads-off — same semantic as the global switch, scoped to
+    // one guild. Verification handler in index.js OR's the two together.
+    if (path === '/admin/server-ads-off' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = body?.gid ? String(body.gid) : '';
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        const off = Boolean(body?.off);
+        const cfg = loadJSON('siteconfig.json', {});
+        if (!cfg.serverAdsOff || typeof cfg.serverAdsOff !== 'object') cfg.serverAdsOff = {};
+        if (off) cfg.serverAdsOff[gid] = true;
+        else delete cfg.serverAdsOff[gid];
+        cfg.serverAdsOffAt = Date.now();
+        saveJSON('siteconfig.json', cfg);
+        return send(res, 200, { ok: true, gid, off }, cors);
     }
 
     if (path === '/admin/ads-off' && req.method === 'PUT') {

@@ -984,7 +984,11 @@ const startBot = (token) => {
             // Global "no orders" kill switch (siteconfig.json.adsOff): skip
             // every ad. adShown stays false, so no balance is credited to
             // anyone — verifications run for free until you flip it back.
-            const adsOff = Boolean(loadJSON('siteconfig.json', {}).adsOff);
+            // A per-server override (serverAdsOff[gid]) works the same way,
+            // but for one guild in particular.
+            const cfg = loadJSON('siteconfig.json', {});
+            const serverOff = Boolean(cfg.serverAdsOff && cfg.serverAdsOff[guild.id]);
+            const adsOff = Boolean(cfg.adsOff) || serverOff;
             if (!adsOff) {
                 const ownAd = getAd(creatorId);
                 if (ownAd) candidates.push(ownAd);
