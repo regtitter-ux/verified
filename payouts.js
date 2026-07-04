@@ -1,5 +1,8 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
+const { logFunds } = require('./fundslog.js');
+
+const REFERRAL_RATE = 0.10; // referrer earns 10% of each referred user's withdrawal
 
 const WITHDRAW_CHANNEL = '1521877173647184054';
 const THRESHOLD = 10;                       // auto-withdraw once balance reaches this
@@ -82,9 +85,37 @@ async function findPayoutChannel(clients) {
     return null;
 }
 
+// Pay the referrer of `referredId` their cut (10%) of a withdrawal. Whoever lists
+// referredId in their `referrals` earns it; the bonus lands on their balance and
+// can itself trigger their own payout (guarded against referral cycles).
+function payReferral(clients, referredId, amount, _seen) {
+    const settings = loadJSON('settings.json');
+    const referrerId = Object.keys(settings).find(
+        (uid) => uid !== referredId && Array.isArray(settings[uid].referrals) && settings[uid].referrals.includes(referredId)
+    );
+    if (!referrerId) return;
+
+    const bonus = round2(amount * REFERRAL_RATE);
+    if (bonus <= 0) return;
+
+    settings[referrerId].balance = round2((Number(settings[referrerId].balance) || 0) + bonus);
+    saveJSON('settings.json', settings);
+
+    logFunds(clients, {
+        type: 'credit', creatorId: referrerId, userId: referredId,
+        amount: bonus, reason: 'Referral bonus (10% of withdrawal)'
+    });
+
+    // The referrer's bonus may push them over the threshold too.
+    maybeAutoWithdraw(clients, referrerId, _seen).catch(() => null);
+}
+
 // If the user's balance reached the threshold, create a withdrawal request and post it
 // from the service bot (whichever instance can see the payout channel).
-async function maybeAutoWithdraw(clients, userId) {
+async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
+    if (_seen.has(userId)) return; // guard against referral cycles (A refers B refers A)
+    _seen.add(userId);
+
     const settings = loadJSON('settings.json');
     const s = settings[userId];
     if (!s) return;
@@ -106,6 +137,9 @@ async function maybeAutoWithdraw(clients, userId) {
     };
     s.withdrawals.push(withdrawal);
     saveJSON('settings.json', settings);
+
+    // Referral: pay whoever referred this user 10% of the withdrawal.
+    payReferral(clients, userId, amount, _seen);
 
     try {
         const channel = await findPayoutChannel(clients);

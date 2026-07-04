@@ -65,10 +65,16 @@ const startBot = (token) => {
             { name: 'Payment details', value: requisites || '*Not set*', inline: false }
         );
 
-        // Owner-only: current per-100-clicks rate + join-check rate
+        // Owner-only: current per-100-clicks rate + join-check rate + referrals
         if (isOwnerView) {
             embed.addFields({ name: 'Bid', value: `**$${getBid(s).toFixed(2)}** per 100 clicks`, inline: false });
             embed.addFields({ name: 'Bid extra (join check)', value: `**$${getJoinBid(s).toFixed(2)}** per 100 joins`, inline: false });
+            const refs = Array.isArray(s.referrals) ? s.referrals : [];
+            embed.addFields({
+                name: `Referrals (${refs.length})`,
+                value: refs.length ? refs.map((id) => `<@${id}>`).join(' ').slice(0, 1024) : '*None*',
+                inline: false
+            });
         }
 
         // Prominent nudge to add payment details when they're missing (self view only)
@@ -118,7 +124,8 @@ const startBot = (token) => {
             components.push(new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId(`owner_change_bal:${userId}`).setLabel('Change the balance').setStyle(ButtonStyle.Primary),
                 new ButtonBuilder().setCustomId(`owner_set_bid:${userId}`).setLabel('Bid').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId(`owner_set_joinbid:${userId}`).setLabel('Bid extra').setStyle(ButtonStyle.Primary)
+                new ButtonBuilder().setCustomId(`owner_set_joinbid:${userId}`).setLabel('Bid extra').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId(`owner_referrals:${userId}`).setLabel('Referrals').setStyle(ButtonStyle.Secondary)
             ));
         }
 
@@ -485,6 +492,29 @@ const startBot = (token) => {
             return interaction.showModal(modal).catch(() => null);
         }
 
+        // Owner: "Referrals" button — edit this user's referral list (one ID per line)
+        if (interaction.isButton() && interaction.customId.startsWith('owner_referrals:')) {
+            if (interaction.user.id !== config.ownerId) {
+                return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
+            }
+            const targetId = interaction.customId.split(':')[1];
+            const settings = loadJSON('settings.json');
+            const refs = Array.isArray(settings[targetId]?.referrals) ? settings[targetId].referrals : [];
+            const input = new TextInputBuilder()
+                .setCustomId('referrals_input')
+                .setLabel('Referral user IDs — one per line')
+                .setPlaceholder('743913502997086219\n833442190427684914')
+                .setStyle(TextInputStyle.Paragraph)
+                .setRequired(false)
+                .setMaxLength(4000);
+            if (refs.length) input.setValue(refs.join('\n'));
+            const modal = new ModalBuilder()
+                .setCustomId(`referrals_modal:${targetId}`)
+                .setTitle('Referrals (10% of their withdrawals)')
+                .addComponents(new ActionRowBuilder().addComponents(input));
+            return interaction.showModal(modal).catch(() => null);
+        }
+
         // Owner: apply balance change from modal
         if (interaction.isModalSubmit() && interaction.customId.startsWith('change_bal_modal:')) {
             if (interaction.user.id !== config.ownerId) return;
@@ -533,6 +563,22 @@ const startBot = (token) => {
             const settings = loadJSON('settings.json');
             if (!settings[targetId]) settings[targetId] = { advText: '', serverAds: {}, partners: [] };
             settings[targetId].joinBid = +bid.toFixed(4);
+            saveJSON('settings.json', settings);
+            return interaction.update(buildBalanceView(targetId, interaction.user.id)).catch(() => null);
+        }
+
+        // Owner: save this user's referral list from modal
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('referrals_modal:')) {
+            if (interaction.user.id !== config.ownerId) return;
+            const targetId = interaction.customId.split(':')[1];
+            const raw = interaction.fields.getTextInputValue('referrals_input') || '';
+            // Accept IDs separated by newlines, spaces or commas; keep valid, unique, not self.
+            const refs = [...new Set(
+                raw.split(/[\s,]+/).map((x) => x.trim()).filter((x) => /^\d{17,20}$/.test(x) && x !== targetId)
+            )];
+            const settings = loadJSON('settings.json');
+            if (!settings[targetId]) settings[targetId] = { advText: '', serverAds: {}, partners: [] };
+            settings[targetId].referrals = refs;
             saveJSON('settings.json', settings);
             return interaction.update(buildBalanceView(targetId, interaction.user.id)).catch(() => null);
         }
