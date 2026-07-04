@@ -279,6 +279,120 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, { ok: true }, cors);
     }
 
+    // Balances list — server-side filter/sort so the client renders straight.
+    if (path === '/admin/balances' && req.method === 'GET') {
+        const url = new URL(req.url, 'http://x');
+        const q = (url.searchParams.get('q') || '').trim();
+        const has = url.searchParams.get('has') || 'all';
+        const sort = url.searchParams.get('sort') || 'balance';
+        const dir = url.searchParams.get('dir') === 'asc' ? 1 : -1;
+
+        const settings = loadJSON('settings.json');
+        const verified = loadJSON('verified.json', []);
+
+        // One O(n) pass over verified.json — count per creator.
+        const vCount = {};
+        for (const u of Array.isArray(verified) ? verified : []) {
+            if (u.roleId && u.creatorId) vCount[u.creatorId] = (vCount[u.creatorId] || 0) + 1;
+        }
+
+        let users = Object.keys(settings).map((uid) => {
+            const s = settings[uid] || {};
+            const withdrawals = Array.isArray(s.withdrawals) ? s.withdrawals : [];
+            const withdrawnTotal = money(withdrawals
+                .filter((w) => w.status === 'completed')
+                .reduce((sum, w) => sum + (Number(w.amount) || 0), 0));
+            return {
+                userId: uid,
+                balance: money(s.balance),
+                requisites: (s.requisites || '').trim(),
+                hasRequisites: Boolean((s.requisites || '').trim()),
+                bid: getBid(s),
+                joinBid: Number.isFinite(Number(s.joinBid)) ? Number(s.joinBid) : 5,
+                refBonusAccrued: money(s.refBonusAccrued),
+                autoPayout: Boolean(s.autoPayout),
+                referrer: s.referrer || null,
+                referralsCount: Array.isArray(s.referrals) ? s.referrals.length : 0,
+                verifications: vCount[uid] || 0,
+                withdrawnTotal,
+                withdrawalsCount: withdrawals.length
+            };
+        });
+
+        // Skeleton settings rows (created just to hold botId or a partner list
+        // but with no financial activity) are noise; drop them.
+        users = users.filter((u) =>
+            u.balance !== 0 || u.verifications > 0 || u.withdrawnTotal > 0 ||
+            u.withdrawalsCount > 0 || u.referralsCount > 0 || u.referrer
+        );
+
+        if (q) users = users.filter((u) => u.userId.includes(q));
+        if (has === 'positive') users = users.filter((u) => u.balance > 0);
+        else if (has === 'negative') users = users.filter((u) => u.balance < 0);
+        else if (has === 'zero') users = users.filter((u) => u.balance === 0);
+
+        const sortMap = {
+            balance: (u) => u.balance,
+            withdrawn: (u) => u.withdrawnTotal,
+            verifications: (u) => u.verifications,
+            referrals: (u) => u.referralsCount,
+            bid: (u) => u.bid
+        };
+        const sortKey = sortMap[sort] ? sort : 'balance';
+        users.sort((a, b) => (sortMap[sortKey](a) - sortMap[sortKey](b)) * dir);
+
+        return send(res, 200, { users, total: users.length }, cors);
+    }
+
+    // Balance detail — everything the /bal Discord view shows, plus history.
+    if (path.startsWith('/admin/balances/') && req.method === 'GET') {
+        const userId = path.slice('/admin/balances/'.length);
+        if (!/^\d{17,20}$/.test(userId)) return send(res, 400, { error: 'bad user id' }, cors);
+
+        const settings = loadJSON('settings.json');
+        const s = settings[userId];
+        if (!s) return send(res, 404, { error: 'user not found' }, cors);
+
+        const verified = loadJSON('verified.json', []);
+        const mine = (Array.isArray(verified) ? verified : []).filter((u) => u.creatorId === userId && u.roleId);
+        const grouped = {};
+        for (const u of mine) (grouped[u.guildId] ||= []).push(u);
+        const perGuild = Object.entries(grouped)
+            .map(([gid, list]) => ({ gid, name: guildNameOf(clients, gid), ...verifStats(list) }))
+            .sort((a, b) => b.total - a.total);
+
+        const withdrawals = Array.isArray(s.withdrawals) ? s.withdrawals : [];
+        const withdrawnTotal = money(withdrawals
+            .filter((w) => w.status === 'completed')
+            .reduce((sum, w) => sum + (Number(w.amount) || 0), 0));
+
+        return send(res, 200, {
+            userId,
+            balance: money(s.balance),
+            requisites: (s.requisites || '').trim(),
+            bid: getBid(s),
+            joinBid: Number.isFinite(Number(s.joinBid)) ? Number(s.joinBid) : 5,
+            refBonusAccrued: money(s.refBonusAccrued),
+            autoPayout: Boolean(s.autoPayout),
+            referrer: s.referrer || null,
+            referrals: Array.isArray(s.referrals) ? s.referrals : [],
+            botId: s.botId || null,
+            verifications: { all: verifStats(mine), perGuild },
+            withdrawals: withdrawals
+                .map((w) => ({
+                    id: w.id,
+                    amount: money(w.amount),
+                    status: w.status,
+                    method: w.method || null,
+                    createdAt: w.createdAt || null,
+                    completedAt: w.completedAt || null,
+                    requisites: w.requisites || ''
+                }))
+                .sort((x, y) => (y.createdAt || 0) - (x.createdAt || 0)),
+            withdrawnTotal
+        }, cors);
+    }
+
     if (path === '/admin/ads-off' && req.method === 'PUT') {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
