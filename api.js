@@ -184,16 +184,13 @@ async function handleAdmin(req, res, path, clients, config) {
         const cfg = loadJSON('siteconfig.json', {});
 
         const verified = loadJSON('verified.json', []);
-        const entries = (Array.isArray(verified) ? verified : []).filter((u) => u.roleId);
+        // Synthetic guildIds like 'api' (partner API calls without a real
+        // guildId) are excluded from ALL admin statistics — the top cards,
+        // the per-server table and the per-creative rollup alike.
+        const entries = (Array.isArray(verified) ? verified : [])
+            .filter((u) => u.roleId && /^\d{17,20}$/.test(u.guildId));
         const grouped = {};
-        // Skip synthetic guildIds like 'api' (partner API calls without a
-        // real guildId) — they'd otherwise clutter the per-server table as
-        // "Unknown Server" rows. Total counts in stats.all still include
-        // them.
-        for (const u of entries) {
-            if (!/^\d{17,20}$/.test(u.guildId)) continue;
-            (grouped[u.guildId] ||= []).push(u);
-        }
+        for (const u of entries) (grouped[u.guildId] ||= []).push(u);
         const perGuild = Object.entries(grouped)
             .map(([gid, list]) => ({ gid, name: guildNameOf(clients, gid), ...verifStats(list) }));
 

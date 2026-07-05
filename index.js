@@ -205,9 +205,11 @@ const startBot = (token) => {
     };
 
     // Global verification stats (only /v3 cards, ads or not), paginated 10 guilds/page.
+    // Synthetic 'api' guildIds (partner API without a real gid) are excluded
+    // from every number here, same as the admin panel.
     const buildStatView = (page = 0) => {
         const verified = loadJSON('verified.json', []);
-        const entries = (Array.isArray(verified) ? verified : []).filter(u => u.roleId);
+        const entries = (Array.isArray(verified) ? verified : []).filter(u => u.roleId && /^\d{17,20}$/.test(u.guildId));
         const now = Date.now();
 
         const win = (list) => ({
