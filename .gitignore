@@ -1,5 +1,20 @@
 node_modules/
-config.json
+
+# --- Local secrets ---
 .env
+config.json
+
+# --- Runtime state (lives on the Railway Volume in production, must never
+# leak the operational data into git). All of these are JSON files that
+# database.js reads/writes at runtime.
+settings.json
 verified.json
 apikeys.json
+adtemplates.json
+adcreatives.json
+joinlinks.json
+siteconfig.json
+hubroleusers.json
+funds.json
+fundslog.json
+serverreferrers.json
