@@ -214,6 +214,37 @@ async function handleAdmin(req, res, path, clients, config) {
             if (b > 0) { outstanding += b; withBalance++; }
         }
 
+        // Per-creative rollup: verified.json entries carry the adKey they
+        // were shown under (set by touchCreative in index.js), so we can
+        // attribute counts back to individual rendered ad texts. Untagged
+        // entries (from before creative tracking) are ignored here.
+        const creatives = loadJSON('adcreatives.json', {});
+        const now = Date.now();
+        const perCreative = {}; // adKey -> { hour, day, week, month, total, guilds: {gid: count} }
+        for (const u of entries) {
+            if (!u.adKey) continue;
+            let c = perCreative[u.adKey];
+            if (!c) c = perCreative[u.adKey] = { hour: 0, day: 0, week: 0, month: 0, total: 0, guilds: {} };
+            c.total++;
+            if (u.timestamp > now - 3600000) c.hour++;
+            if (u.timestamp > now - 86400000) c.day++;
+            if (u.timestamp > now - 604800000) c.week++;
+            if (u.timestamp > now - 2592000000) c.month++;
+            c.guilds[u.guildId] = (c.guilds[u.guildId] || 0) + 1;
+        }
+        const adCreatives = Object.entries(perCreative)
+            .map(([key, c]) => ({
+                key,
+                text: creatives[key]?.text || '(текст не найден в adcreatives.json)',
+                firstSeenAt: creatives[key]?.firstSeenAt || 0,
+                lastSeenAt: creatives[key]?.lastSeenAt || 0,
+                guilds: Object.entries(c.guilds)
+                    .map(([gid, count]) => ({ gid, name: guildNameOf(clients, gid), count }))
+                    .sort((a, b) => b.count - a.count),
+                hour: c.hour, day: c.day, week: c.week, month: c.month, total: c.total
+            }))
+            .sort((a, b) => b.total - a.total);
+
         return send(res, 200, {
             adsOff: Boolean(cfg.adsOff),
             adsOffAt: cfg.adsOffAt || 0,
@@ -239,7 +270,8 @@ async function handleAdmin(req, res, path, clients, config) {
                 perGuild,
                 outstanding: money(outstanding),
                 withBalance
-            }
+            },
+            adCreatives
         }, cors);
     }
 

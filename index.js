@@ -12,6 +12,7 @@ const { startApiServer, createApiKey } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave } = require('./joincheck.js');
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
+const { touchCreative } = require('./adcreative.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
@@ -1046,7 +1047,12 @@ const startBot = (token) => {
             }
 
             const updated = verified.filter(u => !(u.id === user.id && u.guildId === guild.id && (u.roleId || null) === roleId));
-            updated.push({ id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() });
+            // Tag every verification with the creative that was shown (if
+            // any) — feeds the per-creative rollup in the admin panel.
+            const adKey = (roleId && pending?.adShown && pending?.adText) ? touchCreative(pending.adText) : '';
+            const rec = { id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() };
+            if (adKey) rec.adKey = adKey;
+            updated.push(rec);
             saveJSON('verified.json', updated);
             pendingVerification.delete(pendingKey);
 
