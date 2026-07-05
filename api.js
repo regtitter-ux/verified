@@ -125,6 +125,16 @@ function guildNameOf(clients, gid) {
     return null;
 }
 
+// Same lookup for the guild's icon (CDN URL, 64px). Null when no bot shares
+// the guild or it has no icon — the frontend falls back to a letter tile.
+function guildIconOf(clients, gid) {
+    for (const c of Array.isArray(clients) ? clients : []) {
+        const g = c.guilds?.cache?.get(String(gid));
+        if (g) return g.iconURL({ size: 64 }) || null;
+    }
+    return null;
+}
+
 function verifStats(entries) {
     const now = Date.now();
     return {
@@ -195,7 +205,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const grouped = {};
         for (const u of entries) (grouped[u.guildId] ||= []).push(u);
         const perGuild = Object.entries(grouped)
-            .map(([gid, list]) => ({ gid, name: guildNameOf(clients, gid), ...verifStats(list) }));
+            .map(([gid, list]) => ({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ...verifStats(list) }));
 
         // A server with a per-server ad or per-server ads-off flag but no
         // verifications yet still needs a row in the "По серверам" table so
@@ -205,7 +215,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const offGids = Object.keys(cfg.serverAdsOff || {}).filter((g) => cfg.serverAdsOff[g]);
         for (const gid of [...adGids, ...offGids]) {
             if (!knownGids.has(gid)) {
-                perGuild.push({ gid, name: guildNameOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0 });
+                perGuild.push({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0 });
                 knownGids.add(gid);
             }
         }
