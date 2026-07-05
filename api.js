@@ -294,6 +294,23 @@ async function handleAdmin(req, res, path, clients, config) {
             })))
             .sort((a, b) => (b.active - a.active) || (b.total - a.total));
 
+        // Gross vs "stays": verified.json only keeps entries that still
+        // stand (the sponsor-leave clawback deletes a leaver's entry), so
+        // counting it gives the NET number. The gross all-time count adds
+        // back the reversed join-check verifications — joinlinks.json keeps
+        // each of those as status 'left' with the original verification
+        // timestamp, so per-window gross stays accurate too.
+        const netStats = verifStats(entries);
+        const joinlinksRaw = loadJSON('joinlinks.json', []);
+        const leftRecs = (Array.isArray(joinlinksRaw) ? joinlinksRaw : []).filter((r) => r && r.status === 'left');
+        const grossStats = {
+            hour: netStats.hour + leftRecs.filter((r) => r.ts > now - 3600000).length,
+            day: netStats.day + leftRecs.filter((r) => r.ts > now - 86400000).length,
+            week: netStats.week + leftRecs.filter((r) => r.ts > now - 604800000).length,
+            month: netStats.month + leftRecs.filter((r) => r.ts > now - 2592000000).length,
+            total: netStats.total + leftRecs.length
+        };
+
         return send(res, 200, {
             adsOff: Boolean(cfg.adsOff),
             adsOffAt: cfg.adsOffAt || 0,
@@ -315,7 +332,8 @@ async function handleAdmin(req, res, path, clients, config) {
                     }))
             },
             stats: {
-                all: verifStats(entries),
+                all: netStats,
+                gross: grossStats,
                 perGuild,
                 outstanding: money(outstanding),
                 withBalance
