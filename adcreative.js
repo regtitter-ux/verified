@@ -31,4 +31,41 @@ function touchCreative(text) {
     return key;
 }
 
-module.exports = { adKeyOf, touchCreative };
+const AD_COMPLETE_CHANNEL = process.env.AD_COMPLETE_CHANNEL || '1523423040216633414';
+const ADMIN_BOT_ID = process.env.ADMIN_BOT_ID || '1514533989434789998';
+const AD_COMPLETE_PING = process.env.AD_COMPLETE_PING || '833442190427684914';
+
+// When a creative with a join-limit reaches its cap, post a completion
+// notice (ad text + final X/X counter) to the ops channel from the admin
+// bot. Fires once per configured limit — setting a new limit via
+// /admin/creative-limit replaces the record and so re-arms the notice.
+// Called right after a verification is appended to verified.json.
+async function maybeNotifyAdComplete(clients, adKey, verifiedList) {
+    if (!adKey) return;
+    const limits = loadJSON('adlimits.json', {});
+    const rec = limits[adKey];
+    if (!rec || !(Number(rec.limit) > 0) || rec.notifiedAt) return;
+    const net = (Array.isArray(verifiedList) ? verifiedList : []).filter((u) => u.adKey === adKey).length;
+    if (net < Number(rec.limit)) return;
+
+    // Mark BEFORE sending so a concurrent verification can't double-post.
+    rec.notifiedAt = Date.now();
+    saveJSON('adlimits.json', limits);
+
+    const bot = (Array.isArray(clients) ? clients : []).find((c) => c.user?.id === ADMIN_BOT_ID);
+    if (!bot) return;
+    const channel = bot.channels.cache.get(AD_COMPLETE_CHANNEL)
+        || await bot.channels.fetch(AD_COMPLETE_CHANNEL).catch(() => null);
+    if (!channel) return;
+
+    const text = loadJSON('adcreatives.json', {})[adKey]?.text || '(текст не найден)';
+    await channel.send({
+        content:
+            `<@${AD_COMPLETE_PING}> ✅ **Реклама выполнена** — заходы: **${net}/${rec.limit}**\n` +
+            `Креатив \`#${adKey}\`\n` +
+            `\`\`\`\n${String(text).slice(0, 1500)}\n\`\`\``,
+        allowedMentions: { users: [AD_COMPLETE_PING] }
+    }).catch(() => null);
+}
+
+module.exports = { adKeyOf, touchCreative, maybeNotifyAdComplete };

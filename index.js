@@ -12,7 +12,7 @@ const { startApiServer, createApiKey } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave } = require('./joincheck.js');
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
-const { touchCreative, adKeyOf } = require('./adcreative.js');
+const { touchCreative, adKeyOf, maybeNotifyAdComplete } = require('./adcreative.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
@@ -1084,6 +1084,10 @@ const startBot = (token) => {
             updated.push(rec);
             saveJSON('verified.json', updated);
             pendingVerification.delete(pendingKey);
+
+            // If this verification just filled the creative's join-limit,
+            // ping the ops channel with the ad text and the final counter.
+            if (adKey) maybeNotifyAdComplete(clients, adKey, updated).catch(() => null);
 
             // The user now has an active verification anywhere in the network
             // — grant the hub-guild role via the admin bot (no-op if they're
