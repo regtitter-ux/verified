@@ -202,10 +202,32 @@ async function handleAdmin(req, res, path, clients, config) {
         // the per-server table and the per-creative rollup alike.
         const entries = (Array.isArray(verified) ? verified : [])
             .filter((u) => u.roleId && /^\d{17,20}$/.test(u.guildId));
+        const now = Date.now();
+
+        // Reversed join-check verifications (user left the sponsor) are
+        // deleted from verified.json but survive in joinlinks.json as
+        // status 'left' with the original timestamp and card guild — that's
+        // what turns net counts into gross ones, per guild and overall.
+        const joinlinksRaw = loadJSON('joinlinks.json', []);
+        const leftRecs = (Array.isArray(joinlinksRaw) ? joinlinksRaw : []).filter((r) => r && r.status === 'left');
+        const leftWinOf = (list) => ({
+            hour: list.filter((r) => r.ts > now - 3600000).length,
+            day: list.filter((r) => r.ts > now - 86400000).length,
+            week: list.filter((r) => r.ts > now - 604800000).length,
+            month: list.filter((r) => r.ts > now - 2592000000).length,
+            total: list.length
+        });
+        const leftByGuild = {};
+        for (const r of leftRecs) if (r.cardGuildId) (leftByGuild[r.cardGuildId] ||= []).push(r);
+
         const grouped = {};
         for (const u of entries) (grouped[u.guildId] ||= []).push(u);
-        const perGuild = Object.entries(grouped)
-            .map(([gid, list]) => ({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ...verifStats(list) }));
+        const perGuild = Object.entries(grouped).map(([gid, list]) => {
+            const net = verifStats(list);
+            const lw = leftWinOf(leftByGuild[gid] || []);
+            const gross = { hour: net.hour + lw.hour, day: net.day + lw.day, week: net.week + lw.week, month: net.month + lw.month, total: net.total + lw.total };
+            return { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ...net, gross };
+        });
 
         // A server with a per-server ad or per-server ads-off flag but no
         // verifications yet still needs a row in the "По серверам" table so
@@ -215,11 +237,11 @@ async function handleAdmin(req, res, path, clients, config) {
         const offGids = Object.keys(cfg.serverAdsOff || {}).filter((g) => cfg.serverAdsOff[g]);
         for (const gid of [...adGids, ...offGids]) {
             if (!knownGids.has(gid)) {
-                perGuild.push({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0 });
+                perGuild.push({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0, gross: leftWinOf(leftByGuild[gid] || []) });
                 knownGids.add(gid);
             }
         }
-        perGuild.sort((a, b) => b.total - a.total);
+        perGuild.sort((a, b) => (b.gross?.total ?? b.total) - (a.gross?.total ?? a.total));
 
         // Financial: sum of every user's POSITIVE balance = money still owed
         // to creators. Negative balances (from sponsor-leave clawbacks) don't
@@ -236,7 +258,6 @@ async function handleAdmin(req, res, path, clients, config) {
         // attribute counts back to individual rendered ad texts. Untagged
         // entries (from before creative tracking) are ignored here.
         const creatives = loadJSON('adcreatives.json', {});
-        const now = Date.now();
         const perCreative = {}; // adKey -> { hour, day, week, month, total, guilds: {gid: count} }
         for (const u of entries) {
             if (!u.adKey) continue;
@@ -294,21 +315,16 @@ async function handleAdmin(req, res, path, clients, config) {
             })))
             .sort((a, b) => (b.active - a.active) || (b.total - a.total));
 
-        // Gross vs "stays": verified.json only keeps entries that still
-        // stand (the sponsor-leave clawback deletes a leaver's entry), so
-        // counting it gives the NET number. The gross all-time count adds
-        // back the reversed join-check verifications — joinlinks.json keeps
-        // each of those as status 'left' with the original verification
-        // timestamp, so per-window gross stays accurate too.
+        // Gross vs "stays" for the headline cards — same leftRecs source as
+        // the per-guild table above.
         const netStats = verifStats(entries);
-        const joinlinksRaw = loadJSON('joinlinks.json', []);
-        const leftRecs = (Array.isArray(joinlinksRaw) ? joinlinksRaw : []).filter((r) => r && r.status === 'left');
+        const lAll = leftWinOf(leftRecs);
         const grossStats = {
-            hour: netStats.hour + leftRecs.filter((r) => r.ts > now - 3600000).length,
-            day: netStats.day + leftRecs.filter((r) => r.ts > now - 86400000).length,
-            week: netStats.week + leftRecs.filter((r) => r.ts > now - 604800000).length,
-            month: netStats.month + leftRecs.filter((r) => r.ts > now - 2592000000).length,
-            total: netStats.total + leftRecs.length
+            hour: netStats.hour + lAll.hour,
+            day: netStats.day + lAll.day,
+            week: netStats.week + lAll.week,
+            month: netStats.month + lAll.month,
+            total: netStats.total + lAll.total
         };
 
         return send(res, 200, {
