@@ -12,7 +12,7 @@ const { startApiServer, createApiKey } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave } = require('./joincheck.js');
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
-const { touchCreative } = require('./adcreative.js');
+const { touchCreative, adKeyOf } = require('./adcreative.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
@@ -1022,7 +1022,24 @@ const startBot = (token) => {
                 }
             }
 
-            const latest = candidates.reduce((best, cur) => (!best || cur.ts > best.ts ? cur : best), null);
+            let latest = candidates.reduce((best, cur) => (!best || cur.ts > best.ts ? cur : best), null);
+
+            // Join-limit: if this creative has a cap and its NET count of
+            // verifications (leavers don't count — their verified.json
+            // entries are removed by the clawback) has reached it, stop
+            // showing the ad. Verification still works, just ad-free and
+            // without crediting anyone. A leaver frees a slot, so the ad
+            // resumes until the net count hits the cap again.
+            if (latest) {
+                const limits = loadJSON('adlimits.json', {});
+                const key = adKeyOf(latest.text);
+                const cap = Number(limits[key]?.limit) || 0;
+                if (cap > 0) {
+                    const netCount = (Array.isArray(verified) ? verified : []).filter(u => u.adKey === key).length;
+                    if (netCount >= cap) latest = null;
+                }
+            }
+
             const responseText = latest?.text || 'Great, now click again to open access to the server!';
 
             // Only clicks that actually display an ad qualify for balance accrual.

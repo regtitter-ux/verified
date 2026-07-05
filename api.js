@@ -9,6 +9,9 @@ const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
 const { maybeAutoWithdraw } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
+const { applyTemplate } = require('./adtemplate.js');
+const { adKeyOf } = require('./adcreative.js');
+const { resolveSponsorPresence } = require('./joincheck.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -236,18 +239,50 @@ async function handleAdmin(req, res, path, clients, config) {
             if (u.timestamp > now - 2592000000) c.month++;
             c.guilds[u.guildId] = (c.guilds[u.guildId] || 0) + 1;
         }
-        const adCreatives = Object.entries(perCreative)
-            .map(([key, c]) => ({
-                key,
-                text: creatives[key]?.text || '(текст не найден в adcreatives.json)',
-                firstSeenAt: creatives[key]?.firstSeenAt || 0,
-                lastSeenAt: creatives[key]?.lastSeenAt || 0,
-                guilds: Object.entries(c.guilds)
-                    .map(([gid, count]) => ({ gid, name: guildNameOf(clients, gid), count }))
-                    .sort((a, b) => b.count - a.count),
-                hour: c.hour, day: c.day, week: c.week, month: c.month, total: c.total
-            }))
-            .sort((a, b) => b.total - a.total);
+
+        // Which creatives are on air right now: render the effective ad for
+        // every managed guild (per-server ad falling back to the global one,
+        // templates applied per guild) and hash it. Kran-closed guilds are
+        // excluded — their creative isn't being shown.
+        const activeText = {}; // adKey -> rendered text (fallback when no verifications yet)
+        if (!cfg.adsOff) {
+            for (const g of perGuild) {
+                if (cfg.serverAdsOff && cfg.serverAdsOff[g.gid]) continue;
+                const raw = (s.serverAds || {})[g.gid] || s.advText || '';
+                if (!raw.trim()) continue;
+                const rendered = applyTemplate(g.gid, raw);
+                activeText[adKeyOf(rendered)] = rendered;
+            }
+        }
+        // Creatives that are showing but haven't produced a verification yet
+        // still need a card (that's where the limit gets set before launch).
+        for (const key of Object.keys(activeText)) {
+            if (!perCreative[key]) perCreative[key] = { hour: 0, day: 0, week: 0, month: 0, total: 0, guilds: {} };
+        }
+
+        const limits = loadJSON('adlimits.json', {});
+        const adCreatives = (await Promise.all(Object.entries(perCreative)
+            .map(async ([key, c]) => {
+                const text = creatives[key]?.text || activeText[key] || '(текст не найден в adcreatives.json)';
+                const active = Boolean(activeText[key]);
+                // Join-check mode = the ad's invite leads to a guild one of
+                // our bots sits on. Only resolved for on-air creatives (the
+                // invite cache in joincheck.js makes repeat polls cheap).
+                const joinMode = active
+                    ? Boolean(await resolveSponsorPresence(clients, text).catch(() => null))
+                    : false;
+                return {
+                    key, text, active, joinMode,
+                    limit: Number(limits[key]?.limit) || 0,
+                    firstSeenAt: creatives[key]?.firstSeenAt || 0,
+                    lastSeenAt: creatives[key]?.lastSeenAt || 0,
+                    guilds: Object.entries(c.guilds)
+                        .map(([gid, count]) => ({ gid, name: guildNameOf(clients, gid), count }))
+                        .sort((a, b) => b.count - a.count),
+                    hour: c.hour, day: c.day, week: c.week, month: c.month, total: c.total
+                };
+            })))
+            .sort((a, b) => (b.active - a.active) || (b.total - a.total));
 
         return send(res, 200, {
             adsOff: Boolean(cfg.adsOff),
@@ -531,6 +566,22 @@ async function handleAdmin(req, res, path, clients, config) {
             return send(res, 200, { ok: true, requisites: req }, cors);
         }
         return send(res, 404, { error: 'unknown field' }, cors);
+    }
+
+    // Join-limit per creative: cap the number of NET joins (leavers drop
+    // out of verified.json via clawback, so they free up slots) after which
+    // the ad stops being shown. limit <= 0 removes the cap.
+    if (path === '/admin/creative-limit' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const key = String(body?.key || '');
+        if (!/^[0-9a-f]{12}$/.test(key)) return send(res, 400, { error: 'bad key' }, cors);
+        const limit = Math.floor(Number(body?.limit));
+        const limits = loadJSON('adlimits.json', {});
+        if (Number.isFinite(limit) && limit > 0) limits[key] = { limit, setAt: Date.now() };
+        else delete limits[key];
+        saveJSON('adlimits.json', limits);
+        return send(res, 200, { ok: true, key, limit: limits[key]?.limit || 0 }, cors);
     }
 
     // Per-server ads-off — same semantic as the global switch, scoped to
