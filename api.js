@@ -143,8 +143,23 @@ async function handleAdmin(req, res, path, clients, config) {
     if (!adminAuth.enabled()) return send(res, 503, { error: 'admin auth not configured' }, cors);
 
     if (path === '/admin/login' && req.method === 'POST') {
+        const gate = adminAuth.loginGate();
+        if (gate.locked) {
+            return send(res, 429, {
+                error: 'Слишком много попыток, попробуй позже.',
+                retryAfterMs: gate.retryAfterMs
+            }, cors);
+        }
         const body = await readBody(req);
-        if (!body || !adminAuth.verifyTotp(body.code)) return send(res, 401, { error: 'Invalid code' }, cors);
+        const ok = body && adminAuth.verifyTotp(body.code);
+        if (!ok) {
+            // Progressive delay slows brute force without hurting a legit
+            // admin who mistypes once or twice. Sleep first, then respond.
+            adminAuth.recordLoginFailure();
+            if (gate.delayMs > 0) await new Promise((r) => setTimeout(r, gate.delayMs));
+            return send(res, 401, { error: 'Invalid code' }, cors);
+        }
+        adminAuth.recordLoginSuccess();
         const token = adminAuth.issueSession();
         return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': adminAuth.sessionCookieHeader(token) });
     }
@@ -233,7 +248,9 @@ async function handleAdmin(req, res, path, clients, config) {
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const gid = body?.gid ? String(body.gid) : null;
         if (gid && !/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
-        const text = String(body?.text ?? '');
+        // 2000-char cap matches the Discord /advertising-text modal limit
+        // and stops runaway payloads from bloating adtemplates.json.
+        const text = String(body?.text ?? '').slice(0, 2000);
         const t = loadJSON('adtemplates.json', {});
         if (!t.servers || typeof t.servers !== 'object') t.servers = {};
         if (gid) t.servers[gid] = text; else t.default = text;
@@ -257,8 +274,9 @@ async function handleAdmin(req, res, path, clients, config) {
         const gid = body?.gid ? String(body.gid) : null;
         if (gid && !/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
         // We store the RAW ad argument (link or literal); the template is
-        // applied at render time (see getAd in index.js).
-        const text = String(body?.text ?? '');
+        // applied at render time (see getAd in index.js). 4000-char cap
+        // is generous but keeps settings.json from ballooning.
+        const text = String(body?.text ?? '').slice(0, 4000);
         const uid = config.ownerId;
         const settings = loadJSON('settings.json');
         if (!settings[uid]) settings[uid] = blankUser();
@@ -426,6 +444,11 @@ async function handleAdmin(req, res, path, clients, config) {
         if (field === 'balance') {
             const delta = Number(body.delta);
             if (!Number.isFinite(delta)) return send(res, 400, { error: 'delta must be a number' }, cors);
+            // Sanity cap: a compromised session shouldn't be able to nuke the
+            // Crypto Pay wallet in one shot. Trusted owner can still stack
+            // adjustments if they really need >$1M — legitimate adjustments
+            // are $10-$100 range.
+            if (Math.abs(delta) > 1_000_000) return send(res, 400, { error: 'delta too large' }, cors);
             s.balance = money((Number(s.balance) || 0) + delta);
             saveJSON('settings.json', settings);
             if (delta > 0) maybeAutoWithdraw(clients, userId).catch(() => null);
@@ -529,9 +552,12 @@ function startApiServer(clients, config) {
             if (req.method === 'GET' && (p === '/' || p === '/api')) return send(res, 200, DOCS);
             if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
 
-            // Admin panel (TOTP-gated, CORS-scoped to ADMIN_ORIGIN)
+            // Admin panel (TOTP-gated, CORS-scoped to ADMIN_ORIGIN).
+            // Await so any async rejection lands in this outer try/catch —
+            // otherwise handleAdmin's promise would settle after we've
+            // already returned and become an unhandled rejection.
             if (p.startsWith('/admin/') || p === '/admin') {
-                return handleAdmin(req, res, p, clients, config);
+                return await handleAdmin(req, res, p, clients, config);
             }
 
             if (!p.startsWith('/api/')) return send(res, 404, { error: 'Not found' });

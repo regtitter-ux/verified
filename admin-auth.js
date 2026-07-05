@@ -9,6 +9,7 @@
 //                           they can't be forged. Rotating it invalidates
 //                           every active admin session (log everyone out).
 const crypto = require('crypto');
+const { loadJSON, saveJSON } = require('./database.js');
 
 const TOTP_SECRET = (process.env.TOTP_SECRET || '').trim().replace(/\s+/g, '').toUpperCase();
 const ADMIN_SESSION_SECRET = (process.env.ADMIN_SESSION_SECRET || '').trim();
@@ -17,6 +18,20 @@ const SESSION_COOKIE = 'vemoni_admin';
 const TOTP_STEP = 30;      // seconds
 const TOTP_DIGITS = 6;
 const TOTP_WINDOW = 1;     // ± 1 step of drift accepted
+
+// Anti-brute-force: track failed /admin/login attempts globally (single-admin
+// panel — no per-IP needed, Railway's proxy would mask that anyway). Legit
+// admins normally submit 1-2 codes; anything more is an attack.
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const FAILS_BEFORE_DELAY = 5;   // first 5 wrong codes get no throttling
+const FAILS_BEFORE_LOCK = 20;   // after this, refuse for LOCK_MS
+const LOCK_MS = 30 * 60 * 1000;
+const loginState = { fails: 0, windowEndsAt: 0, lockedUntil: 0 };
+
+// TOTP replay guard: remember the largest step whose code has already been
+// accepted, and refuse anything at or below it. Persisted to siteconfig.json
+// so a redeploy doesn't briefly reopen the 90-second replay window.
+let lastAcceptedStep = Number(loadJSON('siteconfig.json', {}).lastTotpStep) || 0;
 
 const enabled = () => Boolean(TOTP_SECRET) && Boolean(ADMIN_SESSION_SECRET);
 
@@ -61,7 +76,9 @@ function hotp(secretBuf, counter) {
 }
 
 // Verify against current + adjacent steps to tolerate small clock skew.
-// Returns true on match, false otherwise.
+// Returns true on match, false otherwise. Rejects any step whose code has
+// already been accepted (replay guard) — persists the last-good step across
+// restarts so a redeploy doesn't briefly reopen the 90-second window.
 function verifyTotp(code) {
     if (!enabled()) return false;
     const digits = String(code || '').replace(/\D/g, '');
@@ -70,12 +87,47 @@ function verifyTotp(code) {
     try { secretBuf = base32Decode(TOTP_SECRET); } catch { return false; }
     const step = Math.floor(Date.now() / 1000 / TOTP_STEP);
     for (let w = -TOTP_WINDOW; w <= TOTP_WINDOW; w++) {
+        const s = step + w;
+        if (s <= lastAcceptedStep) continue; // reject reused / older step
+        const expected = hotp(secretBuf, s);
         // constant-time compare guards against timing side channels
-        const expected = hotp(secretBuf, step + w);
         if (expected.length === digits.length &&
-            crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(digits))) return true;
+            crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(digits))) {
+            lastAcceptedStep = s;
+            const cfg = loadJSON('siteconfig.json', {});
+            cfg.lastTotpStep = s;
+            saveJSON('siteconfig.json', cfg);
+            return true;
+        }
     }
     return false;
+}
+
+// Gate every /admin/login attempt: if too many recent failures, ask the
+// caller to sleep before responding (or refuse outright if fully locked).
+// Sliding 15-minute window; first 5 attempts free, then linear delay,
+// then a 30-minute lockout past FAILS_BEFORE_LOCK.
+function loginGate() {
+    const now = Date.now();
+    if (loginState.lockedUntil > now) {
+        return { locked: true, delayMs: 0, retryAfterMs: loginState.lockedUntil - now };
+    }
+    if (loginState.windowEndsAt < now) { loginState.fails = 0; loginState.windowEndsAt = now + LOGIN_WINDOW_MS; }
+    const overflow = Math.max(0, loginState.fails - FAILS_BEFORE_DELAY);
+    return { locked: false, delayMs: Math.min(overflow * 1000, 10000), retryAfterMs: 0 };
+}
+
+function recordLoginFailure() {
+    const now = Date.now();
+    if (loginState.windowEndsAt < now) { loginState.fails = 0; loginState.windowEndsAt = now + LOGIN_WINDOW_MS; }
+    loginState.fails++;
+    if (loginState.fails >= FAILS_BEFORE_LOCK) loginState.lockedUntil = now + LOCK_MS;
+}
+
+function recordLoginSuccess() {
+    loginState.fails = 0;
+    loginState.windowEndsAt = 0;
+    loginState.lockedUntil = 0;
 }
 
 // ---------- Session cookies ----------
@@ -88,27 +140,41 @@ function sign(payload) {
 
 function issueSession() {
     const expires = Date.now() + SESSION_TTL_MS;
-    const payload = String(expires);
+    // 8-byte nonce ensures two tokens issued at the same millisecond are
+    // still distinguishable — cheap tracing / revocation aid.
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const payload = `${expires}.${nonce}`;
     return `${payload}.${sign(payload)}`;
 }
 
 function verifySession(token) {
     if (!enabled() || !token) return false;
-    const [payload, mac] = String(token).split('.');
+    const s = String(token);
+    const lastDot = s.lastIndexOf('.');
+    if (lastDot <= 0) return false;
+    const payload = s.slice(0, lastDot);
+    const mac = s.slice(lastDot + 1);
     if (!payload || !mac) return false;
     const expected = sign(payload);
     if (expected.length !== mac.length) return false;
     if (!crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(mac))) return false;
-    const expires = Number(payload);
+    // Payload = "<expires>[.<nonce>]" — only the leading numeric segment
+    // encodes the deadline; nonce (if present) is ignored here.
+    const expiresStr = payload.split('.')[0];
+    const expires = Number(expiresStr);
     return Number.isFinite(expires) && expires > Date.now();
 }
 
-// Parse the session token out of a Cookie header.
+// Parse the session token out of a Cookie header. Malformed URL-encoding
+// (`%GG`, stray percent) makes decodeURIComponent throw — swallow into ''
+// so bad cookies just look like "no session" instead of crashing the route.
 function readSessionCookie(cookieHeader) {
     if (!cookieHeader) return '';
     for (const chunk of String(cookieHeader).split(';')) {
         const [k, ...v] = chunk.trim().split('=');
-        if (k === SESSION_COOKIE) return decodeURIComponent(v.join('='));
+        if (k === SESSION_COOKIE) {
+            try { return decodeURIComponent(v.join('=')); } catch { return ''; }
+        }
     }
     return '';
 }
@@ -129,5 +195,6 @@ function sessionCookieHeader(token, { clear = false } = {}) {
 module.exports = {
     SESSION_COOKIE, SESSION_TTL_MS,
     enabled, verifyTotp, issueSession, verifySession,
-    readSessionCookie, sessionCookieHeader, generateTotpSecret
+    readSessionCookie, sessionCookieHeader, generateTotpSecret,
+    loginGate, recordLoginFailure, recordLoginSuccess
 };
