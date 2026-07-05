@@ -186,7 +186,14 @@ async function handleAdmin(req, res, path, clients, config) {
         const verified = loadJSON('verified.json', []);
         const entries = (Array.isArray(verified) ? verified : []).filter((u) => u.roleId);
         const grouped = {};
-        for (const u of entries) (grouped[u.guildId] ||= []).push(u);
+        // Skip synthetic guildIds like 'api' (partner API calls without a
+        // real guildId) — they'd otherwise clutter the per-server table as
+        // "Unknown Server" rows. Total counts in stats.all still include
+        // them.
+        for (const u of entries) {
+            if (!/^\d{17,20}$/.test(u.guildId)) continue;
+            (grouped[u.guildId] ||= []).push(u);
+        }
         const perGuild = Object.entries(grouped)
             .map(([gid, list]) => ({ gid, name: guildNameOf(clients, gid), ...verifStats(list) }));
 
@@ -420,7 +427,12 @@ async function handleAdmin(req, res, path, clients, config) {
         const verified = loadJSON('verified.json', []);
         const mine = (Array.isArray(verified) ? verified : []).filter((u) => u.creatorId === userId && u.roleId);
         const grouped = {};
-        for (const u of mine) (grouped[u.guildId] ||= []).push(u);
+        // Same synthetic-gid skip as in /admin/state — no "Unknown Server"
+        // rows for partner-API verifications without a real guildId.
+        for (const u of mine) {
+            if (!/^\d{17,20}$/.test(u.guildId)) continue;
+            (grouped[u.guildId] ||= []).push(u);
+        }
         const perGuild = Object.entries(grouped)
             .map(([gid, list]) => ({ gid, name: guildNameOf(clients, gid), ...verifStats(list) }))
             .sort((a, b) => b.total - a.total);

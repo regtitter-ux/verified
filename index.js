@@ -145,7 +145,12 @@ const startBot = (token) => {
             const fmtWin = (v) => `└ Hour: \`${v.h}\` | Day: \`${v.d}\` | 7 Days: \`${v.w}\` | Month: \`${v.m}\` | Total: **${v.t}**`;
 
             const grouped = {};
-            for (const u of mine) (grouped[u.guildId] ||= []).push(u);
+            // Skip synthetic 'api' guildIds so /bal doesn't list an Unknown
+            // Server row for partner-API verifications without a real gid.
+            for (const u of mine) {
+                if (!/^\d{17,20}$/.test(u.guildId)) continue;
+                (grouped[u.guildId] ||= []).push(u);
+            }
             const ids = Object.keys(grouped).sort((a, b) => grouped[b].length - grouped[a].length);
             const shown = ids.slice(0, 8);
 
@@ -215,7 +220,12 @@ const startBot = (token) => {
         const fmtWin = (v) => `└ Hour: \`${v.h}\` | Day: \`${v.d}\` | 7 Days: \`${v.w}\` | Month: \`${v.m}\` | Total: **${v.t}**`;
 
         const grouped = {};
-        for (const u of entries) (grouped[u.guildId] ||= []).push(u);
+        // Skip synthetic 'api' guildIds so /stat doesn't list an Unknown
+        // Server row for partner-API verifications without a real gid.
+        for (const u of entries) {
+            if (!/^\d{17,20}$/.test(u.guildId)) continue;
+            (grouped[u.guildId] ||= []).push(u);
+        }
         const guildIds = Object.keys(grouped).sort((a, b) => grouped[b].length - grouped[a].length);
 
         const PAGE = 10;
