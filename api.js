@@ -220,13 +220,20 @@ async function handleAdmin(req, res, path, clients, config) {
         const leftByGuild = {};
         for (const r of leftRecs) if (r.cardGuildId) (leftByGuild[r.cardGuildId] ||= []).push(r);
 
+        // No-ad verifications (organic — no creative shown, tagged noAd in
+        // index.js). Single-count stats feed the panel's "без рекламы" mode.
+        const noAdByGuild = {};
+        for (const u of entries) if (u.noAd) (noAdByGuild[u.guildId] ||= []).push(u);
+        const ZERO = { hour: 0, day: 0, week: 0, month: 0, total: 0 };
+
         const grouped = {};
         for (const u of entries) (grouped[u.guildId] ||= []).push(u);
         const perGuild = Object.entries(grouped).map(([gid, list]) => {
             const net = verifStats(list);
             const lw = leftWinOf(leftByGuild[gid] || []);
             const gross = { hour: net.hour + lw.hour, day: net.day + lw.day, week: net.week + lw.week, month: net.month + lw.month, total: net.total + lw.total };
-            return { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ...net, gross };
+            const noAd = noAdByGuild[gid] ? verifStats(noAdByGuild[gid]) : { ...ZERO };
+            return { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ...net, gross, noAd };
         });
 
         // A server with a per-server ad or per-server ads-off flag but no
@@ -237,7 +244,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const offGids = Object.keys(cfg.serverAdsOff || {}).filter((g) => cfg.serverAdsOff[g]);
         for (const gid of [...adGids, ...offGids]) {
             if (!knownGids.has(gid)) {
-                perGuild.push({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0, gross: leftWinOf(leftByGuild[gid] || []) });
+                perGuild.push({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0, gross: leftWinOf(leftByGuild[gid] || []), noAd: { ...ZERO } });
                 knownGids.add(gid);
             }
         }
@@ -350,6 +357,7 @@ async function handleAdmin(req, res, path, clients, config) {
             stats: {
                 all: netStats,
                 gross: grossStats,
+                noAd: verifStats(entries.filter((u) => u.noAd)),
                 perGuild,
                 outstanding: money(outstanding),
                 withBalance

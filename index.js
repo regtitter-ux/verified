@@ -1081,6 +1081,10 @@ const startBot = (token) => {
             const adKey = (roleId && pending?.adShown && pending?.adText) ? touchCreative(pending.adText) : '';
             const rec = { id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() };
             if (adKey) rec.adKey = adKey;
+            // Verification that displayed no ad = organic activity. Tagged so
+            // the admin panel's "без рекламы" mode can gauge how much stays
+            // volume a server could sell in a future ad order.
+            else if (roleId) rec.noAd = true;
             updated.push(rec);
             saveJSON('verified.json', updated);
             pendingVerification.delete(pendingKey);
