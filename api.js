@@ -875,6 +875,7 @@ async function handleAdmin(req, res, path, clients, config) {
     // Shares (доли): set a holder's percentage. pct <= 0 removes them.
     // Existing pending/earned accounting is preserved across edits.
     if (path === '/admin/shares' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const uid = String(body?.userId || '');
