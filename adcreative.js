@@ -17,6 +17,20 @@ function adKeyOf(text) {
     return crypto.createHash('sha1').update(String(text)).digest('hex').slice(0, 12);
 }
 
+// Count UNIQUE joiners for a campaign since its last reset. One person who
+// verifies on several network servers (or via several cards / the API) makes
+// a verified.json entry per (user, server) — all sharing the campaign's
+// adKey. The invite tracker on the sponsor counts them once, so the join
+// limit must too: dedupe by user id, not raw entries.
+function joinerCount(verifiedList, adKey, since = 0) {
+    if (!adKey) return 0;
+    const seen = new Set();
+    for (const u of Array.isArray(verifiedList) ? verifiedList : []) {
+        if (u.adKey === adKey && u.timestamp > since) seen.add(u.id);
+    }
+    return seen.size;
+}
+
 // Record (or refresh) the creative in adcreatives.json. Called once per
 // verification-with-ad — cheap: the file only grows when a genuinely new
 // rendered text appears, otherwise we just bump lastSeenAt.
@@ -45,9 +59,9 @@ async function maybeNotifyAdComplete(clients, adKey, verifiedList) {
     const limits = loadJSON('adlimits.json', {});
     const rec = limits[adKey];
     if (!rec || !(Number(rec.limit) > 0) || rec.notifiedAt) return;
-    // Count only joins since the last reset — matches the enforced counter.
+    // Unique joiners since the last reset — matches the enforced counter.
     const since = Number(rec.resetAt) || 0;
-    const net = (Array.isArray(verifiedList) ? verifiedList : []).filter((u) => u.adKey === adKey && u.timestamp > since).length;
+    const net = joinerCount(verifiedList, adKey, since);
     if (net < Number(rec.limit)) return;
 
     // Mark BEFORE sending so a concurrent verification can't double-post.
@@ -70,4 +84,4 @@ async function maybeNotifyAdComplete(clients, adKey, verifiedList) {
     }).catch(() => null);
 }
 
-module.exports = { adKeyOf, touchCreative, maybeNotifyAdComplete };
+module.exports = { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount };

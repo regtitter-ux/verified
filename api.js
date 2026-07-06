@@ -10,7 +10,7 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { maybeAutoWithdraw } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
 const { applyTemplate } = require('./adtemplate.js');
-const { adKeyOf, touchCreative, maybeNotifyAdComplete } = require('./adcreative.js');
+const { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes } = require('./joincheck.js');
 const { syncHubMember } = require('./hubrole.js');
 const { logFunds } = require('./fundslog.js');
@@ -60,9 +60,8 @@ async function adForServer(clients, ownerId, serverId) {
     const rec = limits[key];
     if (rec && Number(rec.limit) > 0) {
         const verified = loadJSON('verified.json', []);
-        const arr = Array.isArray(verified) ? verified : [];
         const since = Number(rec.resetAt) || 0;
-        const cnt = arr.filter((u) => u.adKey === key && u.timestamp > since).length;
+        const cnt = joinerCount(verified, key, since); // unique joiners, not raw entries
         if (cnt >= Number(rec.limit)) return { adText: null, sponsor: null, invite: null };
     }
 
@@ -453,17 +452,20 @@ async function handleAdmin(req, res, path, clients, config) {
         const globalKey = (s.advText || '').trim() ? adKeyOf(s.advText) : '';
         // Count / first-seen / last-seen for a creative, measured only from
         // its last counter reset (resetAt).
+        // The limit counter counts UNIQUE joiners (one person = one invite),
+        // over the full verified list so it matches the in-Discord enforcement
+        // — not the active-guild-filtered `entries` used for display windows.
+        const verifiedArr = Array.isArray(verified) ? verified : [];
         const statsSinceReset = (key) => {
             if (!key) return { count: 0, firstAt: 0, lastAt: 0 };
             const since = Number(limits[key]?.resetAt) || 0;
-            let count = 0, firstAt = 0, lastAt = 0;
-            for (const u of entries) {
+            let firstAt = 0, lastAt = 0;
+            for (const u of verifiedArr) {
                 if (u.adKey !== key || u.timestamp <= since) continue;
-                count++;
                 if (!firstAt || u.timestamp < firstAt) firstAt = u.timestamp;
                 if (u.timestamp > lastAt) lastAt = u.timestamp;
             }
-            return { count, firstAt, lastAt };
+            return { count: joinerCount(verifiedArr, key, since), firstAt, lastAt };
         };
         const globalStats = statsSinceReset(globalKey);
         const adCreatives = (await Promise.all(Object.entries(perCreative)
@@ -835,8 +837,14 @@ async function handleAdmin(req, res, path, clients, config) {
         if (!/^[0-9a-f]{12}$/.test(key)) return send(res, 400, { error: 'bad key' }, cors);
         const limit = Math.floor(Number(body?.limit));
         const limits = loadJSON('adlimits.json', {});
-        if (Number.isFinite(limit) && limit > 0) limits[key] = { limit, setAt: Date.now() };
-        else delete limits[key];
+        if (Number.isFinite(limit) && limit > 0) {
+            // Preserve resetAt (else saving a limit would undo a counter reset)
+            // and re-arm the completion notice for the new limit.
+            limits[key] = { ...(limits[key] || {}), limit, setAt: Date.now() };
+            delete limits[key].notifiedAt;
+        } else {
+            delete limits[key];
+        }
         saveJSON('adlimits.json', limits);
         return send(res, 200, { ok: true, key, limit: limits[key]?.limit || 0 }, cors);
     }

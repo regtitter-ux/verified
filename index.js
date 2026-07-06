@@ -12,7 +12,7 @@ const { startApiServer, createApiKey } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave } = require('./joincheck.js');
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
-const { touchCreative, adKeyOf, maybeNotifyAdComplete } = require('./adcreative.js');
+const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const { payShares } = require('./shares.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
@@ -1045,7 +1045,7 @@ const startBot = (token) => {
                     // Count only joins since the last counter reset — resetting
                     // starts a fresh campaign toward the same limit.
                     const since = Number(rec?.resetAt) || 0;
-                    const netCount = (Array.isArray(verified) ? verified : []).filter(u => u.adKey === key && u.timestamp > since).length;
+                    const netCount = joinerCount(verified, key, since);
                     if (netCount >= cap) latest = null;
                 }
             }
