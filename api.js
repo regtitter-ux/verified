@@ -737,6 +737,20 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, { ok: true, key, limit: limits[key]?.limit || 0 }, cors);
     }
 
+    // Create a Crypto Pay invoice to top up the app balance — same as the
+    // /cryptofund Discord command, but from the panel. Returns a pay URL.
+    if (path === '/admin/cryptofund' && req.method === 'POST') {
+        if (!cryptopay.enabled()) return send(res, 503, { error: 'Crypto Pay не настроен' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const n = Number(body?.amount);
+        if (!Number.isFinite(n) || n <= 0) return send(res, 400, { error: 'Введите сумму больше 0' }, cors);
+        const inv = await cryptopay.createUsdtInvoice(n.toFixed(2)).catch((e) => ({ __err: e.message }));
+        const url = inv && (inv.bot_invoice_url || inv.mini_app_invoice_url || inv.pay_url);
+        if (!url) return send(res, 502, { error: `Не удалось создать счёт${inv?.__err ? ` (${inv.__err})` : ''}` }, cors);
+        return send(res, 200, { ok: true, url, amount: n.toFixed(2) }, cors);
+    }
+
     // Shares (доли): set a holder's percentage. pct <= 0 removes them.
     // Existing pending/earned accounting is preserved across edits.
     if (path === '/admin/shares' && req.method === 'PUT') {
