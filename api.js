@@ -11,12 +11,32 @@ const { maybeAutoWithdraw } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf } = require('./adcreative.js');
-const { resolveSponsorPresence } = require('./joincheck.js');
-const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf } = require('./shares.js');
+const { resolveSponsorPresence, isMember, creditJoin } = require('./joincheck.js');
+const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares } = require('./shares.js');
+const cryptopay = require('./cryptopay.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
 const ADMIN_ORIGIN = (process.env.ADMIN_API_ORIGIN || 'https://vemoni.info').trim();
+
+// Optional allowlist of sponsor guild IDs that /api/join-check will pay for.
+// When set, a partner can only be credited for joins to these servers — a
+// hard lock against crediting "joins" to a big server users are already in.
+// When empty, any guild one of our bots is on is accepted (membership +
+// dedup still apply).
+const JOIN_CHECK_GUILDS = new Set((process.env.JOIN_CHECK_GUILDS || '').split(',').map((s) => s.trim()).filter(Boolean));
+
+// Cache the Crypto Pay USDT app balance briefly — /admin/state is polled
+// every few seconds and we don't want to hammer the Crypto Pay API.
+let _cpBalCache = { at: 0, val: null };
+async function cryptoUsdtBalance() {
+    if (!cryptopay.enabled()) return null;
+    const now = Date.now();
+    if (now - _cpBalCache.at < 30000) return _cpBalCache.val;
+    const val = await cryptopay.usdtAvailable().catch(() => null);
+    _cpBalCache = { at: now, val };
+    return val;
+}
 
 const getBid = (s) => (Number.isFinite(Number(s?.bid)) ? Number(s.bid) : 1); // $ per 100 clicks
 const money = (n) => +(Number(n) || 0).toFixed(2);
@@ -86,6 +106,7 @@ const DOCS = {
     auth: 'Send your API key as `Authorization: Bearer <key>` or `X-API-Key: <key>`.',
     endpoints: {
         'POST /api/verify/click': 'Record one qualifying verified click (ad shown + verified). Body: { guildId?, userId? }. Credits your balance at your bid.',
+        'POST /api/join-check': 'Verify a user is really a member of the sponsor server and, if so, credit the join. Body: { userId, guildId | invite, cardGuildId? }. Returns 200 { joined:true } when the member is confirmed (partner may then let them through); 403 { joined:false } when not; 422 when the sponsor server is unresolvable / no bot present; 503 to retry. Membership is checked against Discord directly and each member is only ever paid once.',
         'GET /api/balance': 'Your balance, payment details, bid ($/100 clicks) and pending clicks.',
         'GET /api/stats': 'Your verification stats (per server + time windows).',
         'GET /api/requisites': 'Your payment details.',
@@ -441,6 +462,7 @@ async function handleAdmin(req, res, path, clients, config) {
                 totalPaid: money(totalPaid)
             },
             shares: sharesData,
+            cryptoBalance: await cryptoUsdtBalance(),
             adCreatives
         }, cors);
     }
@@ -829,6 +851,65 @@ function startApiServer(clients, config) {
                     pendingClicks: Number(s.verifiedClicks) || 0,
                     bid: getBid(s)
                 });
+            }
+
+            // Secure join-check: a partner's bot asks whether `userId` is
+            // really a member of the sponsor server, and — if so — the join
+            // is credited (join-check rate) exactly like the in-Discord flow.
+            //
+            // Anti-fraud, layered:
+            //  1. Membership is verified with Discord's own REST API through
+            //     whichever bot in OUR network sits on the sponsor guild (a
+            //     dedicated membership-checker, not the partner's bot) — the
+            //     partner cannot fake it.
+            //  2. At least one network bot must be on the sponsor guild, else
+            //     nobody can independently verify → no payout.
+            //  3. Optional JOIN_CHECK_GUILDS allowlist restricts which servers
+            //     pay out at all.
+            //  4. Dedup per (creator, sponsor, user): a real member can only
+            //     ever be credited once, so replays don't farm payouts.
+            //  5. The rate is the owner-set join bid, never partner-controlled.
+            if (p === '/api/join-check' && req.method === 'POST') {
+                const body = await readBody(req);
+                if (body === null) return send(res, 400, { error: 'Invalid JSON body' });
+                const memberId = String(body.userId || '').trim();
+                if (!/^\d{17,20}$/.test(memberId)) return send(res, 400, { error: 'userId must be a Discord user ID' });
+
+                // Resolve the sponsor guild — a direct guildId or an invite.
+                let sponsor = null;
+                const gid = String(body.guildId || '').trim();
+                if (/^\d{17,20}$/.test(gid)) {
+                    const bot = clients.find((c) => c.guilds.cache.has(gid));
+                    if (bot) sponsor = { guildId: gid, bot };
+                } else if (body.invite) {
+                    sponsor = await resolveSponsorPresence(clients, String(body.invite)).catch(() => null);
+                }
+                if (!sponsor) return send(res, 422, { joined: false, error: 'sponsor server not resolvable or no bot present on it' });
+
+                if (JOIN_CHECK_GUILDS.size && !JOIN_CHECK_GUILDS.has(sponsor.guildId)) {
+                    return send(res, 403, { joined: false, error: 'sponsor server not approved for API join-check' });
+                }
+
+                // Independent membership check via Discord REST.
+                const present = await isMember(sponsor.bot, sponsor.guildId, memberId).catch(() => null);
+                if (present === null) return send(res, 503, { joined: null, error: 'membership check temporarily unavailable, retry' });
+                if (present !== true) return send(res, 403, { joined: false });
+
+                // Dedup — never pay twice for the same real member.
+                const links = loadJSON('joinlinks.json', []);
+                const already = (Array.isArray(links) ? links : []).some(
+                    (r) => r && r.status === 'joined' && r.creatorId === userId && r.guildId === sponsor.guildId && r.userId === memberId
+                );
+                if (already) return send(res, 200, { joined: true, credited: false, note: 'already counted' });
+
+                // Record + credit — creditJoin writes a joinlinks record the
+                // clawback sweep watches, so leaving the sponsor reverses it.
+                const cardGuild = /^\d{17,20}$/.test(String(body.cardGuildId || '')) ? String(body.cardGuildId) : null;
+                const amount = creditJoin(userId, sponsor.guildId, memberId, cardGuild, null, null);
+                await payShares(clients, amount).catch(() => null);
+                await maybeAutoWithdraw(clients, userId).catch(() => null);
+                const s = loadJSON('settings.json')[userId] || {};
+                return send(res, 200, { joined: true, credited: true, amount: money(amount), balance: money(s.balance) });
             }
 
             if (p === '/api/requisites' && req.method === 'GET') {
