@@ -67,6 +67,11 @@ async function adForServer(clients, ownerId, serverId) {
     }
 
     const sponsor = await resolveSponsorPresence(clients, raw).catch(() => null);
+    // Don't advertise a server on itself: if the ad's sponsor IS this server,
+    // its members are already in — run ad-free (also blocks self-join farming).
+    if (sponsor && gidOk && sponsor.guildId === String(serverId)) {
+        return { adText: null, sponsor: null, invite: null };
+    }
     const codes = extractInviteCodes(raw);
     return { adText: rendered, raw, sponsor, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
 }

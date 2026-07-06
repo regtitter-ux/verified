@@ -1050,6 +1050,15 @@ const startBot = (token) => {
                 }
             }
 
+            // Don't advertise a server on itself: if the ad's invite points to
+            // THIS guild, everyone here is already a member — showing it is
+            // pointless and would let existing members farm the buyer's joins.
+            // The server just runs ad-free until a showable ad exists.
+            if (latest) {
+                const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
+                if (sp && sp.guildId === guild.id) latest = null;
+            }
+
             const responseText = latest?.text || 'Great, now click again to open access to the server!';
 
             // Only clicks that actually display an ad qualify for balance accrual.
