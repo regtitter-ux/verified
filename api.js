@@ -10,8 +10,10 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { maybeAutoWithdraw } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
 const { applyTemplate } = require('./adtemplate.js');
-const { adKeyOf } = require('./adcreative.js');
+const { adKeyOf, touchCreative, maybeNotifyAdComplete } = require('./adcreative.js');
 const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes } = require('./joincheck.js');
+const { syncHubMember } = require('./hubrole.js');
+const { logFunds } = require('./fundslog.js');
 const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares } = require('./shares.js');
 const cryptopay = require('./cryptopay.js');
 
@@ -124,6 +126,24 @@ function recordVerified(userId, guildId, memberId) {
     saveJSON('verified.json', arr);
 }
 
+// Record an API verification exactly like the in-Discord flow: one entry per
+// (member, server), tagged with the creative's adKey (paid join) or noAd
+// (no active ad). Replaces any prior entry so repeats don't inflate stats.
+// Returns the fresh verified.json array (for the completion-notice check).
+function recordApiVerified({ creatorId, memberId, serverId, adKey, noAd }) {
+    const verified = loadJSON('verified.json', []);
+    const arr = Array.isArray(verified) ? verified : [];
+    const gid = /^\d{17,20}$/.test(String(serverId || '')) ? String(serverId) : 'api';
+    const mid = /^\d{17,20}$/.test(String(memberId || '')) ? String(memberId) : 'api';
+    const kept = arr.filter((u) => !(u.id === mid && u.guildId === gid && (u.roleId || null) === 'api'));
+    const rec = { id: mid, guildId: gid, roleId: 'api', creatorId, timestamp: Date.now(), viaApi: true };
+    if (adKey) rec.adKey = adKey;
+    else if (noAd) rec.noAd = true;
+    kept.push(rec);
+    saveJSON('verified.json', kept);
+    return kept;
+}
+
 function userStats(userId) {
     const verified = loadJSON('verified.json', []);
     const mine = (Array.isArray(verified) ? verified : []).filter(u => u.creatorId === userId && u.roleId);
@@ -150,7 +170,7 @@ const DOCS = {
     endpoints: {
         'POST /api/verify/click': 'Record one qualifying verified click (ad shown + verified). Body: { guildId?, userId? }. Credits your balance at your bid.',
         'GET /api/active-sponsors': 'The ad campaigns live right now: [{ guildId, name, invite, adText }]. Poll this, show adText to your users, and pass guildId to /api/join-check. Auto-follows whatever the owner is advertising.',
-        'POST /api/join-check': 'Verify a user really joined the SPECIFIC sponsor server you showed them, and if so credit the join. Body: { userId, guildId | invite, cardGuildId? } — pass the sponsor the user was shown (guildId or its invite); it may be omitted only when exactly one campaign is live. The server must be one we are currently advertising. Membership is checked against THAT server only, so a user who is in some other (past) sponsor but not this one is NOT credited. Returns 200 { joined:true } when confirmed (let them through); 403 { joined:false } when not a member or the server is not currently advertised; 400 when several campaigns are live and none is named; 422 when no campaign is live; 503 to retry. Each member is only ever paid once per sponsor.',
+        'POST /api/join-check': 'Complete a verification, mirroring the in-Discord bots. Body: { userId, serverId, guildId | invite }. serverId = your server (for the stat). If a campaign is live: pass the sponsor shown (guildId or invite; omit only when one is live), we check membership against THAT server via Discord, and on success credit the join + record it. 200 { joined:true, credited:true } → let them through; 403 { joined:false } → not a member of that server, ask them to join first. If NO campaign is live: 200 { joined:true, ad:false } → verify them without any ad (a no-ad verification is recorded, no payout), just like a network bot. 400 when several campaigns are live and none named; 503 to retry. Each member is paid once per sponsor; leaving reverses it.',
         'GET /api/balance': 'Your balance, payment details, bid ($/100 clicks) and pending clicks.',
         'GET /api/stats': 'Your verification stats (per server + time windows).',
         'GET /api/requisites': 'Your payment details.',
@@ -989,10 +1009,22 @@ function startApiServer(clients, config) {
                 if (body === null) return send(res, 400, { error: 'Invalid JSON body' });
                 const memberId = String(body.userId || '').trim();
                 if (!/^\d{17,20}$/.test(memberId)) return send(res, 400, { error: 'userId must be a Discord user ID' });
+                // The partner's own server (where verification happens) — used
+                // as the guildId for the verified.json stat, same as a network
+                // bot records the card's guild.
+                const serverId = /^\d{17,20}$/.test(String(body.serverId || '')) ? String(body.serverId)
+                    : (/^\d{17,20}$/.test(String(body.cardGuildId || '')) ? String(body.cardGuildId) : null);
 
-                // Only servers with a live ad campaign are eligible.
                 const sponsors = await activeSponsors(clients, config.ownerId);
-                if (!sponsors.length) return send(res, 422, { joined: false, error: 'нет активной рекламы с проверкой на заход' });
+
+                // No active campaign → verify WITHOUT an ad, exactly like a
+                // network bot: record a no-ad verification (organic stat),
+                // grant the hub role, no payout. Let the user through.
+                if (!sponsors.length) {
+                    recordApiVerified({ creatorId: userId, memberId, serverId, noAd: true });
+                    syncHubMember(clients, memberId).catch(() => null);
+                    return send(res, 200, { joined: true, credited: false, ad: false, note: 'no active ad — verified without ad' });
+                }
 
                 // Resolve the ONE sponsor the user was shown. The partner names
                 // it (guildId or invite); if exactly one campaign is live it's
@@ -1029,11 +1061,22 @@ function startApiServer(clients, config) {
                 );
                 if (already) return send(res, 200, { joined: true, credited: false, sponsor: target.guildId, note: 'already counted' });
 
-                // Record + credit — creditJoin writes a joinlinks record the
-                // clawback sweep watches, so leaving the sponsor reverses it.
-                const cardGuild = /^\d{17,20}$/.test(String(body.cardGuildId || '')) ? String(body.cardGuildId) : null;
-                const amount = creditJoin(userId, target.guildId, memberId, cardGuild, null, null);
+                // Full parity with the in-Discord flow:
+                //  • creditJoin → joinlinks record the clawback sweep watches
+                //    (roleId 'api' + serverId so a leave reverses this stat too);
+                //  • payShares splits the profit;
+                //  • verified.json entry tagged with the shown creative's adKey;
+                //  • hub-role sync + funds audit log + completion notice.
+                const adKey = touchCreative(target.adText);
+                const amount = creditJoin(userId, target.guildId, memberId, serverId, 'api', null);
                 await payShares(clients, amount).catch(() => null);
+                const fresh = recordApiVerified({ creatorId: userId, memberId, serverId, adKey });
+                syncHubMember(clients, memberId).catch(() => null);
+                await logFunds(clients, {
+                    type: 'credit', creatorId: userId, userId: memberId, guildId: serverId,
+                    amount, reason: 'Join verified (API)'
+                }).catch(() => null);
+                maybeNotifyAdComplete(clients, adKey, fresh).catch(() => null);
                 await maybeAutoWithdraw(clients, userId).catch(() => null);
                 const s = loadJSON('settings.json')[userId] || {};
                 return send(res, 200, { joined: true, credited: true, sponsor: target.guildId, amount: money(amount), balance: money(s.balance) });
