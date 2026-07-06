@@ -15,6 +15,9 @@ const { maybeAutoWithdraw } = require('./payouts.js');
 
 const SALE_PRICE_PER_100 = Number(process.env.JOIN_SALE_PRICE) || 10;
 const REVENUE_PER_JOIN = SALE_PRICE_PER_100 / 100;         // $ earned per confirmed join
+// Crypto Pay acquiring fee (~3%) charged on top of every partner payout —
+// a real cost that must come out of profit before it's split by shares.
+const ACQUIRING_RATE = Number.isFinite(Number(process.env.ACQUIRING_RATE)) ? Number(process.env.ACQUIRING_RATE) : 0.03;
 const DEFAULT_HOLDER = process.env.SHARES_DEFAULT_HOLDER || '833442190427684914';
 const KEEP_DAYS = 40;                                       // daily buckets kept for the dashboard windows
 
@@ -46,8 +49,10 @@ function pruneBuckets(earnings, today) {
 // `pending` so micro-splits aren't lost to rounding), records exact earnings
 // for the dashboard, then runs each credited holder's payout flow.
 async function payShares(clients, partnerAmount, nowMs) {
-    const profit = REVENUE_PER_JOIN - (Number(partnerAmount) || 0);
-    if (!(profit > 0)) return; // partner paid ≥ what we charge → no profit to split
+    // Net profit = sale price − partner payout − acquiring fee on that payout.
+    const amt = Number(partnerAmount) || 0;
+    const profit = REVENUE_PER_JOIN - amt - amt * ACQUIRING_RATE;
+    if (!(profit > 0)) return; // costs ≥ what we charge → no profit to split
     const now = Number(nowMs) || Date.now();
     const today = dayNumberOf(now);
 
@@ -87,4 +92,4 @@ async function payShares(clients, partnerAmount, nowMs) {
     for (const uid of toWithdraw) await maybeAutoWithdraw(clients, uid).catch(() => null);
 }
 
-module.exports = { SALE_PRICE_PER_100, REVENUE_PER_JOIN, DEFAULT_HOLDER, loadShares, payShares, dayNumberOf };
+module.exports = { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, DEFAULT_HOLDER, loadShares, payShares, dayNumberOf };

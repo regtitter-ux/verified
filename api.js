@@ -12,7 +12,7 @@ const adminAuth = require('./admin-auth.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf } = require('./adcreative.js');
 const { resolveSponsorPresence } = require('./joincheck.js');
-const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, loadShares, dayNumberOf } = require('./shares.js');
+const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf } = require('./shares.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -280,14 +280,16 @@ async function handleAdmin(req, res, path, clients, config) {
         // minus what the partner was actually paid (joinlinks amount). Only
         // 'joined' records count — leavers were clawed back and don't sell.
         const joinedRecs = (Array.isArray(joinlinksRaw) ? joinlinksRaw : []).filter((r) => r && r.status === 'joined');
-        const pWin = { day: 0, week: 0, month: 0, total: 0 };
-        const rWin = { day: 0, week: 0, month: 0, total: 0 };
-        const cWin = { day: 0, week: 0, month: 0, total: 0 };
+        const pWin = { day: 0, week: 0, month: 0, total: 0 }; // net profit
+        const rWin = { day: 0, week: 0, month: 0, total: 0 }; // revenue from joins
+        const cWin = { day: 0, week: 0, month: 0, total: 0 }; // partner payouts
+        const aWin = { day: 0, week: 0, month: 0, total: 0 }; // acquiring fee on those payouts
         for (const r of joinedRecs) {
             const amt = Number(r.amount) || 0;
-            const prof = REVENUE_PER_JOIN - amt;
+            const acq = amt * ACQUIRING_RATE;
+            const prof = REVENUE_PER_JOIN - amt - acq;
             const wins = [['total', true], ['day', r.ts > now - 86400000], ['week', r.ts > now - 604800000], ['month', r.ts > now - 2592000000]];
-            for (const [k, inWin] of wins) if (inWin) { rWin[k] += REVENUE_PER_JOIN; cWin[k] += amt; pWin[k] += prof; }
+            for (const [k, inWin] of wins) if (inWin) { rWin[k] += REVENUE_PER_JOIN; cWin[k] += amt; aWin[k] += acq; pWin[k] += prof; }
         }
         const shareCfg = loadShares();
         const shareEarnings = loadJSON('shareearnings.json', {});
@@ -317,9 +319,11 @@ async function handleAdmin(req, res, path, clients, config) {
         const sharesData = {
             salePricePer100: SALE_PRICE_PER_100,
             revenuePerJoin: REVENUE_PER_JOIN,
+            acquiringRate: ACQUIRING_RATE,
             profit: roundWin(pWin),
             revenue: roundWin(rWin),
             partnerCost: roundWin(cWin),
+            acquiring: roundWin(aWin),
             holders,
             totalPct: +holders.reduce((s, h) => s + h.pct, 0).toFixed(2)
         };
