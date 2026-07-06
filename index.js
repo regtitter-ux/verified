@@ -1034,9 +1034,13 @@ const startBot = (token) => {
             if (latest) {
                 const limits = loadJSON('adlimits.json', {});
                 const key = adKeyOf(latest.text);
-                const cap = Number(limits[key]?.limit) || 0;
+                const rec = limits[key];
+                const cap = Number(rec?.limit) || 0;
                 if (cap > 0) {
-                    const netCount = (Array.isArray(verified) ? verified : []).filter(u => u.adKey === key).length;
+                    // Count only joins since the last counter reset — resetting
+                    // starts a fresh campaign toward the same limit.
+                    const since = Number(rec?.resetAt) || 0;
+                    const netCount = (Array.isArray(verified) ? verified : []).filter(u => u.adKey === key && u.timestamp > since).length;
                     if (netCount >= cap) latest = null;
                 }
             }

@@ -45,7 +45,9 @@ async function maybeNotifyAdComplete(clients, adKey, verifiedList) {
     const limits = loadJSON('adlimits.json', {});
     const rec = limits[adKey];
     if (!rec || !(Number(rec.limit) > 0) || rec.notifiedAt) return;
-    const net = (Array.isArray(verifiedList) ? verifiedList : []).filter((u) => u.adKey === adKey).length;
+    // Count only joins since the last reset — matches the enforced counter.
+    const since = Number(rec.resetAt) || 0;
+    const net = (Array.isArray(verifiedList) ? verifiedList : []).filter((u) => u.adKey === adKey && u.timestamp > since).length;
     if (net < Number(rec.limit)) return;
 
     // Mark BEFORE sending so a concurrent verification can't double-post.

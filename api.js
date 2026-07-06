@@ -392,6 +392,21 @@ async function handleAdmin(req, res, path, clients, config) {
         // adKey of the global ad rendered through the default template — used
         // to surface its join-limit on the global ad editor.
         const globalKey = (s.advText || '').trim() ? adKeyOf(applyTemplate(null, s.advText)) : '';
+        // Count / first-seen / last-seen for a creative, measured only from
+        // its last counter reset (resetAt).
+        const statsSinceReset = (key) => {
+            if (!key) return { count: 0, firstAt: 0, lastAt: 0 };
+            const since = Number(limits[key]?.resetAt) || 0;
+            let count = 0, firstAt = 0, lastAt = 0;
+            for (const u of entries) {
+                if (u.adKey !== key || u.timestamp <= since) continue;
+                count++;
+                if (!firstAt || u.timestamp < firstAt) firstAt = u.timestamp;
+                if (u.timestamp > lastAt) lastAt = u.timestamp;
+            }
+            return { count, firstAt, lastAt };
+        };
+        const globalStats = statsSinceReset(globalKey);
         const adCreatives = (await Promise.all(Object.entries(perCreative)
             .map(async ([key, c]) => {
                 const text = creatives[key]?.text || activeText[key] || '(текст не найден в adcreatives.json)';
@@ -402,10 +417,15 @@ async function handleAdmin(req, res, path, clients, config) {
                 const joinMode = active
                     ? Boolean(await resolveSponsorPresence(clients, text).catch(() => null))
                     : false;
+                const reset = Number(limits[key]?.resetAt) || 0;
+                // The limit counter + "Впервые" measure from the last reset.
+                const st = reset ? statsSinceReset(key) : { count: c.total, firstAt: creatives[key]?.firstSeenAt || 0 };
                 return {
                     key, text, active, joinMode,
                     limit: Number(limits[key]?.limit) || 0,
-                    firstSeenAt: creatives[key]?.firstSeenAt || 0,
+                    limitCount: st.count,
+                    resetAt: reset,
+                    firstSeenAt: st.firstAt || creatives[key]?.firstSeenAt || 0,
                     lastSeenAt: creatives[key]?.lastSeenAt || 0,
                     guilds: Object.entries(c.guilds)
                         .map(([gid, count]) => ({ gid, name: guildNameOf(clients, gid), count }))
@@ -441,10 +461,13 @@ async function handleAdmin(req, res, path, clients, config) {
                 default: s.advText || '',
                 defaultAt: s.advTextAt || 0,
                 // Join-limit for the globally-rendered creative, so the limit
-                // can be managed straight from the global ad editor.
+                // can be managed straight from the global ad editor. Count /
+                // first-seen are measured from the last counter reset.
                 defaultKey: globalKey,
                 defaultLimit: Number(adLimits[globalKey]?.limit) || 0,
-                defaultCount: globalKey ? entries.filter((u) => u.adKey === globalKey).length : 0,
+                defaultCount: globalStats.count,
+                defaultFirstAt: globalStats.firstAt,
+                defaultLastAt: globalStats.lastAt,
                 servers: Object.entries(s.serverAds || {})
                     .filter(([, v]) => typeof v === 'string' && v.trim())
                     .map(([gid, text]) => ({
@@ -735,6 +758,22 @@ async function handleAdmin(req, res, path, clients, config) {
         else delete limits[key];
         saveJSON('adlimits.json', limits);
         return send(res, 200, { ok: true, key, limit: limits[key]?.limit || 0 }, cors);
+    }
+
+    // Reset a creative's join counter — starts a fresh campaign toward the
+    // same limit. Stamps resetAt (enforcement + "Впервые" count from here)
+    // and re-arms the completion notice.
+    if (path === '/admin/creative-reset' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const key = String(body?.key || '');
+        if (!/^[0-9a-f]{12}$/.test(key)) return send(res, 400, { error: 'bad key' }, cors);
+        const limits = loadJSON('adlimits.json', {});
+        if (!limits[key]) limits[key] = {};
+        limits[key].resetAt = Date.now();
+        delete limits[key].notifiedAt;
+        saveJSON('adlimits.json', limits);
+        return send(res, 200, { ok: true, key }, cors);
     }
 
     // Create a Crypto Pay invoice to top up the app balance — same as the
