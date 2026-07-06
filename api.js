@@ -141,7 +141,7 @@ const DOCS = {
     auth: 'Send your API key as `Authorization: Bearer <key>` or `X-API-Key: <key>`.',
     endpoints: {
         'POST /api/verify/click': 'Record one qualifying verified click (ad shown + verified). Body: { guildId?, userId? }. Credits your balance at your bid.',
-        'POST /api/join-check': 'Verify a user really joined a server WE are currently advertising, and if so credit the join. Body: { userId, guildId?, invite?, cardGuildId? } — guildId/invite are optional and only narrow to a specific active sponsor; the eligible servers are decided by our live ads, not by you. Returns 200 { joined:true } when the member is confirmed on an active sponsor (let them through); 403 { joined:false } when not a member or the server is not currently advertised; 422 when no join-check campaign is live; 503 to retry. Membership is checked against Discord directly and each member is only ever paid once per sponsor.',
+        'POST /api/join-check': 'Verify a user really joined the SPECIFIC sponsor server you showed them, and if so credit the join. Body: { userId, guildId | invite, cardGuildId? } — pass the sponsor the user was shown (guildId or its invite); it may be omitted only when exactly one campaign is live. The server must be one we are currently advertising. Membership is checked against THAT server only, so a user who is in some other (past) sponsor but not this one is NOT credited. Returns 200 { joined:true } when confirmed (let them through); 403 { joined:false } when not a member or the server is not currently advertised; 400 when several campaigns are live and none is named; 422 when no campaign is live; 503 to retry. Each member is only ever paid once per sponsor.',
         'GET /api/balance': 'Your balance, payment details, bid ($/100 clicks) and pending clicks.',
         'GET /api/stats': 'Your verification stats (per server + time windows).',
         'GET /api/requisites': 'Your payment details.',
@@ -949,12 +949,16 @@ function startApiServer(clients, config) {
             //  1. The sponsor server is NOT chosen by the partner — it must be
             //     one of the servers WE are currently advertising (activeSponsors:
             //     live ad, kran open, limit not reached, a network bot present).
-            //     The partner may narrow to one of them, but cannot invent one.
-            //  2. Membership is verified with Discord's own REST API through a
+            //  2. Membership is checked against the ONE sponsor the user was
+            //     actually shown (the guildId/invite the partner passes) — NOT
+            //     against any active sponsor. So a user who's in some other
+            //     sponsor (from a past campaign) but not in the one they see
+            //     now is NOT credited.
+            //  3. Membership is verified with Discord's own REST API through a
             //     network bot on the sponsor guild — the partner cannot fake it.
-            //  3. Optional JOIN_CHECK_GUILDS allowlist further restricts payouts.
-            //  4. Dedup per (creator, sponsor, user): a real member is paid once.
-            //  5. The rate is the owner-set join bid, never partner-controlled.
+            //  4. Optional JOIN_CHECK_GUILDS allowlist further restricts payouts.
+            //  5. Dedup per (creator, sponsor, user): a real member is paid once.
+            //  6. The rate is the owner-set join bid, never partner-controlled.
             if (p === '/api/join-check' && req.method === 'POST') {
                 const body = await readBody(req);
                 if (body === null) return send(res, 400, { error: 'Invalid JSON body' });
@@ -965,47 +969,49 @@ function startApiServer(clients, config) {
                 const sponsors = await activeSponsors(clients, config.ownerId);
                 if (!sponsors.length) return send(res, 422, { joined: false, error: 'нет активной рекламы с проверкой на заход' });
 
-                // Partner may narrow to a specific sponsor, but it must be one
-                // of the currently-advertised ones.
-                let candidates = sponsors;
+                // Resolve the ONE sponsor the user was shown. The partner names
+                // it (guildId or invite); if exactly one campaign is live it's
+                // unambiguous and may be omitted. Multiple live + none named →
+                // we refuse to guess (crediting the wrong server would let a
+                // member of another sponsor pass without joining this one).
+                let target = null;
                 const gid = String(body.guildId || '').trim();
                 if (/^\d{17,20}$/.test(gid)) {
-                    candidates = sponsors.filter((s) => s.guildId === gid);
+                    target = sponsors.find((s) => s.guildId === gid) || null;
+                    if (!target) return send(res, 403, { joined: false, error: 'этот сервер сейчас не в активной рекламе' });
                 } else if (body.invite) {
                     const sp = await resolveSponsorPresence(clients, String(body.invite)).catch(() => null);
-                    candidates = sp ? sponsors.filter((s) => s.guildId === sp.guildId) : [];
+                    target = sp ? (sponsors.find((s) => s.guildId === sp.guildId) || null) : null;
+                    if (!target) return send(res, 403, { joined: false, error: 'этот сервер сейчас не в активной рекламе' });
+                } else if (sponsors.length === 1) {
+                    target = sponsors[0];
+                } else {
+                    return send(res, 400, { error: 'укажите guildId или invite сервера-спонсора, показанного пользователю (сейчас активно несколько кампаний)' });
                 }
-                if (JOIN_CHECK_GUILDS.size) candidates = candidates.filter((s) => JOIN_CHECK_GUILDS.has(s.guildId));
-                if (!candidates.length) return send(res, 403, { joined: false, error: 'этот сервер сейчас не в активной рекламе' });
+                if (JOIN_CHECK_GUILDS.size && !JOIN_CHECK_GUILDS.has(target.guildId)) {
+                    return send(res, 403, { joined: false, error: 'sponsor server not approved for API join-check' });
+                }
 
-                // Independent membership check via Discord REST against each
-                // eligible sponsor; credit the first the user actually joined.
-                let matched = null, transient = false;
-                for (const s of candidates) {
-                    const present = await isMember(s.bot, s.guildId, memberId).catch(() => null);
-                    if (present === true) { matched = s; break; }
-                    if (present === null) transient = true;
-                }
-                if (!matched) {
-                    if (transient) return send(res, 503, { joined: null, error: 'membership check temporarily unavailable, retry' });
-                    return send(res, 403, { joined: false });
-                }
+                // Membership check against THAT sponsor only.
+                const present = await isMember(target.bot, target.guildId, memberId).catch(() => null);
+                if (present === null) return send(res, 503, { joined: null, error: 'membership check temporarily unavailable, retry' });
+                if (present !== true) return send(res, 403, { joined: false });
 
                 // Dedup — never pay twice for the same real member.
                 const links = loadJSON('joinlinks.json', []);
                 const already = (Array.isArray(links) ? links : []).some(
-                    (r) => r && r.status === 'joined' && r.creatorId === userId && r.guildId === matched.guildId && r.userId === memberId
+                    (r) => r && r.status === 'joined' && r.creatorId === userId && r.guildId === target.guildId && r.userId === memberId
                 );
-                if (already) return send(res, 200, { joined: true, credited: false, sponsor: matched.guildId, note: 'already counted' });
+                if (already) return send(res, 200, { joined: true, credited: false, sponsor: target.guildId, note: 'already counted' });
 
                 // Record + credit — creditJoin writes a joinlinks record the
                 // clawback sweep watches, so leaving the sponsor reverses it.
                 const cardGuild = /^\d{17,20}$/.test(String(body.cardGuildId || '')) ? String(body.cardGuildId) : null;
-                const amount = creditJoin(userId, matched.guildId, memberId, cardGuild, null, null);
+                const amount = creditJoin(userId, target.guildId, memberId, cardGuild, null, null);
                 await payShares(clients, amount).catch(() => null);
                 await maybeAutoWithdraw(clients, userId).catch(() => null);
                 const s = loadJSON('settings.json')[userId] || {};
-                return send(res, 200, { joined: true, credited: true, sponsor: matched.guildId, amount: money(amount), balance: money(s.balance) });
+                return send(res, 200, { joined: true, credited: true, sponsor: target.guildId, amount: money(amount), balance: money(s.balance) });
             }
 
             if (p === '/api/requisites' && req.method === 'GET') {
