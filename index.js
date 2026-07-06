@@ -13,6 +13,7 @@ const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheck
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { touchCreative, adKeyOf, maybeNotifyAdComplete } = require('./adcreative.js');
+const { payShares } = require('./shares.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
@@ -1111,6 +1112,9 @@ const startBot = (token) => {
                         type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
                         amount, reason: 'Join verified'
                     });
+                    // Split this join's service profit ($ we charge − partner
+                    // payout) across shareholders, crediting their balances.
+                    await payShares(clients, amount).catch(() => null);
                 } else {
                     const amount = creditVerifiedClick(creatorId);
                     await logFunds(clients, {

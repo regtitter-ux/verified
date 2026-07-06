@@ -12,6 +12,7 @@ const adminAuth = require('./admin-auth.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf } = require('./adcreative.js');
 const { resolveSponsorPresence } = require('./joincheck.js');
+const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, loadShares, dayNumberOf } = require('./shares.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -264,6 +265,54 @@ async function handleAdmin(req, res, path, clients, config) {
             for (const w of wds) if (w.status === 'completed') totalPaid += Number(w.amount) || 0;
         }
 
+        // ---- Shares (доли) ----
+        // Service profit per confirmed join = what we charge (REVENUE_PER_JOIN)
+        // minus what the partner was actually paid (joinlinks amount). Only
+        // 'joined' records count — leavers were clawed back and don't sell.
+        const joinedRecs = (Array.isArray(joinlinksRaw) ? joinlinksRaw : []).filter((r) => r && r.status === 'joined');
+        const pWin = { day: 0, week: 0, month: 0, total: 0 };
+        const rWin = { day: 0, week: 0, month: 0, total: 0 };
+        const cWin = { day: 0, week: 0, month: 0, total: 0 };
+        for (const r of joinedRecs) {
+            const amt = Number(r.amount) || 0;
+            const prof = REVENUE_PER_JOIN - amt;
+            const wins = [['total', true], ['day', r.ts > now - 86400000], ['week', r.ts > now - 604800000], ['month', r.ts > now - 2592000000]];
+            for (const [k, inWin] of wins) if (inWin) { rWin[k] += REVENUE_PER_JOIN; cWin[k] += amt; pWin[k] += prof; }
+        }
+        const shareCfg = loadShares();
+        const shareEarnings = loadJSON('shareearnings.json', {});
+        const todayNum = dayNumberOf(now);
+        const holderWin = (uid) => {
+            const b = shareEarnings[uid] || {};
+            let d = 0, w = 0, m = 0;
+            for (const [k, v] of Object.entries(b)) {
+                const dn = Number(k), val = Number(v) || 0;
+                if (dn >= todayNum) d += val;
+                if (dn > todayNum - 7) w += val;
+                if (dn > todayNum - 30) m += val;
+            }
+            return { day: money(d), week: money(w), month: money(m) };
+        };
+        const holders = Object.entries(shareCfg).map(([uid, cfg]) => ({
+            userId: uid,
+            pct: Number(cfg.pct) || 0,
+            addedAt: cfg.addedAt || 0,
+            balance: money(settings[uid]?.balance),
+            pending: money(cfg.pending),
+            earnedTotal: money(cfg.earned),
+            ...holderWin(uid)
+        })).sort((a, b) => b.pct - a.pct);
+        const roundWin = (w) => ({ day: money(w.day), week: money(w.week), month: money(w.month), total: money(w.total) });
+        const sharesData = {
+            salePricePer100: SALE_PRICE_PER_100,
+            revenuePerJoin: REVENUE_PER_JOIN,
+            profit: roundWin(pWin),
+            revenue: roundWin(rWin),
+            partnerCost: roundWin(cWin),
+            holders,
+            totalPct: +holders.reduce((s, h) => s + h.pct, 0).toFixed(2)
+        };
+
         // Per-creative rollup: verified.json entries carry the adKey they
         // were shown under (set by touchCreative in index.js), so we can
         // attribute counts back to individual rendered ad texts. Untagged
@@ -303,6 +352,10 @@ async function handleAdmin(req, res, path, clients, config) {
         }
 
         const limits = loadJSON('adlimits.json', {});
+        const adLimits = limits;
+        // adKey of the global ad rendered through the default template — used
+        // to surface its join-limit on the global ad editor.
+        const globalKey = (s.advText || '').trim() ? adKeyOf(applyTemplate(null, s.advText)) : '';
         const adCreatives = (await Promise.all(Object.entries(perCreative)
             .map(async ([key, c]) => {
                 const text = creatives[key]?.text || activeText[key] || '(текст не найден в adcreatives.json)';
@@ -351,6 +404,11 @@ async function handleAdmin(req, res, path, clients, config) {
             ads: {
                 default: s.advText || '',
                 defaultAt: s.advTextAt || 0,
+                // Join-limit for the globally-rendered creative, so the limit
+                // can be managed straight from the global ad editor.
+                defaultKey: globalKey,
+                defaultLimit: Number(adLimits[globalKey]?.limit) || 0,
+                defaultCount: globalKey ? entries.filter((u) => u.adKey === globalKey).length : 0,
                 servers: Object.entries(s.serverAds || {})
                     .filter(([, v]) => typeof v === 'string' && v.trim())
                     .map(([gid, text]) => ({
@@ -367,6 +425,7 @@ async function handleAdmin(req, res, path, clients, config) {
                 withBalance,
                 totalPaid: money(totalPaid)
             },
+            shares: sharesData,
             adCreatives
         }, cors);
     }
@@ -639,6 +698,22 @@ async function handleAdmin(req, res, path, clients, config) {
         else delete limits[key];
         saveJSON('adlimits.json', limits);
         return send(res, 200, { ok: true, key, limit: limits[key]?.limit || 0 }, cors);
+    }
+
+    // Shares (доли): set a holder's percentage. pct <= 0 removes them.
+    // Existing pending/earned accounting is preserved across edits.
+    if (path === '/admin/shares' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const uid = String(body?.userId || '');
+        if (!/^\d{17,20}$/.test(uid)) return send(res, 400, { error: 'bad user id' }, cors);
+        const pct = Number(body?.pct);
+        if (!Number.isFinite(pct) || pct < 0 || pct > 100) return send(res, 400, { error: 'pct must be 0..100' }, cors);
+        const cfg = loadShares();
+        if (pct <= 0) delete cfg[uid];
+        else cfg[uid] = { ...(cfg[uid] || {}), pct: +pct.toFixed(2), addedAt: cfg[uid]?.addedAt || Date.now() };
+        saveJSON('shares.json', cfg);
+        return send(res, 200, { ok: true, userId: uid, pct: cfg[uid]?.pct || 0 }, cors);
     }
 
     // Per-server ads-off — same semantic as the global switch, scoped to
