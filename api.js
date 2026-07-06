@@ -88,38 +88,6 @@ function resolveKey(key) {
     return rec ? rec.userId : null;
 }
 
-// Same crediting rule as /verify: partner's bid ($/100 clicks) paid in 10-click steps.
-function creditClick(userId) {
-    const settings = loadJSON('settings.json');
-    if (!settings[userId]) settings[userId] = blankUser();
-    const s = settings[userId];
-
-    const perTen = getBid(s) / 10;
-    s.verifiedClicks = (Number(s.verifiedClicks) || 0) + 1;
-    if (s.verifiedClicks >= 10) {
-        const groups = Math.floor(s.verifiedClicks / 10);
-        s.balance = money((Number(s.balance) || 0) + groups * perTen);
-        s.verifiedClicks -= groups * 10;
-    }
-    saveJSON('settings.json', settings);
-    return s;
-}
-
-// Record a verification so it shows in /stat and /bal stats (roleId marks it countable).
-function recordVerified(userId, guildId, memberId) {
-    const verified = loadJSON('verified.json', []);
-    const arr = Array.isArray(verified) ? verified : [];
-    arr.push({
-        id: /^\d{17,20}$/.test(memberId || '') ? memberId : 'api',
-        creatorId: userId,
-        guildId: /^\d{17,20}$/.test(guildId || '') ? guildId : 'api',
-        roleId: 'api',
-        timestamp: Date.now(),
-        viaApi: true
-    });
-    saveJSON('verified.json', arr);
-}
-
 // Record an API verification exactly like the in-Discord flow: one entry per
 // (member, server), tagged with the creative's adKey (paid join) or noAd
 // (no active ad). Replaces any prior entry so repeats don't inflate stats.
@@ -161,16 +129,16 @@ function userStats(userId) {
 const DOCS = {
     name: 'Verification API',
     auth: 'Send your API key as `Authorization: Bearer <key>` or `X-API-Key: <key>`.',
+    note: 'Your bot behaves exactly like a network verification bot. You only run verifications; ad text, rate and campaigns are controlled by the owner — you cannot set them. Payouts are earned only through verified joins.',
     endpoints: {
-        'POST /api/verify/click': 'Record one qualifying verified click (ad shown + verified). Body: { guildId?, userId? }. Credits your balance at your bid.',
         'GET /api/ad': 'The ad to show on your server: ?serverId=<your guild>. Returns { adText, sponsor:{guildId,name,invite}|null }. It is the owner\'s per-server ad if set for your server, else the global ad — same rule as every network bot. adText null → no ad, just verify.',
         'POST /api/join-check': 'Complete a verification, mirroring the in-Discord bots. Body: { userId, serverId }. We pick the ad for your server (per-server override or global) and: if it is a join-check ad, we verify membership on its sponsor via Discord — 200 { joined:true, credited:true } on success (let them through), 403 { joined:false } if not a member (ask them to join first). If there is no ad (kran closed / none set / limit reached), 200 { joined:true, ad:false } → verify them without an ad (no-ad stat recorded, no payout). The sponsor is derived from OUR ad config, never partner input. 503 to retry. Each member is paid once per sponsor; leaving reverses it.',
-        'GET /api/balance': 'Your balance, payment details, bid ($/100 clicks) and pending clicks.',
+        'GET /api/balance': 'Your balance and payment details.',
         'GET /api/stats': 'Your verification stats (per server + time windows).',
         'GET /api/requisites': 'Your payment details.',
-        'PUT /api/requisites': 'Set payment details. Body: { requisites }.',
+        'PUT /api/requisites': 'Set your payout details. Body: { requisites }. (The only thing you configure — same as a network bot operator setting theirs in /bal.)',
         'GET /api/withdrawals': 'Your withdrawal history and total withdrawn.',
-        'POST /api/withdraw': 'Trigger payout check — a request is filed automatically once balance reaches $10.'
+        'POST /api/withdraw': 'Nudge the payout check — a request is filed automatically once balance reaches $10.'
     }
 };
 
@@ -943,24 +911,7 @@ function startApiServer(clients, config) {
                 return send(res, 200, {
                     userId,
                     balance: money(s.balance),
-                    requisites: (s.requisites || '').trim(),
-                    bid: getBid(s),
-                    pendingClicks: Number(s.verifiedClicks) || 0
-                });
-            }
-
-            if (p === '/api/verify/click' && req.method === 'POST') {
-                const body = await readBody(req);
-                if (body === null) return send(res, 400, { error: 'Invalid JSON body' });
-                creditClick(userId);
-                recordVerified(userId, body.guildId, body.userId);
-                await maybeAutoWithdraw(clients, userId).catch(() => null);
-                const s = loadJSON('settings.json')[userId] || {};
-                return send(res, 200, {
-                    ok: true,
-                    balance: money(s.balance),
-                    pendingClicks: Number(s.verifiedClicks) || 0,
-                    bid: getBid(s)
+                    requisites: (s.requisites || '').trim()
                 });
             }
 
