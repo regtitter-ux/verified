@@ -11,7 +11,7 @@ const { maybeAutoWithdraw } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf } = require('./adcreative.js');
-const { resolveSponsorPresence, isMember, creditJoin } = require('./joincheck.js');
+const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes } = require('./joincheck.js');
 const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares } = require('./shares.js');
 const cryptopay = require('./cryptopay.js');
 
@@ -56,7 +56,15 @@ async function activeSponsors(clients, ownerId) {
             if (cnt >= Number(rec.limit)) continue;
         }
         const sp = await resolveSponsorPresence(clients, raw).catch(() => null);
-        if (sp && !seen.has(sp.guildId)) { seen.add(sp.guildId); out.push(sp); }
+        if (sp && !seen.has(sp.guildId)) {
+            seen.add(sp.guildId);
+            const codes = extractInviteCodes(raw);
+            out.push({
+                ...sp,
+                adText: applyTemplate(gid, raw),                 // rendered text to show users
+                invite: codes.length ? `https://discord.gg/${codes[0]}` : null
+            });
+        }
     }
     return out;
 }
@@ -141,6 +149,7 @@ const DOCS = {
     auth: 'Send your API key as `Authorization: Bearer <key>` or `X-API-Key: <key>`.',
     endpoints: {
         'POST /api/verify/click': 'Record one qualifying verified click (ad shown + verified). Body: { guildId?, userId? }. Credits your balance at your bid.',
+        'GET /api/active-sponsors': 'The ad campaigns live right now: [{ guildId, name, invite, adText }]. Poll this, show adText to your users, and pass guildId to /api/join-check. Auto-follows whatever the owner is advertising.',
         'POST /api/join-check': 'Verify a user really joined the SPECIFIC sponsor server you showed them, and if so credit the join. Body: { userId, guildId | invite, cardGuildId? } — pass the sponsor the user was shown (guildId or its invite); it may be omitted only when exactly one campaign is live. The server must be one we are currently advertising. Membership is checked against THAT server only, so a user who is in some other (past) sponsor but not this one is NOT credited. Returns 200 { joined:true } when confirmed (let them through); 403 { joined:false } when not a member or the server is not currently advertised; 400 when several campaigns are live and none is named; 422 when no campaign is live; 503 to retry. Each member is only ever paid once per sponsor.',
         'GET /api/balance': 'Your balance, payment details, bid ($/100 clicks) and pending clicks.',
         'GET /api/stats': 'Your verification stats (per server + time windows).',
@@ -938,6 +947,22 @@ function startApiServer(clients, config) {
                     balance: money(s.balance),
                     pendingClicks: Number(s.verifiedClicks) || 0,
                     bid: getBid(s)
+                });
+            }
+
+            // What we're advertising right now — a partner bot polls this to
+            // auto-sync: show the returned adText to users and pass the
+            // sponsor's guildId to /api/join-check. No manual config, and it
+            // follows whatever campaign the owner has live.
+            if (p === '/api/active-sponsors' && req.method === 'GET') {
+                const list = await activeSponsors(clients, config.ownerId);
+                return send(res, 200, {
+                    sponsors: list.map((s) => ({
+                        guildId: s.guildId,
+                        name: guildNameOf(clients, s.guildId),
+                        invite: s.invite,
+                        adText: s.adText
+                    }))
                 });
             }
 
