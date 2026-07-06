@@ -254,10 +254,14 @@ async function handleAdmin(req, res, path, clients, config) {
         // to creators. Negative balances (from sponsor-leave clawbacks) don't
         // reduce the debt — they represent overpayments the user has to earn
         // back, not funds available to the platform.
-        let outstanding = 0, withBalance = 0;
+        let outstanding = 0, withBalance = 0, totalPaid = 0;
         for (const u of Object.keys(settings)) {
             const b = Number(settings[u]?.balance) || 0;
             if (b > 0) { outstanding += b; withBalance++; }
+            // All-time payout: sum of every completed withdrawal across
+            // every partner. This is money that has actually left to users.
+            const wds = Array.isArray(settings[u]?.withdrawals) ? settings[u].withdrawals : [];
+            for (const w of wds) if (w.status === 'completed') totalPaid += Number(w.amount) || 0;
         }
 
         // Per-creative rollup: verified.json entries carry the adKey they
@@ -360,7 +364,8 @@ async function handleAdmin(req, res, path, clients, config) {
                 noAd: verifStats(entries.filter((u) => u.noAd)),
                 perGuild,
                 outstanding: money(outstanding),
-                withBalance
+                withBalance,
+                totalPaid: money(totalPaid)
             },
             adCreatives
         }, cors);
