@@ -28,47 +28,41 @@ const ADMIN_ORIGIN = (process.env.ADMIN_API_ORIGIN || 'https://vemoni.info').tri
 // dedup still apply).
 const JOIN_CHECK_GUILDS = new Set((process.env.JOIN_CHECK_GUILDS || '').split(',').map((s) => s.trim()).filter(Boolean));
 
-// The sponsor servers that are CURRENTLY being advertised: derived from the
-// owner's live ads (global + per-server), excluding campaigns whose join
-// limit is reached, when the global kran is closed, or where no network bot
-// is on the sponsor server. This is the ONLY set /api/join-check will pay
-// for — a partner can't point join-check at an arbitrary server.
-async function activeSponsors(clients, ownerId) {
+// The single ad that applies to one server — the SAME rule every network bot
+// uses: the owner's per-server ad if set for that server, otherwise the
+// global ad. Returns { adText, sponsor:{guildId,bot}|null, invite } — adText
+// null means "no ad, verify without one" (kran closed, no ad set, or the
+// join limit is reached). sponsor is set only in join-check mode (the ad's
+// invite leads to a server a network bot is on).
+async function adForServer(clients, ownerId, serverId) {
     const cfg = loadJSON('siteconfig.json', {});
-    if (cfg.adsOff) return []; // global kran closed → nothing is being advertised
+    const gidOk = /^\d{17,20}$/.test(String(serverId || ''));
+    if (cfg.adsOff) return { adText: null, sponsor: null, invite: null };
+    if (gidOk && cfg.serverAdsOff && cfg.serverAdsOff[serverId]) return { adText: null, sponsor: null, invite: null };
+
     const settings = loadJSON('settings.json');
     const s = settings[ownerId] || {};
+    let raw = null, gid = null;
+    if (gidOk && (s.serverAds || {})[serverId] && String(s.serverAds[serverId]).trim()) { raw = s.serverAds[serverId]; gid = serverId; }
+    else if ((s.advText || '').trim()) { raw = s.advText; gid = null; }
+    if (!raw) return { adText: null, sponsor: null, invite: null };
+
+    const rendered = applyTemplate(gid, raw);
+    // Reached its join limit → treat as no ad (verification runs ad-free).
     const limits = loadJSON('adlimits.json', {});
-    const verified = loadJSON('verified.json', []);
-    const arr = Array.isArray(verified) ? verified : [];
-
-    const items = [];
-    if ((s.advText || '').trim()) items.push({ gid: null, raw: s.advText });
-    for (const [gid, raw] of Object.entries(s.serverAds || {})) if ((raw || '').trim()) items.push({ gid, raw });
-
-    const seen = new Set();
-    const out = [];
-    for (const { gid, raw } of items) {
-        // Skip a campaign that already hit its join limit (since last reset).
-        const key = adKeyOf(applyTemplate(gid, raw));
-        const rec = limits[key];
-        if (rec && Number(rec.limit) > 0) {
-            const since = Number(rec.resetAt) || 0;
-            const cnt = arr.filter((u) => u.adKey === key && u.timestamp > since).length;
-            if (cnt >= Number(rec.limit)) continue;
-        }
-        const sp = await resolveSponsorPresence(clients, raw).catch(() => null);
-        if (sp && !seen.has(sp.guildId)) {
-            seen.add(sp.guildId);
-            const codes = extractInviteCodes(raw);
-            out.push({
-                ...sp,
-                adText: applyTemplate(gid, raw),                 // rendered text to show users
-                invite: codes.length ? `https://discord.gg/${codes[0]}` : null
-            });
-        }
+    const key = adKeyOf(rendered);
+    const rec = limits[key];
+    if (rec && Number(rec.limit) > 0) {
+        const verified = loadJSON('verified.json', []);
+        const arr = Array.isArray(verified) ? verified : [];
+        const since = Number(rec.resetAt) || 0;
+        const cnt = arr.filter((u) => u.adKey === key && u.timestamp > since).length;
+        if (cnt >= Number(rec.limit)) return { adText: null, sponsor: null, invite: null };
     }
-    return out;
+
+    const sponsor = await resolveSponsorPresence(clients, raw).catch(() => null);
+    const codes = extractInviteCodes(raw);
+    return { adText: rendered, sponsor, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
 }
 
 // Cache the Crypto Pay USDT app balance briefly — /admin/state is polled
@@ -169,8 +163,8 @@ const DOCS = {
     auth: 'Send your API key as `Authorization: Bearer <key>` or `X-API-Key: <key>`.',
     endpoints: {
         'POST /api/verify/click': 'Record one qualifying verified click (ad shown + verified). Body: { guildId?, userId? }. Credits your balance at your bid.',
-        'GET /api/active-sponsors': 'The ad campaigns live right now: [{ guildId, name, invite, adText }]. Poll this, show adText to your users, and pass guildId to /api/join-check. Auto-follows whatever the owner is advertising.',
-        'POST /api/join-check': 'Complete a verification, mirroring the in-Discord bots. Body: { userId, serverId, guildId | invite }. serverId = your server (for the stat). If a campaign is live: pass the sponsor shown (guildId or invite; omit only when one is live), we check membership against THAT server via Discord, and on success credit the join + record it. 200 { joined:true, credited:true } → let them through; 403 { joined:false } → not a member of that server, ask them to join first. If NO campaign is live: 200 { joined:true, ad:false } → verify them without any ad (a no-ad verification is recorded, no payout), just like a network bot. 400 when several campaigns are live and none named; 503 to retry. Each member is paid once per sponsor; leaving reverses it.',
+        'GET /api/ad': 'The ad to show on your server: ?serverId=<your guild>. Returns { adText, sponsor:{guildId,name,invite}|null }. It is the owner\'s per-server ad if set for your server, else the global ad — same rule as every network bot. adText null → no ad, just verify.',
+        'POST /api/join-check': 'Complete a verification, mirroring the in-Discord bots. Body: { userId, serverId }. We pick the ad for your server (per-server override or global) and: if it is a join-check ad, we verify membership on its sponsor via Discord — 200 { joined:true, credited:true } on success (let them through), 403 { joined:false } if not a member (ask them to join first). If there is no ad (kran closed / none set / limit reached), 200 { joined:true, ad:false } → verify them without an ad (no-ad stat recorded, no payout). The sponsor is derived from OUR ad config, never partner input. 503 to retry. Each member is paid once per sponsor; leaving reverses it.',
         'GET /api/balance': 'Your balance, payment details, bid ($/100 clicks) and pending clicks.',
         'GET /api/stats': 'Your verification stats (per server + time windows).',
         'GET /api/requisites': 'Your payment details.',
@@ -970,105 +964,67 @@ function startApiServer(clients, config) {
                 });
             }
 
-            // What we're advertising right now — a partner bot polls this to
-            // auto-sync: show the returned adText to users and pass the
-            // sponsor's guildId to /api/join-check. No manual config, and it
-            // follows whatever campaign the owner has live.
-            if (p === '/api/active-sponsors' && req.method === 'GET') {
-                const list = await activeSponsors(clients, config.ownerId);
+            // The ad to show on YOUR server right now — the owner's per-server
+            // ad if they set one for it, else the global ad (same rule as
+            // every network bot). Poll this, show adText to your users.
+            // adText null → no ad, just verify. Query: ?serverId=<your guild>.
+            if (p === '/api/ad' && req.method === 'GET') {
+                const serverId = (new URL(req.url, 'http://x')).searchParams.get('serverId') || '';
+                const ad = await adForServer(clients, config.ownerId, serverId);
                 return send(res, 200, {
-                    sponsors: list.map((s) => ({
-                        guildId: s.guildId,
-                        name: guildNameOf(clients, s.guildId),
-                        invite: s.invite,
-                        adText: s.adText
-                    }))
+                    adText: ad.adText,
+                    sponsor: ad.sponsor ? { guildId: ad.sponsor.guildId, name: guildNameOf(clients, ad.sponsor.guildId), invite: ad.invite } : null
                 });
             }
 
-            // Secure join-check: a partner's bot asks whether `userId` is
-            // really a member of the sponsor server, and — if so — the join
-            // is credited (join-check rate) exactly like the in-Discord flow.
-            //
-            // Anti-fraud, layered:
-            //  1. The sponsor server is NOT chosen by the partner — it must be
-            //     one of the servers WE are currently advertising (activeSponsors:
-            //     live ad, kran open, limit not reached, a network bot present).
-            //  2. Membership is checked against the ONE sponsor the user was
-            //     actually shown (the guildId/invite the partner passes) — NOT
-            //     against any active sponsor. So a user who's in some other
-            //     sponsor (from a past campaign) but not in the one they see
-            //     now is NOT credited.
-            //  3. Membership is verified with Discord's own REST API through a
-            //     network bot on the sponsor guild — the partner cannot fake it.
-            //  4. Optional JOIN_CHECK_GUILDS allowlist further restricts payouts.
-            //  5. Dedup per (creator, sponsor, user): a real member is paid once.
-            //  6. The rate is the owner-set join bid, never partner-controlled.
+            // Complete a verification — same logic as the in-Discord bots.
+            // The partner passes only { userId, serverId }. We pick the ad for
+            // that server (per-server override or global), and:
+            //  • no ad (kran closed / none set / limit reached) → verify
+            //    without an ad (no-ad stat, hub role, no payout);
+            //  • ad in join-check mode → verify membership on THAT sponsor via
+            //    Discord and, on success, credit + record exactly like a
+            //    network bot. Not a member → 403, ask them to join first.
+            // The sponsor is derived from OUR ad config, never partner input,
+            // so it can't be farmed. Dedup per (creator, sponsor, user).
             if (p === '/api/join-check' && req.method === 'POST') {
                 const body = await readBody(req);
                 if (body === null) return send(res, 400, { error: 'Invalid JSON body' });
                 const memberId = String(body.userId || '').trim();
                 if (!/^\d{17,20}$/.test(memberId)) return send(res, 400, { error: 'userId must be a Discord user ID' });
-                // The partner's own server (where verification happens) — used
-                // as the guildId for the verified.json stat, same as a network
-                // bot records the card's guild.
                 const serverId = /^\d{17,20}$/.test(String(body.serverId || '')) ? String(body.serverId)
                     : (/^\d{17,20}$/.test(String(body.cardGuildId || '')) ? String(body.cardGuildId) : null);
 
-                const sponsors = await activeSponsors(clients, config.ownerId);
+                const ad = await adForServer(clients, config.ownerId, serverId);
+                const sponsor = ad.sponsor;
+                const approved = sponsor && (!JOIN_CHECK_GUILDS.size || JOIN_CHECK_GUILDS.has(sponsor.guildId));
 
-                // No active campaign → verify WITHOUT an ad, exactly like a
-                // network bot: record a no-ad verification (organic stat),
-                // grant the hub role, no payout. Let the user through.
-                if (!sponsors.length) {
+                // No join-check sponsor for this server → verify without an ad,
+                // exactly like a network bot: no-ad stat, hub role, no payout.
+                if (!approved) {
                     recordApiVerified({ creatorId: userId, memberId, serverId, noAd: true });
                     syncHubMember(clients, memberId).catch(() => null);
-                    return send(res, 200, { joined: true, credited: false, ad: false, note: 'no active ad — verified without ad' });
+                    return send(res, 200, { joined: true, credited: false, ad: false });
                 }
 
-                // Resolve the ONE sponsor the user was shown. The partner names
-                // it (guildId or invite); if exactly one campaign is live it's
-                // unambiguous and may be omitted. Multiple live + none named →
-                // we refuse to guess (crediting the wrong server would let a
-                // member of another sponsor pass without joining this one).
-                let target = null;
-                const gid = String(body.guildId || '').trim();
-                if (/^\d{17,20}$/.test(gid)) {
-                    target = sponsors.find((s) => s.guildId === gid) || null;
-                    if (!target) return send(res, 403, { joined: false, error: 'этот сервер сейчас не в активной рекламе' });
-                } else if (body.invite) {
-                    const sp = await resolveSponsorPresence(clients, String(body.invite)).catch(() => null);
-                    target = sp ? (sponsors.find((s) => s.guildId === sp.guildId) || null) : null;
-                    if (!target) return send(res, 403, { joined: false, error: 'этот сервер сейчас не в активной рекламе' });
-                } else if (sponsors.length === 1) {
-                    target = sponsors[0];
-                } else {
-                    return send(res, 400, { error: 'укажите guildId или invite сервера-спонсора, показанного пользователю (сейчас активно несколько кампаний)' });
-                }
-                if (JOIN_CHECK_GUILDS.size && !JOIN_CHECK_GUILDS.has(target.guildId)) {
-                    return send(res, 403, { joined: false, error: 'sponsor server not approved for API join-check' });
-                }
-
-                // Membership check against THAT sponsor only.
-                const present = await isMember(target.bot, target.guildId, memberId).catch(() => null);
+                // Membership check against the sponsor of THIS server's ad.
+                const present = await isMember(sponsor.bot, sponsor.guildId, memberId).catch(() => null);
                 if (present === null) return send(res, 503, { joined: null, error: 'membership check temporarily unavailable, retry' });
                 if (present !== true) return send(res, 403, { joined: false });
 
                 // Dedup — never pay twice for the same real member.
                 const links = loadJSON('joinlinks.json', []);
                 const already = (Array.isArray(links) ? links : []).some(
-                    (r) => r && r.status === 'joined' && r.creatorId === userId && r.guildId === target.guildId && r.userId === memberId
+                    (r) => r && r.status === 'joined' && r.creatorId === userId && r.guildId === sponsor.guildId && r.userId === memberId
                 );
-                if (already) return send(res, 200, { joined: true, credited: false, sponsor: target.guildId, note: 'already counted' });
+                if (already) return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
 
-                // Full parity with the in-Discord flow:
-                //  • creditJoin → joinlinks record the clawback sweep watches
-                //    (roleId 'api' + serverId so a leave reverses this stat too);
-                //  • payShares splits the profit;
-                //  • verified.json entry tagged with the shown creative's adKey;
-                //  • hub-role sync + funds audit log + completion notice.
-                const adKey = touchCreative(target.adText);
-                const amount = creditJoin(userId, target.guildId, memberId, serverId, 'api', null);
+                // Full parity with the in-Discord flow: joinlinks (clawback-
+                // watched, roleId 'api' + serverId), share split, verified.json
+                // tagged with the shown creative's adKey, hub role, audit log,
+                // campaign-complete notice.
+                const adKey = touchCreative(ad.adText);
+                const amount = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null);
                 await payShares(clients, amount).catch(() => null);
                 const fresh = recordApiVerified({ creatorId: userId, memberId, serverId, adKey });
                 syncHubMember(clients, memberId).catch(() => null);
@@ -1079,7 +1035,7 @@ function startApiServer(clients, config) {
                 maybeNotifyAdComplete(clients, adKey, fresh).catch(() => null);
                 await maybeAutoWithdraw(clients, userId).catch(() => null);
                 const s = loadJSON('settings.json')[userId] || {};
-                return send(res, 200, { joined: true, credited: true, sponsor: target.guildId, amount: money(amount), balance: money(s.balance) });
+                return send(res, 200, { joined: true, credited: true, sponsor: sponsor.guildId, amount: money(amount), balance: money(s.balance) });
             }
 
             if (p === '/api/requisites' && req.method === 'GET') {
