@@ -260,20 +260,28 @@ async function handleAdmin(req, res, path, clients, config) {
         const t = loadJSON('adtemplates.json', {});
         const cfg = loadJSON('siteconfig.json', {});
 
+        // Servers the network currently sits on. When a bot is kicked, the
+        // guild drops out of every bot's cache — we exclude it (and all its
+        // joins) from stats so a kicked "Unknown Server" no longer lingers.
+        const activeGuildIds = new Set();
+        for (const c of Array.isArray(clients) ? clients : []) {
+            for (const id of (c.guilds?.cache?.keys?.() || [])) activeGuildIds.add(id);
+        }
+
         const verified = loadJSON('verified.json', []);
-        // Synthetic guildIds like 'api' (partner API calls without a real
-        // guildId) are excluded from ALL admin statistics — the top cards,
-        // the per-server table and the per-creative rollup alike.
+        // Count only verifications on a guild a bot is still on (this also
+        // drops synthetic 'api' guildIds, which are never in the cache).
         const entries = (Array.isArray(verified) ? verified : [])
-            .filter((u) => u.roleId && /^\d{17,20}$/.test(u.guildId));
+            .filter((u) => u.roleId && activeGuildIds.has(u.guildId));
         const now = Date.now();
 
         // Reversed join-check verifications (user left the sponsor) are
         // deleted from verified.json but survive in joinlinks.json as
         // status 'left' with the original timestamp and card guild — that's
         // what turns net counts into gross ones, per guild and overall.
+        // Only count those whose card guild is still one of ours.
         const joinlinksRaw = loadJSON('joinlinks.json', []);
-        const leftRecs = (Array.isArray(joinlinksRaw) ? joinlinksRaw : []).filter((r) => r && r.status === 'left');
+        const leftRecs = (Array.isArray(joinlinksRaw) ? joinlinksRaw : []).filter((r) => r && r.status === 'left' && activeGuildIds.has(r.cardGuildId));
         const leftWinOf = (list) => ({
             hour: list.filter((r) => r.ts > now - 3600000).length,
             day: list.filter((r) => r.ts > now - 86400000).length,
@@ -307,7 +315,8 @@ async function handleAdmin(req, res, path, clients, config) {
         const adGids = Object.keys(s.serverAds || {}).filter((g) => typeof s.serverAds[g] === 'string' && s.serverAds[g].trim());
         const offGids = Object.keys(cfg.serverAdsOff || {}).filter((g) => cfg.serverAdsOff[g]);
         for (const gid of [...adGids, ...offGids]) {
-            if (!knownGids.has(gid)) {
+            // Only surface a management row for a guild a bot is still on.
+            if (!knownGids.has(gid) && activeGuildIds.has(gid)) {
                 perGuild.push({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0, gross: leftWinOf(leftByGuild[gid] || []), noAd: { ...ZERO } });
                 knownGids.add(gid);
             }
