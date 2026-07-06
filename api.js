@@ -219,39 +219,50 @@ async function handleAdmin(req, res, path, clients, config) {
     if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
     if (!adminAuth.enabled()) return send(res, 503, { error: 'admin auth not configured' }, cors);
 
-    if (path === '/admin/login' && req.method === 'POST') {
-        const gate = adminAuth.loginGate();
-        if (gate.locked) {
-            return send(res, 429, {
-                error: 'Слишком много попыток, попробуй позже.',
-                retryAfterMs: gate.retryAfterMs
-            }, cors);
+    // ---- Discord OAuth login (top-level browser navigations, not fetch) ----
+    // Start: bounce the browser to Discord's consent screen.
+    if (path === '/admin/oauth/login' && req.method === 'GET') {
+        const url = adminAuth.oauthAuthorizeUrl(adminAuth.issueState());
+        res.writeHead(302, { Location: url });
+        return res.end();
+    }
+    // Callback: exchange the code, check the user's role, set the session
+    // cookie and send them back to the panel. On any failure, bounce back
+    // with ?login=denied so the UI can show a message.
+    if (path === '/admin/oauth/callback' && req.method === 'GET') {
+        const url = new URL(req.url, 'http://x');
+        const code = url.searchParams.get('code');
+        const state = url.searchParams.get('state');
+        const back = adminAuth.adminOrigin() + '/admin/';
+        if (!code || !adminAuth.verifyState(state)) {
+            res.writeHead(302, { Location: back + '?login=denied' });
+            return res.end();
         }
-        const body = await readBody(req);
-        const ok = body && adminAuth.verifyTotp(body.code);
-        if (!ok) {
-            // Progressive delay slows brute force without hurting a legit
-            // admin who mistypes once or twice. Sleep first, then respond.
-            adminAuth.recordLoginFailure();
-            if (gate.delayMs > 0) await new Promise((r) => setTimeout(r, gate.delayMs));
-            return send(res, 401, { error: 'Invalid code' }, cors);
+        let uid = null;
+        try { uid = await adminAuth.resolveOauthUser(code); } catch { uid = null; }
+        const role = uid ? adminAuth.roleOf(uid) : null;
+        if (!role) {
+            res.writeHead(302, { Location: back + '?login=denied' });
+            return res.end();
         }
-        adminAuth.recordLoginSuccess();
-        const token = adminAuth.issueSession();
-        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': adminAuth.sessionCookieHeader(token) });
+        const token = adminAuth.issueSession(uid, role);
+        res.writeHead(302, { Location: back, 'Set-Cookie': adminAuth.sessionCookieHeader(token) });
+        return res.end();
     }
     if (path === '/admin/logout' && req.method === 'POST') {
         return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': adminAuth.sessionCookieHeader('', { clear: true }) });
     }
     if (path === '/admin/whoami' && req.method === 'GET') {
-        const authed = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
-        return send(res, 200, { authed }, cors);
+        const sess = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
+        return send(res, 200, sess ? { authed: true, userId: sess.userId, role: sess.role } : { authed: false }, cors);
     }
 
     // Everything below requires a valid session cookie.
-    if (!adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie))) {
-        return send(res, 401, { error: 'unauthorized' }, cors);
-    }
+    const session = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
+    if (!session) return send(res, 401, { error: 'unauthorized' }, cors);
+    const isOwner = session.role === 'owner';
+    // Owner-only areas: Templates, Balances, Crypto Pay top-up, admin mgmt.
+    const ownerOnly = () => send(res, 403, { error: 'owner only' }, cors);
 
     if (path === '/admin/state' && req.method === 'GET') {
         const uid = config.ownerId;
@@ -533,7 +544,25 @@ async function handleAdmin(req, res, path, clients, config) {
         }, cors);
     }
 
+    // Admin management (owner only): list / add / remove assigned admins.
+    if (path === '/admin/admins' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        return send(res, 200, { owner: adminAuth.OWNER_ID, admins: adminAuth.loadAdmins() }, cors);
+    }
+    if (path === '/admin/admins' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const id = String(body?.userId || '');
+        if (!/^\d{17,20}$/.test(id)) return send(res, 400, { error: 'bad user id' }, cors);
+        const list = adminAuth.loadAdmins();
+        const next = body?.remove ? list.filter((x) => x !== id) : [...list, id];
+        const saved = adminAuth.saveAdmins(next);
+        return send(res, 200, { ok: true, admins: saved }, cors);
+    }
+
     if (path === '/admin/template' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const gid = body?.gid ? String(body.gid) : null;
@@ -548,6 +577,7 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, { ok: true }, cors);
     }
     if (path === '/admin/template' && req.method === 'DELETE') {
+        if (!isOwner) return ownerOnly();
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const gid = body?.gid ? String(body.gid) : null;
@@ -603,6 +633,7 @@ async function handleAdmin(req, res, path, clients, config) {
 
     // Balances list — server-side filter/sort so the client renders straight.
     if (path === '/admin/balances' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
         const url = new URL(req.url, 'http://x');
         const q = (url.searchParams.get('q') || '').trim();
         const has = url.searchParams.get('has') || 'all';
@@ -668,6 +699,7 @@ async function handleAdmin(req, res, path, clients, config) {
 
     // Balance detail — everything the /bal Discord view shows, plus history.
     if (path.startsWith('/admin/balances/') && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
         const userId = path.slice('/admin/balances/'.length);
         if (!/^\d{17,20}$/.test(userId)) return send(res, 400, { error: 'bad user id' }, cors);
 
@@ -725,6 +757,7 @@ async function handleAdmin(req, res, path, clients, config) {
     // crossing the payout threshold triggers a check immediately (same
     // behavior as the /bal "Change the balance" button in Discord).
     if (path.startsWith('/admin/balances/') && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
         const rest = path.slice('/admin/balances/'.length);
         const [userId, field] = rest.split('/');
         if (!/^\d{17,20}$/.test(userId)) return send(res, 400, { error: 'bad user id' }, cors);
@@ -822,6 +855,7 @@ async function handleAdmin(req, res, path, clients, config) {
     // Create a Crypto Pay invoice to top up the app balance — same as the
     // /cryptofund Discord command, but from the panel. Returns a pay URL.
     if (path === '/admin/cryptofund' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
         if (!cryptopay.enabled()) return send(res, 503, { error: 'Crypto Pay не настроен' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
