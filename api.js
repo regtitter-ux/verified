@@ -136,6 +136,16 @@ function guildIconOf(clients, gid) {
     return null;
 }
 
+// Resolve a user's display name across every bot's user cache. Null when no
+// bot has seen the user — the frontend then falls back to the raw ID.
+function userNameOf(clients, uid) {
+    for (const c of Array.isArray(clients) ? clients : []) {
+        const u = c.users?.cache?.get(String(uid));
+        if (u) return u.globalName || u.username || u.tag || null;
+    }
+    return null;
+}
+
 function verifStats(entries) {
     const now = Date.now();
     return {
@@ -295,6 +305,7 @@ async function handleAdmin(req, res, path, clients, config) {
         };
         const holders = Object.entries(shareCfg).map(([uid, cfg]) => ({
             userId: uid,
+            username: userNameOf(clients, uid),
             pct: Number(cfg.pct) || 0,
             addedAt: cfg.addedAt || 0,
             balance: money(settings[uid]?.balance),
