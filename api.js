@@ -42,15 +42,21 @@ async function adForServer(clients, ownerId, serverId) {
 
     const settings = loadJSON('settings.json');
     const s = settings[ownerId] || {};
-    let raw = null, gid = null;
-    if (gidOk && (s.serverAds || {})[serverId] && String(s.serverAds[serverId]).trim()) { raw = s.serverAds[serverId]; gid = serverId; }
-    else if ((s.advText || '').trim()) { raw = s.advText; gid = null; }
+    let raw = null;
+    if (gidOk && (s.serverAds || {})[serverId] && String(s.serverAds[serverId]).trim()) raw = s.serverAds[serverId];
+    else if ((s.advText || '').trim()) raw = s.advText;
     if (!raw) return { adText: null, sponsor: null, invite: null };
+    // Render with this server's template (falls back to global/default), so a
+    // bare global-ad link still lands inside the server's own template.
+    const gid = gidOk ? serverId : null;
 
     const rendered = applyTemplate(gid, raw);
+    // The campaign is keyed by the RAW ad (the link/text the owner stored),
+    // NOT the rendered text — so the same ad shown through different
+    // per-server templates is ONE creative with ONE limit.
+    const key = adKeyOf(raw);
     // Reached its join limit → treat as no ad (verification runs ad-free).
     const limits = loadJSON('adlimits.json', {});
-    const key = adKeyOf(rendered);
     const rec = limits[key];
     if (rec && Number(rec.limit) > 0) {
         const verified = loadJSON('verified.json', []);
@@ -62,7 +68,7 @@ async function adForServer(clients, ownerId, serverId) {
 
     const sponsor = await resolveSponsorPresence(clients, raw).catch(() => null);
     const codes = extractInviteCodes(raw);
-    return { adText: rendered, sponsor, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
+    return { adText: rendered, raw, sponsor, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
 }
 
 // Cache the Crypto Pay USDT app balance briefly — /admin/state is polled
@@ -397,14 +403,15 @@ async function handleAdmin(req, res, path, clients, config) {
         // every managed guild (per-server ad falling back to the global one,
         // templates applied per guild) and hash it. Kran-closed guilds are
         // excluded — their creative isn't being shown.
-        const activeText = {}; // adKey -> rendered text (fallback when no verifications yet)
+        // Keyed by the RAW ad (campaign), display text is the raw ad too so
+        // one campaign shown through several templates stays a single card.
+        const activeText = {}; // campaignKey -> raw ad text
         if (!cfg.adsOff) {
             for (const g of perGuild) {
                 if (cfg.serverAdsOff && cfg.serverAdsOff[g.gid]) continue;
                 const raw = (s.serverAds || {})[g.gid] || s.advText || '';
                 if (!raw.trim()) continue;
-                const rendered = applyTemplate(g.gid, raw);
-                activeText[adKeyOf(rendered)] = rendered;
+                activeText[adKeyOf(raw)] = raw;
             }
         }
         // Creatives that are showing but haven't produced a verification yet
@@ -415,9 +422,10 @@ async function handleAdmin(req, res, path, clients, config) {
 
         const limits = loadJSON('adlimits.json', {});
         const adLimits = limits;
-        // adKey of the global ad rendered through the default template — used
-        // to surface its join-limit on the global ad editor.
-        const globalKey = (s.advText || '').trim() ? adKeyOf(applyTemplate(null, s.advText)) : '';
+        // Campaign key of the global ad (the raw stored ad) — used to surface
+        // its join-limit on the global ad editor. Keyed by raw so the counter
+        // spans every server, whatever per-server template renders it.
+        const globalKey = (s.advText || '').trim() ? adKeyOf(s.advText) : '';
         // Count / first-seen / last-seen for a creative, measured only from
         // its last counter reset (resetAt).
         const statsSinceReset = (key) => {
@@ -974,7 +982,7 @@ function startApiServer(clients, config) {
                 // watched, roleId 'api' + serverId), share split, verified.json
                 // tagged with the shown creative's adKey, hub role, audit log,
                 // campaign-complete notice.
-                const adKey = touchCreative(ad.adText);
+                const adKey = touchCreative(ad.raw);
                 const amount = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null);
                 await payShares(clients, amount).catch(() => null);
                 const fresh = recordApiVerified({ creatorId: userId, memberId, serverId, adKey });

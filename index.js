@@ -989,8 +989,11 @@ const startBot = (token) => {
                 const s = settings[uid];
                 if (!s) return null;
                 const serverAd = s.serverAds?.[guild.id];
-                if (serverAd) return { text: applyTemplate(guild.id, serverAd), ts: s.serverAdsAt?.[guild.id] || 0 };
-                if (s.advText) return { text: applyTemplate(null, s.advText), ts: s.advTextAt || 0 };
+                // Always render with THIS guild's template (falls back to the
+                // global/default template when the guild has none) — so a bare
+                // global-ad link still lands inside the server's own template.
+                if (serverAd) return { text: applyTemplate(guild.id, serverAd), ts: s.serverAdsAt?.[guild.id] || 0, raw: serverAd };
+                if (s.advText) return { text: applyTemplate(guild.id, s.advText), ts: s.advTextAt || 0, raw: s.advText };
                 return null;
             };
 
@@ -1032,8 +1035,10 @@ const startBot = (token) => {
             // without crediting anyone. A leaver frees a slot, so the ad
             // resumes until the net count hits the cap again.
             if (latest) {
+                // Campaign is keyed by the RAW ad, so per-server template
+                // variants share one limit counter.
                 const limits = loadJSON('adlimits.json', {});
-                const key = adKeyOf(latest.text);
+                const key = adKeyOf(latest.raw);
                 const rec = limits[key];
                 const cap = Number(rec?.limit) || 0;
                 if (cap > 0) {
@@ -1048,7 +1053,7 @@ const startBot = (token) => {
             const responseText = latest?.text || 'Great, now click again to open access to the server!';
 
             // Only clicks that actually display an ad qualify for balance accrual.
-            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '' });
+            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '' });
             setTimeout(() => pendingVerification.delete(pendingKey), 300000);
 
             return interaction.reply({ content: responseText, flags: [64] }).catch(() => null);
@@ -1083,7 +1088,7 @@ const startBot = (token) => {
             const updated = verified.filter(u => !(u.id === user.id && u.guildId === guild.id && (u.roleId || null) === roleId));
             // Tag every verification with the creative that was shown (if
             // any) — feeds the per-creative rollup in the admin panel.
-            const adKey = (roleId && pending?.adShown && pending?.adText) ? touchCreative(pending.adText) : '';
+            const adKey = (roleId && pending?.adShown && pending?.adRaw) ? touchCreative(pending.adRaw) : '';
             const rec = { id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() };
             if (adKey) rec.adKey = adKey;
             // Verification that displayed no ad = organic activity. Tagged so
