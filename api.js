@@ -1028,10 +1028,11 @@ function startApiServer(clients, config) {
                 if (present === null) return send(res, 503, { joined: null, error: 'membership check temporarily unavailable, retry' });
                 if (present !== true) return send(res, 403, { joined: false });
 
-                // Dedup — never pay twice for the same real member.
+                // Dedup by (sponsor, user) — one real invite is paid once, no
+                // matter which network server / partner delivered the join.
                 const links = loadJSON('joinlinks.json', []);
                 const already = (Array.isArray(links) ? links : []).some(
-                    (r) => r && r.status === 'joined' && r.creatorId === userId && r.guildId === sponsor.guildId && r.userId === memberId
+                    (r) => r && r.status === 'joined' && r.guildId === sponsor.guildId && r.userId === memberId
                 );
                 if (already) return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
 

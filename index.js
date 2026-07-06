@@ -1095,9 +1095,22 @@ const startBot = (token) => {
             }
 
             const updated = verified.filter(u => !(u.id === user.id && u.guildId === guild.id && (u.roleId || null) === roleId));
-            // Tag every verification with the creative that was shown (if
-            // any) — feeds the per-creative rollup in the admin panel.
-            const adKey = (roleId && pending?.adShown && pending?.adRaw) ? touchCreative(pending.adRaw) : '';
+
+            // One real invite = one join: if this user already has a live
+            // ('joined') join record for THIS sponsor (they verified elsewhere
+            // in the network), don't pay or count them again — just verify.
+            let isDupJoin = false;
+            if (sponsor) {
+                const links = loadJSON('joinlinks.json', []);
+                isDupJoin = (Array.isArray(links) ? links : []).some(
+                    (r) => r && r.status === 'joined' && r.userId === user.id && r.guildId === sponsor.guildId
+                );
+            }
+
+            // Tag with the creative shown (feeds the per-creative rollup +
+            // campaign counter) — but not for a duplicate join, so it doesn't
+            // inflate the campaign count.
+            const adKey = (roleId && pending?.adShown && pending?.adRaw && !isDupJoin) ? touchCreative(pending.adRaw) : '';
             const rec = { id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() };
             if (adKey) rec.adKey = adKey;
             // Verification that displayed no ad = organic activity. Tagged so
@@ -1122,7 +1135,7 @@ const startBot = (token) => {
             // Credit the message owner: only when an ad was shown and verification succeeded.
             if (roleId && pending?.adShown) {
                 const channelId = message.channelId; // channel the verification card lives in
-                if (sponsor) {
+                if (sponsor && !isDupJoin) {
                     // Confirmed member of the sponsor server: pay the join-check rate,
                     // reversible on leave (role + payout), see joincheck.js.
                     const amount = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId);
@@ -1133,14 +1146,16 @@ const startBot = (token) => {
                     // Split this join's service profit ($ we charge − partner
                     // payout) across shareholders, crediting their balances.
                     await payShares(clients, amount).catch(() => null);
-                } else {
+                    await maybeAutoWithdraw(clients, creatorId);
+                } else if (!sponsor) {
                     const amount = creditVerifiedClick(creatorId);
                     await logFunds(clients, {
                         type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
                         amount, reason: 'Verification'
                     });
+                    await maybeAutoWithdraw(clients, creatorId);
                 }
-                await maybeAutoWithdraw(clients, creatorId);
+                // sponsor && isDupJoin → verified only, no second payout/count.
             }
         } catch (e) {
             console.error(e);
