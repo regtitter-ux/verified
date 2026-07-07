@@ -40,11 +40,26 @@ const cryptopay = require('./cryptopay.js');
 // coordinate: post payout requests from the service bot, DM from the user's bot.
 const clients = [];
 
+// Interaction de-duplication, shared across every bot in this process. Discord
+// can deliver the SAME interaction more than once when a gateway session
+// overlaps on a reconnect — without this, /verify would post its card several
+// times. Each interaction id is processed once; ids self-expire after 5 min.
+const handledInteractions = new Set();
+function alreadyHandled(id) {
+    if (!id) return false;
+    if (handledInteractions.has(id)) { console.warn(`[INTERACTION] dropped duplicate delivery ${id}`); return true; }
+    handledInteractions.add(id);
+    setTimeout(() => handledInteractions.delete(id), 5 * 60 * 1000);
+    return false;
+}
+
 // Читаем токены из переменных окружения Railway
 const config = {
     // Trim each token — a stray space/newline (easy to paste into Railway)
     // makes login silently fail with an "invalid token" the gateway rejects.
-    tokens: process.env.TOKENS ? process.env.TOKENS.split(',').map((t) => t.trim()).filter(Boolean) : [],
+    // Dedupe: the same token pasted twice would connect ONE bot on two gateway
+    // sessions → every event (interactions, sweeps) fires twice.
+    tokens: process.env.TOKENS ? [...new Set(process.env.TOKENS.split(',').map((t) => t.trim()).filter(Boolean))] : [],
     ownerId: process.env.OWNER_ID || '743913502997086219',
     adminBotId: process.env.ADMIN_BOT_ID || '1514533989434789998',
     prefix: process.env.PREFIX || '!'
@@ -481,6 +496,10 @@ const startBot = (token) => {
 
     client.on(Events.InteractionCreate, async (interaction) => {
       try {
+        // Drop a re-delivered interaction (gateway session overlap) before it
+        // can act twice — e.g. post the /verify card more than once.
+        if (alreadyHandled(interaction.id)) return;
+
         // /bal — ephemeral balance + payment details (optional id: owner may view others)
         if (interaction.isChatInputCommand() && interaction.commandName === 'bal') {
             const idParam = (interaction.options.getString('id') || '').trim();
@@ -698,6 +717,13 @@ const startBot = (token) => {
                 return interaction.reply({ content: '❌ Role not found.', flags: [64] }).catch(() => null);
             }
 
+            // Acknowledge FIRST (ephemeral) so we always meet Discord's 3-second
+            // window — the card is posted with a separate channel.send below, so
+            // acking up front is what stops the "Ошибка взаимодействия".
+            if (!interaction.deferred && !interaction.replied) {
+                await interaction.deferReply({ flags: [64] }).catch(() => null);
+            }
+
             const icon = interaction.guild.iconURL({ dynamic: true });
             const embed = new EmbedBuilder()
                 .setAuthor({ name: interaction.guild.name, iconURL: icon })
@@ -722,7 +748,7 @@ const startBot = (token) => {
             saveJSON('settings.json', settings);
 
             await interaction.channel.send({ embeds: [embed], components: [row] }).catch(() => null);
-            return interaction.reply({ content: `✅ Verification card created — grants <@&${role.id}>`, flags: [64] }).catch(() => null);
+            return interaction.editReply({ content: `✅ Verification card created — grants <@&${role.id}>` }).catch(() => null);
         }
 
         // "History" button — ephemeral withdrawal history (first page)
