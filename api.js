@@ -45,7 +45,7 @@ async function adForServer(clients, ownerId, serverId) {
     // the self-ad rule + the purchased cap). Falls through to house ads.
     if (gidOk) {
         try {
-            const pick = campaigns.pickForGuild(serverId);
+            const pick = campaigns.pickForGuild(serverId, null, campaigns.fleetGuildIds(clients));
             if (pick) {
                 const sponsor = await resolveSponsorPresence(clients, pick.invite).catch(() => null);
                 const codes = extractInviteCodes(pick.invite);
@@ -997,7 +997,8 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, {
             pricePer100: campaigns.PRICE_PER_100,
             minJoins: campaigns.MIN_JOINS,
-            cryptoEnabled: cryptopay.enabled()
+            cryptoEnabled: cryptopay.enabled(),
+            botInviteUrl: process.env.BOT_INVITE_URL || 'https://discord.com/oauth2/authorize?client_id=1522609323090509905&permissions=268435456&scope=bot'
         }, cors);
     }
 
@@ -1045,9 +1046,10 @@ async function handleBuyer(req, res, path, clients, config) {
         await campaigns.reconcile(clients).catch(() => null);
         const camps = campaigns.loadCampaigns();
         const verified = loadJSON('verified.json', []);
+        const fleet = campaigns.fleetGuildIds(clients);
         const mine = Object.values(camps).filter((c) => c.buyerId === buyerId)
             .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-            .map((c) => campaigns.publicView(c, verified));
+            .map((c) => ({ ...campaigns.publicView(c, verified), botPresent: campaigns.botPresent(c, fleet) }));
         return send(res, 200, { campaigns: mine }, cors);
     }
 

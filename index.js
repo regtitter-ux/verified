@@ -1035,7 +1035,7 @@ const startBot = (token) => {
             // back to the house ad above when there's no eligible campaign.
             if (!adsOff) {
                 try {
-                    const pick = campaigns.pickForGuild(guild.id, verified);
+                    const pick = campaigns.pickForGuild(guild.id, verified, campaigns.fleetGuildIds(clients));
                     if (pick) latest = { text: applyTemplate(guild.id, pick.invite), ts: Date.now(), raw: pick.invite };
                 } catch (e) { /* never let campaign selection break verification */ }
             }

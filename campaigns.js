@@ -60,25 +60,48 @@ function publicView(campaign, verifiedList) {
     };
 }
 
-// Round-robin the eligible campaigns for a display guild. Returns
-// { invite, campaignId, sponsorGuildId } or null. Stateless-ish: a global
-// rotating counter spreads exposure across concurrent campaigns.
-let _rr = 0;
-function pickForGuild(displayGuildId, verifiedList) {
+// The set of guild ids the whole bot fleet is currently a member of.
+function fleetGuildIds(clients) {
+    const set = new Set();
+    for (const c of Array.isArray(clients) ? clients : []) {
+        for (const id of (c.guilds?.cache?.keys?.() || [])) set.add(id);
+    }
+    return set;
+}
+
+// Is a network bot present on a campaign's own server? A campaign can't run
+// without one (join verification is impossible), so it's excluded until the
+// buyer adds the bot. `botGuildIds` = the set of guilds the fleet is on.
+function botPresent(campaign, botGuildIds) {
+    return Boolean(botGuildIds && campaign && botGuildIds.has(campaign.sponsorGuildId));
+}
+
+// Pick a campaign to show on a display guild, WEIGHTED BY REMAINING JOINS so
+// bigger unmet orders get more exposure while smaller ones still finish —
+// no single order hogs, no congestion. Skips campaigns that are paused,
+// self-targeted, opted-out of this guild, already delivered, or whose own
+// server has no network bot (can't be verified). Returns
+// { invite, campaignId, sponsorGuildId } or null.
+function pickForGuild(displayGuildId, verifiedList, botGuildIds) {
     const camps = loadCampaigns();
     const list = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
     const eligible = [];
+    let total = 0;
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active' || c.paused) continue;
         if (c.sponsorGuildId === displayGuildId) continue;                 // never on itself
         if (Array.isArray(c.disabledGuilds) && c.disabledGuilds.includes(displayGuildId)) continue;
-        if (delivered(c, list) >= c.purchased) continue;                   // already done
-        eligible.push(c);
+        if (botGuildIds && !botGuildIds.has(c.sponsorGuildId)) continue;   // no bot on buyer's server
+        const remaining = c.purchased - delivered(c, list);
+        if (remaining <= 0) continue;                                      // already done
+        eligible.push({ c, remaining });
+        total += remaining;
     }
-    if (!eligible.length) return null;
-    const c = eligible[_rr % eligible.length];
-    _rr = (_rr + 1) % 1e9;
-    return { invite: c.invite, campaignId: c.id, sponsorGuildId: c.sponsorGuildId };
+    if (!eligible.length || total <= 0) return null;
+    let r = Math.random() * total;
+    for (const e of eligible) { r -= e.remaining; if (r <= 0) return { invite: e.c.invite, campaignId: e.c.id, sponsorGuildId: e.c.sponsorGuildId }; }
+    const e = eligible[eligible.length - 1];
+    return { invite: e.c.invite, campaignId: e.c.id, sponsorGuildId: e.c.sponsorGuildId };
 }
 
 // Is a CryptoBot invoice paid? Best-effort; false on any error.
@@ -135,6 +158,6 @@ function startCampaignSweep(clients) {
 
 module.exports = {
     PRICE_PER_100, MIN_JOINS, priceFor, round2, newId,
-    loadCampaigns, saveCampaigns, campaignAdKey, delivered, publicView, pickForGuild,
+    loadCampaigns, saveCampaigns, campaignAdKey, delivered, publicView, pickForGuild, botPresent, fleetGuildIds,
     isInvoicePaid, reconcile, startCampaignSweep
 };
