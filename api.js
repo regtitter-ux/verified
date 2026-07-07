@@ -1151,6 +1151,16 @@ async function handleAdmin(req, res, path, clients, config) {
         const r = await cards.register(clients, body?.ref).catch((e) => ({ ok: false, error: e.message }));
         return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card } : { error: r.error || 'failed' }, cors);
     }
+    // Scan the fleet for existing (untracked) cards. POST starts it in the
+    // background; GET reports progress so the panel can poll.
+    if (path === '/admin/cards/scan' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        return send(res, 200, { ok: true, scan: cards.scanAll(clients) }, cors);
+    }
+    if (path === '/admin/cards/scan' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        return send(res, 200, { scan: cards.getScanState() }, cors);
+    }
     if ((path === '/admin/cards/fix' || path === '/admin/cards/republish' || path === '/admin/cards/delete') && req.method === 'POST') {
         if (!isOwner) return ownerOnly();
         const body = await readBody(req);

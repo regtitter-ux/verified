@@ -186,9 +186,64 @@ function clickWindows(guildId, roleId, creatorId, now = Date.now()) {
     return { hour: h.size, day: d.size, week: w.size };
 }
 
+// ---- Scan existing cards ----
+// Walk every readable text channel across the fleet, find our own
+// verification-card messages (our button + a "Created by" footer) and add any
+// that aren't tracked yet. Runs in the background (Discord rate limits make it
+// slow) with a live progress state the panel can poll.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let scanState = { running: false, found: 0, scannedChannels: 0, startedAt: 0, finishedAt: 0 };
+const MAX_SCAN_CHANNELS = 5000; // runaway guard
+
+function isCardMessage(msg, botId) {
+    if (msg.author?.id !== botId) return false;
+    for (const row of msg.components || []) {
+        for (const comp of row.components || []) {
+            if (String(comp.customId || comp.custom_id || '').startsWith('start_verif_guild')) return true;
+        }
+    }
+    return false;
+}
+
+function scanAll(clients) {
+    if (scanState.running) return scanState;
+    scanState = { running: true, found: 0, scannedChannels: 0, startedAt: Date.now(), finishedAt: 0 };
+    (async () => {
+        try {
+            const existing = new Set(loadCards().map((c) => c.messageId));
+            for (const c of Array.isArray(clients) ? clients : []) {
+                const botId = c.user?.id;
+                if (!botId) continue;
+                for (const guild of c.guilds.cache.values()) {
+                    for (const ch of guild.channels.cache.values()) {
+                        if (scanState.scannedChannels >= MAX_SCAN_CHANNELS) return;
+                        if (!ch || typeof ch.isTextBased !== 'function' || !ch.isTextBased() || !ch.viewable) continue;
+                        const msgs = await ch.messages.fetch({ limit: 50 }).catch(() => null);
+                        scanState.scannedChannels++;
+                        if (msgs) {
+                            for (const msg of msgs.values()) {
+                                if (!isCardMessage(msg, botId) || existing.has(msg.id)) continue;
+                                const { creatorId, roleId } = extractCard(msg);
+                                if (!creatorId) continue;
+                                addCard({ messageId: msg.id, channelId: ch.id, guildId: guild.id, creatorId, roleId, botId });
+                                existing.add(msg.id);
+                                scanState.found++;
+                            }
+                        }
+                        await sleep(250); // gentle on rate limits
+                    }
+                }
+            }
+        } catch (e) { console.error('[CARDS] scan error:', e.message); }
+        finally { scanState.running = false; scanState.finishedAt = Date.now(); }
+    })();
+    return scanState;
+}
+function getScanState() { return scanState; }
+
 module.exports = {
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate,
     register, fix, edit, remove, republish,
-    trackClick, clickWindows
+    trackClick, clickWindows, scanAll, getScanState
 };
