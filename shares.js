@@ -48,12 +48,19 @@ function pruneBuckets(earnings, today) {
 // whole cents to each holder's balance (carrying the sub-cent remainder in
 // `pending` so micro-splits aren't lost to rounding), records exact earnings
 // for the dashboard, then runs each credited holder's payout flow.
-async function payShares(clients, partnerAmount, nowMs) {
-    // Net profit = sale price − partner payout − acquiring fee on that payout.
+async function payShares(clients, partnerAmount, opts = {}) {
+    // Back-compat: a bare number in the 3rd slot used to be nowMs.
+    if (typeof opts === 'number') opts = { nowMs: opts };
+    // Net profit = sale price − partner payout − acquiring fee − manager
+    // commission. Manager sales are cheaper ($9/100) and cost us a commission,
+    // so both come straight out of profit before it's split by shares. A
+    // non-manager join keeps the defaults (revenue $0.10, commission 0).
     const amt = Number(partnerAmount) || 0;
-    const profit = REVENUE_PER_JOIN - amt - amt * ACQUIRING_RATE;
+    const revenue = Number.isFinite(Number(opts.revenuePerJoin)) ? Number(opts.revenuePerJoin) : REVENUE_PER_JOIN;
+    const managerCommission = Number(opts.managerCommission) || 0;
+    const profit = revenue - amt - amt * ACQUIRING_RATE - managerCommission;
     if (!(profit > 0)) return; // costs ≥ what we charge → no profit to split
-    const now = Number(nowMs) || Date.now();
+    const now = Number(opts.nowMs) || Date.now();
     const today = dayNumberOf(now);
 
     const shares = loadShares();

@@ -20,6 +20,7 @@ const { syncHubMember } = require('./hubrole.js');
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
 const round2 = (n) => +((Number(n) || 0).toFixed(2));
+const round4 = (n) => +((Number(n) || 0).toFixed(4));
 
 // Per-user join-check rate ($ per 100 joins), overridable via "Bid extra" in /bal.
 const getJoinBid = (s) => {
@@ -88,7 +89,7 @@ async function isMember(bot, guildId, userId) {
 // Credit the card owner for one confirmed join (at their join-check rate) and
 // remember the payout — plus the granted role — so both can be reversed if the
 // user later leaves the sponsor server.
-function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId) {
+function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, extra = {}) {
     const settings = loadJSON('settings.json');
     if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
     const s = settings[creatorId];
@@ -99,11 +100,20 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId) 
 
     const list = loadJSON('joinlinks.json', []);
     const arr = Array.isArray(list) ? list : [];
-    arr.push({
+    const rec = {
         id: newId(), userId, guildId, creatorId, amount: perJoin,
         cardGuildId: cardGuildId || null, roleId: roleId || null, channelId: channelId || null,
         ts: Date.now(), status: 'joined'
-    });
+    };
+    // Optional economics for the shares/revenue stats: revenue (what the buyer
+    // paid per join) and managerCommission (paid to a sales manager). Absent =
+    // the standard $0.10 revenue, no commission (recomputed downstream).
+    if (extra && typeof extra === 'object') {
+        if (Number.isFinite(Number(extra.revenue))) rec.revenue = round4(Number(extra.revenue));
+        if (Number(extra.managerCommission) > 0) rec.managerCommission = round4(Number(extra.managerCommission));
+        if (extra.managerId) rec.managerId = String(extra.managerId);
+    }
+    arr.push(rec);
     saveJSON('joinlinks.json', arr);
     return perJoin;
 }

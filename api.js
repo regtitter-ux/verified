@@ -17,6 +17,7 @@ const { logFunds } = require('./fundslog.js');
 const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares } = require('./shares.js');
 const cryptopay = require('./cryptopay.js');
 const campaigns = require('./campaigns.js');
+const managers = require('./managers.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -51,7 +52,7 @@ async function adForServer(clients, ownerId, serverId) {
                 // Only serve the ad if the join can be verified right now.
                 if (sponsor) {
                     const codes = extractInviteCodes(pick.invite);
-                    return { adText: applyTemplate(serverId, pick.invite), raw: pick.invite, sponsor, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
+                    return { adText: applyTemplate(serverId, pick.invite), raw: pick.invite, sponsor, campaignId: pick.campaignId, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
                 }
                 // No resolvable sponsor bot → fall through to house ads.
             }
@@ -414,12 +415,18 @@ async function handleAdmin(req, res, path, clients, config) {
         const rWin = { day: 0, week: 0, month: 0, total: 0 }; // revenue from joins
         const cWin = { day: 0, week: 0, month: 0, total: 0 }; // partner payouts
         const aWin = { day: 0, week: 0, month: 0, total: 0 }; // acquiring fee on those payouts
+        const mWin = { day: 0, week: 0, month: 0, total: 0 }; // manager commissions
         for (const r of joinedRecs) {
             const amt = Number(r.amount) || 0;
+            // Per-join revenue and manager commission are stored on the record
+            // for manager sales (cheaper + commission); older/house-ad joins
+            // fall back to the standard $0.10 revenue with no commission.
+            const rev = Number.isFinite(Number(r.revenue)) ? Number(r.revenue) : REVENUE_PER_JOIN;
+            const mgr = Number(r.managerCommission) || 0;
             const acq = amt * ACQUIRING_RATE;
-            const prof = REVENUE_PER_JOIN - amt - acq;
+            const prof = rev - amt - acq - mgr;
             const wins = [['total', true], ['day', r.ts > now - 86400000], ['week', r.ts > now - 604800000], ['month', r.ts > now - 2592000000]];
-            for (const [k, inWin] of wins) if (inWin) { rWin[k] += REVENUE_PER_JOIN; cWin[k] += amt; aWin[k] += acq; pWin[k] += prof; }
+            for (const [k, inWin] of wins) if (inWin) { rWin[k] += rev; cWin[k] += amt; aWin[k] += acq; mWin[k] += mgr; pWin[k] += prof; }
         }
         const shareCfg = loadShares();
         const shareEarnings = loadJSON('shareearnings.json', {});
@@ -454,6 +461,7 @@ async function handleAdmin(req, res, path, clients, config) {
             revenue: roundWin(rWin),
             partnerCost: roundWin(cWin),
             acquiring: roundWin(aWin),
+            managerCost: roundWin(mWin),
             holders,
             totalPct: +holders.reduce((s, h) => s + h.pct, 0).toFixed(2)
         };
@@ -1051,7 +1059,9 @@ async function handleBuyer(req, res, path, clients, config) {
     }
     if (path === '/order/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
-        return send(res, 200, sess ? { authed: true, userId: sess.userId } : { authed: false }, cors);
+        return send(res, 200, sess
+            ? { authed: true, userId: sess.userId, isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId) }
+            : { authed: false }, cors);
     }
 
     const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
@@ -1059,12 +1069,36 @@ async function handleBuyer(req, res, path, clients, config) {
     const buyerId = sess.userId;
 
     if (path === '/order/config' && req.method === 'GET') {
+        const isMgr = managers.isManager(buyerId);
         return send(res, 200, {
-            pricePer100: campaigns.PRICE_PER_100,
+            pricePer100: isMgr ? managers.PRICE_PER_100 : campaigns.PRICE_PER_100,
+            publicPricePer100: campaigns.PRICE_PER_100,
             minJoins: campaigns.MIN_JOINS,
             cryptoEnabled: cryptopay.enabled(),
+            isOwner: buyerId === adminAuth.OWNER_ID,
+            isManager: isMgr,
             botInviteUrl: process.env.BOT_INVITE_URL || 'https://discord.com/oauth2/authorize?client_id=1522609323090509905&permissions=268435456&scope=bot'
         }, cors);
+    }
+
+    // Owner-only: list / add / remove sales managers.
+    if (path === '/order/managers' && req.method === 'GET') {
+        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        return send(res, 200, {
+            managers: managers.loadManagers(),
+            pricePer100: managers.PRICE_PER_100,
+            commissionRate: managers.COMMISSION_RATE
+        }, cors);
+    }
+    if (path === '/order/managers' && req.method === 'PUT') {
+        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const uid = String(body?.userId || '');
+        if (!/^\d{17,20}$/.test(uid)) return send(res, 400, { error: 'bad user id' }, cors);
+        const list = managers.loadManagers();
+        const next = body?.remove ? list.filter((x) => x !== uid) : [...list, uid];
+        return send(res, 200, { ok: true, managers: managers.saveManagers(next) }, cors);
     }
 
     // Create an order → CryptoBot invoice. Body: { invite, joins }.
@@ -1089,7 +1123,11 @@ async function handleBuyer(req, res, path, clients, config) {
         const sponsorGuildId = inv?.guild?.id || null;
         if (!sponsorGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
 
-        const price = campaigns.priceFor(joins);
+        // Managers buy at a discounted per-100 rate and earn a commission on
+        // each delivered join (recorded on the campaign for the stats + payout).
+        const isMgr = managers.isManager(buyerId);
+        const pricePer100 = isMgr ? managers.PRICE_PER_100 : campaigns.PRICE_PER_100;
+        const price = +(joins * pricePer100 / 100).toFixed(2);
         let invoice = null;
         try { invoice = await cryptopay.createUsdtInvoice(price, { description: `Реклама: ${joins} заходов на сервер ${inv.guild.name || sponsorGuildId}`.slice(0, 1024) }); }
         catch (e) { return send(res, 502, { error: 'invoice-failed' }, cors); }
@@ -1101,7 +1139,9 @@ async function handleBuyer(req, res, path, clients, config) {
             id, buyerId,
             invite: `https://discord.gg/${inviteCode}`,
             sponsorGuildId, serverName: inv.guild?.name || null,
-            purchased: joins, price,
+            purchased: joins, price, pricePer100,
+            managerId: isMgr ? buyerId : null,
+            commissionRate: isMgr ? managers.COMMISSION_RATE : 0,
             status: 'pending_payment',
             invoiceId: invoice.invoice_id, invoiceUrl,
             disabledGuilds: [], paused: false,
@@ -1273,8 +1313,20 @@ function startApiServer(clients, config) {
                 // tagged with the shown creative's adKey, hub role, audit log,
                 // campaign-complete notice.
                 const adKey = touchCreative(ad.raw);
-                const amount = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null);
-                await payShares(clients, amount).catch(() => null);
+                // Manager economics (same as the in-Discord flow).
+                const camp = ad.campaignId ? campaigns.loadCampaigns()[ad.campaignId] : null;
+                const econ = managers.joinEconomics(camp, REVENUE_PER_JOIN);
+                const amount = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null,
+                    { revenue: econ.revenue, managerCommission: econ.managerCommission, managerId: econ.managerId });
+                if (econ.managerId && econ.managerCommission > 0) {
+                    managers.creditCommission(econ.managerId, econ.managerCommission);
+                    await logFunds(clients, {
+                        type: 'credit', creatorId: econ.managerId, userId: memberId, guildId: serverId,
+                        amount: econ.managerCommission, reason: 'Manager commission (sale)'
+                    }).catch(() => null);
+                    await maybeAutoWithdraw(clients, econ.managerId).catch(() => null);
+                }
+                await payShares(clients, amount, { revenuePerJoin: econ.revenue, managerCommission: econ.managerCommission }).catch(() => null);
                 const fresh = recordApiVerified({ creatorId: userId, memberId, serverId, adKey });
                 syncHubMember(clients, memberId).catch(() => null);
                 await logFunds(clients, {
