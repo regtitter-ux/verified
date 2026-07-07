@@ -1143,8 +1143,15 @@ const startBot = (token) => {
             // The server just runs ad-free until a showable ad exists.
             if (latest) {
                 const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
-                if (sp && sp.guildId === guild.id) latest = null;
-                else if (sp) {
+                // Ads must be join-checkable. Only show an ad whose invite leads
+                // to a server a network bot is on, so the join can actually be
+                // verified. No sponsor bot (bot-less server, or no invite at
+                // all) = no join-check → don't show the ad; the verification
+                // just runs ad-free (no payout). Also never advertise a server
+                // on itself.
+                if (!sp || sp.guildId === guild.id) {
+                    latest = null;
+                } else {
                     // The sponsor's ad is being shown right now. Stamp it so the
                     // leave-clawback opt-out can tell "ad live" from "ad off"
                     // (see joincheck.js). Cheap, best-effort.
@@ -1203,10 +1210,11 @@ const startBot = (token) => {
                 );
             }
 
-            // Tag with the creative shown (feeds the per-creative rollup +
-            // campaign counter) — but not for a duplicate join, so it doesn't
-            // inflate the campaign count.
-            const adKey = (roleId && pending?.adShown && pending?.adRaw && !isDupJoin) ? touchCreative(pending.adRaw) : '';
+            // adKey (the "paid" marker used by every stat) is set only for a
+            // CONFIRMED join-check join — the only thing that pays now. A
+            // verification with no sponsor bot, a duplicate join, or no ad is
+            // tagged noAd instead, so it never counts as a paid ad verification.
+            const adKey = (roleId && pending?.adShown && pending?.adRaw && sponsor && !isDupJoin) ? touchCreative(pending.adRaw) : '';
             const rec = { id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() };
             if (adKey) rec.adKey = adKey;
             // Verification that displayed no ad = organic activity. Tagged so
@@ -1229,30 +1237,24 @@ const startBot = (token) => {
             // Monetization applies only to /v3 cards (which encode a roleId in the
             // button); legacy !v3 cards without a role never accrue balance.
             // Credit the message owner: only when an ad was shown and verification succeeded.
-            if (roleId && pending?.adShown) {
+            // Only a confirmed join-check join pays now — plain-click ads (no
+            // bot on the ad's server) are disabled entirely: such ads are never
+            // shown, so there's nothing to pay for. Ad-free verifications and
+            // duplicate joins accrue nothing.
+            if (roleId && pending?.adShown && sponsor && !isDupJoin) {
                 const channelId = message.channelId; // channel the verification card lives in
-                if (sponsor && !isDupJoin) {
-                    // Confirmed member of the sponsor server: pay the join-check rate,
-                    // reversible on leave (role + payout), see joincheck.js.
-                    const amount = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId);
-                    await logFunds(clients, {
-                        type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
-                        amount, sponsorGuildId: sponsor.guildId,
-                        reason: 'Join verified — member joined the sponsor server'
-                    });
-                    // Split this join's service profit ($ we charge − partner
-                    // payout) across shareholders, crediting their balances.
-                    await payShares(clients, amount).catch(() => null);
-                    await maybeAutoWithdraw(clients, creatorId);
-                } else if (!sponsor) {
-                    const amount = creditVerifiedClick(creatorId);
-                    await logFunds(clients, {
-                        type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
-                        amount, reason: 'Verification'
-                    });
-                    await maybeAutoWithdraw(clients, creatorId);
-                }
-                // sponsor && isDupJoin → verified only, no second payout/count.
+                // Confirmed member of the sponsor server: pay the join-check rate,
+                // reversible on leave (role + payout), see joincheck.js.
+                const amount = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId);
+                await logFunds(clients, {
+                    type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
+                    amount, sponsorGuildId: sponsor.guildId,
+                    reason: 'Join verified — member joined the sponsor server'
+                });
+                // Split this join's service profit ($ we charge − partner
+                // payout) across shareholders, crediting their balances.
+                await payShares(clients, amount).catch(() => null);
+                await maybeAutoWithdraw(clients, creatorId);
             }
         } catch (e) {
             console.error(e);

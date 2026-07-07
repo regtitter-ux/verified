@@ -48,8 +48,12 @@ async function adForServer(clients, ownerId, serverId) {
             const pick = campaigns.pickForGuild(serverId, null, campaigns.fleetGuildIds(clients));
             if (pick) {
                 const sponsor = await resolveSponsorPresence(clients, pick.invite).catch(() => null);
-                const codes = extractInviteCodes(pick.invite);
-                return { adText: applyTemplate(serverId, pick.invite), raw: pick.invite, sponsor, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
+                // Only serve the ad if the join can be verified right now.
+                if (sponsor) {
+                    const codes = extractInviteCodes(pick.invite);
+                    return { adText: applyTemplate(serverId, pick.invite), raw: pick.invite, sponsor, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
+                }
+                // No resolvable sponsor bot → fall through to house ads.
             }
         } catch (e) { /* fall through to house ads */ }
     }
@@ -80,9 +84,11 @@ async function adForServer(clients, ownerId, serverId) {
     }
 
     const sponsor = await resolveSponsorPresence(clients, raw).catch(() => null);
-    // Don't advertise a server on itself: if the ad's sponsor IS this server,
-    // its members are already in — run ad-free (also blocks self-join farming).
-    if (sponsor && gidOk && sponsor.guildId === String(serverId)) {
+    // Ads only run when the join can be verified. No sponsor bot (the invite
+    // points to a server no network bot is on, or there's no invite at all)
+    // means no join-check → don't serve the ad; verification runs ad-free.
+    // Also never advertise a server on itself (members are already in).
+    if (!sponsor || (gidOk && sponsor.guildId === String(serverId))) {
         return { adText: null, sponsor: null, invite: null };
     }
     const codes = extractInviteCodes(raw);
