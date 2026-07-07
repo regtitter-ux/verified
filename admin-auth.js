@@ -53,13 +53,16 @@ function roleOf(userId) {
 
 // ---------- Discord OAuth2 ----------
 function oauthAuthorizeUrl(state) {
+    // No `prompt` param: Discord silently redirects users who already granted
+    // the app, and shows the one-tap consent screen to first-timers. Using
+    // prompt=none would ERROR for anyone who never authorized the app before
+    // (i.e. every new buyer) — locking them out of the order panel.
     const params = new URLSearchParams({
         client_id: DISCORD_CLIENT_ID,
         redirect_uri: OAUTH_REDIRECT,
         response_type: 'code',
         scope: 'identify',
-        state,
-        prompt: 'none'
+        state
     });
     return `https://discord.com/api/oauth2/authorize?${params.toString()}`;
 }
