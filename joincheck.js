@@ -174,7 +174,8 @@ async function finalizeLeavers(clients, leaverIds) {
         await logFunds(clients, {
             type: 'debit', creatorId: rec.creatorId, userId: rec.userId,
             guildId: rec.cardGuildId, channelId: rec.channelId, amount: rec.amount,
-            reason: 'Clawback — user left sponsor server'
+            sponsorGuildId: rec.guildId,
+            reason: 'Clawback — join reversed: member left the sponsor server'
         });
 
         // If the referrer already got a bonus from these funds (i.e. they were
@@ -196,7 +197,8 @@ async function finalizeLeavers(clients, leaverIds) {
                 settings[referrerId].refBonusAccrued = round2(Math.max(0, accrued - refClaw));
                 await logFunds(clients, {
                     type: 'debit', creatorId: referrerId, userId: rec.creatorId,
-                    amount: refClaw, reason: 'Referral clawback (referred user reversal)'
+                    amount: refClaw, sponsorGuildId: rec.guildId,
+                    reason: 'Referral clawback — referred partner\'s join reversed (member left the sponsor server)'
                 });
             }
         }

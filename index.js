@@ -1196,7 +1196,8 @@ const startBot = (token) => {
                     const amount = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId);
                     await logFunds(clients, {
                         type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
-                        amount, reason: 'Join verified'
+                        amount, sponsorGuildId: sponsor.guildId,
+                        reason: 'Join verified — member joined the sponsor server'
                     });
                     // Split this join's service profit ($ we charge − partner
                     // payout) across shareholders, crediting their balances.

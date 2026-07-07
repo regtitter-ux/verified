@@ -1246,7 +1246,8 @@ function startApiServer(clients, config) {
                 syncHubMember(clients, memberId).catch(() => null);
                 await logFunds(clients, {
                     type: 'credit', creatorId: userId, userId: memberId, guildId: serverId,
-                    amount, reason: 'Join verified (API)'
+                    amount, sponsorGuildId: sponsor.guildId,
+                    reason: 'Join verified (API) — member joined the sponsor server'
                 }).catch(() => null);
                 maybeNotifyAdComplete(clients, adKey, fresh).catch(() => null);
                 await maybeAutoWithdraw(clients, userId).catch(() => null);

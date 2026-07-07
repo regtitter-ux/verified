@@ -20,7 +20,9 @@ function channelName(clients, cid) {
     return null;
 }
 
-// entry = { type: 'credit'|'debit', creatorId, userId, guildId, channelId, amount, reason }
+// entry = { type: 'credit'|'debit', creatorId, userId, guildId, channelId, amount, reason, sponsorGuildId }
+// sponsorGuildId (clawbacks): the advertised server the member left, i.e. the
+// server whose join is being reversed — distinct from guildId (the card server).
 async function logFunds(clients, entry) {
     try {
         const bot = clients.find((c) => c.user?.id === ADMIN_BOT_ID);
@@ -41,8 +43,12 @@ async function logFunds(clients, entry) {
             const u = /^\d{17,20}$/.test(String(entry.userId));
             fields.push({ name: 'For user', value: u ? `<@${entry.userId}> \`${entry.userId}\`` : `\`${entry.userId}\``, inline: false });
         }
+        if (entry.sponsorGuildId) {
+            const spName = guildName(clients, entry.sponsorGuildId);
+            fields.push({ name: 'Left server (sponsor)', value: spName ? `${spName} \`${entry.sponsorGuildId}\`` : `\`${entry.sponsorGuildId}\``, inline: true });
+        }
         if (entry.guildId) {
-            fields.push({ name: 'Server', value: gName ? `${gName} \`${entry.guildId}\`` : `\`${entry.guildId}\``, inline: true });
+            fields.push({ name: credit ? 'Server' : 'Card server', value: gName ? `${gName} \`${entry.guildId}\`` : `\`${entry.guildId}\``, inline: true });
         }
         if (entry.channelId) {
             fields.push({ name: 'Card channel', value: cName ? `#${cName} \`${entry.channelId}\`` : `\`${entry.channelId}\``, inline: true });
