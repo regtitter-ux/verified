@@ -19,6 +19,7 @@ const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
+const feed = require('./feed.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -1043,6 +1044,41 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, { ok: true, adsOff: off }, cors);
     }
 
+    // Owner-only: manage the home-page server feed.
+    if (path === '/admin/feed' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        return send(res, 200, { servers: feed.loadFeed() }, cors);
+    }
+    if (path === '/admin/feed' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const raw = String(body?.invite || '').trim();
+        const m = raw.match(/^(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/([a-z0-9-]{2,32})$/i)
+            || raw.match(/^([a-z0-9-]{2,32})$/i);
+        if (!m) return send(res, 400, { error: 'bad-invite' }, cors);
+        const code = m[1];
+        let inv = null;
+        for (const c of clients) { inv = await c.fetchInvite(code).catch(() => null); if (inv) break; }
+        if (!inv?.guild?.id) return send(res, 400, { error: 'bad-invite' }, cors);
+        const list = feed.loadFeed();
+        if (list.some((s) => s.code === code || (s.id && s.id === inv.guild.id))) {
+            return send(res, 409, { error: 'exists' }, cors);
+        }
+        list.push(feed.itemFromInvite(inv, code));
+        return send(res, 200, { ok: true, servers: feed.saveFeed(list) }, cors);
+    }
+    if (path === '/admin/feed' && req.method === 'DELETE') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const code = String(body?.code || '');
+        const id = String(body?.id || '');
+        if (!code && !id) return send(res, 400, { error: 'bad request' }, cors);
+        const list = feed.loadFeed().filter((s) => !((code && s.code === code) || (id && s.id === id)));
+        return send(res, 200, { ok: true, servers: feed.saveFeed(list) }, cors);
+    }
+
     return send(res, 404, { error: 'unknown admin endpoint' }, cors);
 }
 
@@ -1246,6 +1282,10 @@ function startApiServer(clients, config) {
             // Public: docs + health
             if (req.method === 'GET' && (p === '/' || p === '/api')) return send(res, 200, DOCS);
             if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
+
+            // Public: home-page server feed (owner-managed via /admin/feed).
+            // Read-only, no credentials → open to any origin.
+            if (req.method === 'GET' && p === '/feed') return send(res, 200, { servers: feed.loadFeed() }, { 'Access-Control-Allow-Origin': '*' });
 
             // Admin panel (TOTP-gated, CORS-scoped to ADMIN_ORIGIN).
             // Await so any async rejection lands in this outer try/catch —
