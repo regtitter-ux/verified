@@ -16,6 +16,7 @@ const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('
 const { payShares, REVENUE_PER_JOIN } = require('./shares.js');
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
+const cards = require('./cards.js');
 const { logFunds } = require('./fundslog.js');
 
 // Global safety net: a stray rejection or throw (background sweeps, Discord
@@ -747,7 +748,17 @@ const startBot = (token) => {
             settings[interaction.user.id].botId = interaction.client.user.id;
             saveJSON('settings.json', settings);
 
-            await interaction.channel.send({ embeds: [embed], components: [row] }).catch(() => null);
+            const sentCard = await interaction.channel.send({ embeds: [embed], components: [row] }).catch(() => null);
+            // Track the card so it can be listed / repaired / managed remotely
+            // from the admin "Экстренно" tab.
+            if (sentCard) {
+                try {
+                    cards.addCard({
+                        messageId: sentCard.id, channelId: sentCard.channelId, guildId: interaction.guild.id,
+                        creatorId: interaction.user.id, roleId: role.id, botId: interaction.client.user.id
+                    });
+                } catch (e) { console.error('[CARDS] track error:', e.message); }
+            }
             return interaction.editReply({ content: `✅ Verification card created — grants <@&${role.id}>` }).catch(() => null);
         }
 
@@ -1195,6 +1206,9 @@ const startBot = (token) => {
             // Only clicks that actually display an ad qualify for balance accrual.
             pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '' });
             setTimeout(() => pendingVerification.delete(pendingKey), 300000);
+
+            // Funnel metric #1: first click ("started verification") for this card.
+            try { cards.trackClick(guild.id, roleId, creatorId, user.id); } catch (e) { /* stats must never break verification */ }
 
             return interaction.editReply({ content: responseText }).catch(() => null);
         }

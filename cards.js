@@ -1,0 +1,194 @@
+// Verification-card registry + remote management ("Экстренно" admin tab).
+//
+// Every /verify card is tracked here so the owner can list them, "shake" a
+// broken one (rebuild the embed + button in place), change its owner/role,
+// delete it, or re-publish it — all without touching who created it unless
+// explicitly asked. Only the bot instance that AUTHORED a message can edit or
+// delete it, so each op locates that instance in the fleet.
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { loadJSON, saveJSON } = require('./database.js');
+
+function loadCards() { const r = loadJSON('cards.json', []); return Array.isArray(r) ? r : []; }
+function saveCards(list) { saveJSON('cards.json', Array.isArray(list) ? list : []); return loadCards(); }
+
+// Insert or update a card record keyed by messageId.
+function addCard(rec) {
+    if (!rec || !rec.messageId) return null;
+    const list = loadCards();
+    const now = Date.now();
+    const i = list.findIndex((c) => c.messageId === rec.messageId);
+    if (i >= 0) { list[i] = { ...list[i], ...rec, updatedAt: now }; saveCards(list); return list[i]; }
+    const merged = { createdAt: now, updatedAt: now, ...rec };
+    list.push(merged); saveCards(list); return merged;
+}
+function removeCard(messageId) { saveCards(loadCards().filter((c) => c.messageId !== messageId)); }
+function getCard(messageId) { return loadCards().find((c) => c.messageId === messageId) || null; }
+
+// The canonical verification-card message payload.
+function buildCard(guild, creatorId, roleId) {
+    const icon = guild?.iconURL?.({ dynamic: true }) || null;
+    const embed = new EmbedBuilder()
+        .setAuthor({ name: guild?.name || 'Server', iconURL: icon })
+        .setTitle('Get verified!')
+        .setDescription('To gain full access to the server, you must complete verification\nClick the button')
+        .setThumbnail(icon)
+        .setColor('#5865F2')
+        .setFooter({ text: `Created by: ${creatorId}` });
+    const btn = new ButtonBuilder()
+        .setCustomId(roleId ? `start_verif_guild:${roleId}` : 'start_verif_guild')
+        .setLabel('Start Verification').setEmoji('🔐').setStyle(ButtonStyle.Primary);
+    return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btn)] };
+}
+
+// Parse a message link / "channelId messageId" / "channelId-messageId".
+function parseMsgRef(input) {
+    const s = String(input || '').trim();
+    let m = s.match(/channels\/\d+\/(\d+)\/(\d+)/);
+    if (m) return { channelId: m[1], messageId: m[2] };
+    m = s.match(/^(\d{17,20})\s*[-/\s]\s*(\d{17,20})$/);
+    if (m) return { channelId: m[1], messageId: m[2] };
+    return null;
+}
+
+// Recover a card's owner (footer) and role (button customId) from a message.
+function extractCard(msg) {
+    const footer = msg?.embeds?.[0]?.footer?.text || '';
+    const creatorId = (footer.match(/Created by:\s*(\d{17,20})/) || [])[1] || null;
+    let roleId = null;
+    for (const row of msg?.components || []) {
+        for (const comp of row.components || []) {
+            const cid = comp.customId || comp.custom_id || '';
+            if (cid.startsWith('start_verif_guild')) { roleId = cid.includes(':') ? cid.split(':')[1] : null; break; }
+        }
+        if (roleId) break;
+    }
+    return { creatorId, roleId };
+}
+
+// Locate the message and the fleet client that AUTHORED it (the only one that
+// can edit/delete). client is null when the message exists but no fleet bot
+// wrote it. Returns null if the message can't be found at all.
+async function locate(clients, channelId, messageId) {
+    let seen = null;
+    for (const c of Array.isArray(clients) ? clients : []) {
+        const channel = await c.channels.fetch(channelId).catch(() => null);
+        if (!channel || typeof channel.messages?.fetch !== 'function') continue;
+        const msg = await channel.messages.fetch(messageId).catch(() => null);
+        if (!msg) continue;
+        seen = { client: null, channel, msg };
+        if (msg.author?.id === c.user?.id) return { client: c, channel, msg };
+    }
+    return seen;
+}
+
+// Register (and shake) an existing card by reference — for cards created before
+// tracking, or that fell out of the registry.
+async function register(clients, ref) {
+    const r = parseMsgRef(ref);
+    if (!r) return { ok: false, error: 'bad-ref' };
+    const loc = await locate(clients, r.channelId, r.messageId);
+    if (!loc) return { ok: false, error: 'not-found' };
+    if (!loc.client) return { ok: false, error: 'not-own-message' };
+    const { creatorId, roleId } = extractCard(loc.msg);
+    if (!creatorId) return { ok: false, error: 'not-a-card' };
+    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId) }).catch(() => null);
+    const rec = addCard({ messageId: r.messageId, channelId: r.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, botId: loc.client.user.id });
+    return { ok: true, card: rec };
+}
+
+// "Shake" a tracked card — rebuild it in place, keeping owner + role.
+async function fix(clients, messageId) {
+    const card = getCard(messageId);
+    if (!card) return { ok: false, error: 'not-tracked' };
+    const loc = await locate(clients, card.channelId, messageId);
+    if (!loc) return { ok: false, error: 'not-found' };
+    if (!loc.client) return { ok: false, error: 'not-own-message' };
+    const ex = extractCard(loc.msg);
+    const creatorId = card.creatorId || ex.creatorId;
+    const roleId = card.roleId ?? ex.roleId;
+    if (!creatorId) return { ok: false, error: 'no-owner' };
+    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId) });
+    addCard({ ...card, creatorId, roleId });
+    return { ok: true };
+}
+
+// Change a card's owner and/or granted role (edits the live message).
+async function edit(clients, messageId, patch = {}) {
+    const card = getCard(messageId);
+    if (!card) return { ok: false, error: 'not-tracked' };
+    const loc = await locate(clients, card.channelId, messageId);
+    if (!loc) return { ok: false, error: 'not-found' };
+    if (!loc.client) return { ok: false, error: 'not-own-message' };
+    const creatorId = patch.creatorId || card.creatorId;
+    const roleId = patch.roleId !== undefined ? (patch.roleId || null) : card.roleId;
+    if (!creatorId) return { ok: false, error: 'no-owner' };
+    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId) });
+    const rec = addCard({ ...card, creatorId, roleId });
+    return { ok: true, card: rec };
+}
+
+// Delete the card's message and drop it from the registry.
+async function remove(clients, messageId) {
+    const card = getCard(messageId);
+    const loc = card ? await locate(clients, card.channelId, messageId) : null;
+    if (loc?.client) await loc.msg.delete().catch(() => null);
+    removeCard(messageId);
+    return { ok: true, deleted: Boolean(loc?.client) };
+}
+
+// Re-publish: post a fresh card in the same channel, then delete the old one —
+// keeping owner + role. Used when an in-place edit isn't enough.
+async function republish(clients, messageId) {
+    const card = getCard(messageId);
+    if (!card) return { ok: false, error: 'not-tracked' };
+    const loc = await locate(clients, card.channelId, messageId);
+    if (!loc || !loc.client) return { ok: false, error: 'not-found' };
+    const ex = extractCard(loc.msg);
+    const creatorId = card.creatorId || ex.creatorId;
+    const roleId = card.roleId ?? ex.roleId;
+    if (!creatorId) return { ok: false, error: 'no-owner' };
+    const sent = await loc.channel.send(buildCard(loc.channel.guild, creatorId, roleId)).catch(() => null);
+    if (!sent) return { ok: false, error: 'send-failed' };
+    await loc.msg.delete().catch(() => null);
+    removeCard(messageId);
+    const rec = addCard({ messageId: sent.id, channelId: sent.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, botId: loc.client.user.id, createdAt: card.createdAt });
+    return { ok: true, card: rec };
+}
+
+// ---- First-click tracking (funnel metric #1) ----
+// A card is identified for stats by (guild, role, creator) — the same tuple a
+// verified.json entry / joinlinks record carries, so all three funnel stages
+// line up. First clicks aren't otherwise persisted, so we log them here. The
+// first-click handler in index.js only fires once per ~5-minute session per
+// user (pendingVerification gate), so this already counts "sessions started",
+// not raw re-clicks. Events older than a week are pruned on write.
+const CLICK_TTL = 7 * 86400000;
+function clickKey(guildId, roleId, creatorId) { return `${guildId || ''}:${roleId || ''}:${creatorId || ''}`; }
+function trackClick(guildId, roleId, creatorId, userId) {
+    if (!guildId || !creatorId) return;
+    const now = Date.now();
+    const list = loadJSON('cardclicks.json', []);
+    const arr = (Array.isArray(list) ? list : []).filter((e) => e.t > now - CLICK_TTL);
+    arr.push({ k: clickKey(guildId, roleId, creatorId), u: String(userId || ''), t: now });
+    saveJSON('cardclicks.json', arr);
+}
+// Unique users who first-clicked this card in the last hour / day / week.
+function clickWindows(guildId, roleId, creatorId, now = Date.now()) {
+    const k = clickKey(guildId, roleId, creatorId);
+    const list = loadJSON('cardclicks.json', []);
+    const h = new Set(), d = new Set(), w = new Set();
+    for (const e of Array.isArray(list) ? list : []) {
+        if (e.k !== k) continue;
+        if (e.t > now - 3600000) h.add(e.u);
+        if (e.t > now - 86400000) d.add(e.u);
+        if (e.t > now - 604800000) w.add(e.u);
+    }
+    return { hour: h.size, day: d.size, week: w.size };
+}
+
+module.exports = {
+    loadCards, saveCards, addCard, removeCard, getCard,
+    buildCard, parseMsgRef, extractCard, locate,
+    register, fix, edit, remove, republish,
+    trackClick, clickWindows
+};

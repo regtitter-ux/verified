@@ -20,6 +20,7 @@ const cryptopay = require('./cryptopay.js');
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
 const feed = require('./feed.js');
+const cards = require('./cards.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -220,6 +221,24 @@ function guildIconOf(clients, gid) {
     return null;
 }
 
+// Channel name across the fleet caches (for the verification-card list).
+function channelNameOf(clients, cid) {
+    for (const c of Array.isArray(clients) ? clients : []) {
+        const ch = c.channels?.cache?.get(String(cid));
+        if (ch?.name) return ch.name;
+    }
+    return null;
+}
+// Role name within a guild across the fleet caches.
+function roleNameOf(clients, gid, rid) {
+    if (!rid) return null;
+    for (const c of Array.isArray(clients) ? clients : []) {
+        const r = c.guilds?.cache?.get(String(gid))?.roles?.cache?.get(String(rid));
+        if (r?.name) return r.name;
+    }
+    return null;
+}
+
 // Resolve a user's display name across every bot's user cache. Null when no
 // bot has seen the user — the frontend then falls back to the raw ID.
 function userNameOf(clients, uid) {
@@ -240,6 +259,7 @@ function verifStats(entries) {
         total: entries.length
     };
 }
+
 
 // Admin routing — TOTP login, session cookie, then CRUD over templates/ads
 // and the global ads-off toggle. Every response includes CORS headers so the
@@ -1077,6 +1097,88 @@ async function handleAdmin(req, res, path, clients, config) {
         if (!code && !id) return send(res, 400, { error: 'bad request' }, cors);
         const list = feed.loadFeed().filter((s) => !((code && s.code === code) || (id && s.id === id)));
         return send(res, 200, { ok: true, servers: feed.saveFeed(list) }, cors);
+    }
+
+    // Owner-only: verification-card registry + remote management.
+    if (path === '/admin/cards' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const now = Date.now();
+        const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
+        const jArr = (() => { const j = loadJSON('joinlinks.json', []); return Array.isArray(j) ? j : []; })();
+        // Unique users per hour/day/week for a matched set of records.
+        const winOf = (items, tsField, uField) => {
+            const h = new Set(), d = new Set(), w = new Set();
+            for (const x of items) {
+                const t = Number(x[tsField]) || 0, u = x[uField];
+                if (t > now - 3600000) h.add(u);
+                if (t > now - 86400000) d.add(u);
+                if (t > now - 604800000) w.add(u);
+            }
+            return { hour: h.size, day: d.size, week: w.size };
+        };
+        const list = cards.loadCards().map((c) => {
+            const rid = c.roleId || null;
+            // Verified-and-still-standing for this card (stage 3), and clawed
+            // leavers (verified then left) — together they make "join checked".
+            const vmatch = vArr.filter((u) => u.creatorId === c.creatorId && u.guildId === c.guildId && (u.roleId || null) === rid);
+            const leftMatch = jArr.filter((r) => r.status === 'left' && r.creatorId === c.creatorId && r.cardGuildId === c.guildId && (r.roleId || null) === rid);
+            const stayed = winOf(vmatch, 'timestamp', 'id');
+            const leftW = winOf(leftMatch, 'ts', 'userId');
+            const checked = { hour: stayed.hour + leftW.hour, day: stayed.day + leftW.day, week: stayed.week + leftW.week };
+            return {
+                messageId: c.messageId,
+                channelId: c.channelId,
+                guildId: c.guildId,
+                guildName: guildNameOf(clients, c.guildId),
+                guildIcon: guildIconOf(clients, c.guildId),
+                channelName: channelNameOf(clients, c.channelId),
+                creatorId: c.creatorId || null,
+                creatorName: userNameOf(clients, c.creatorId),
+                roleId: rid,
+                roleName: roleNameOf(clients, c.guildId, rid),
+                link: (c.guildId && c.channelId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
+                createdAt: c.createdAt || 0,
+                // Funnel: started (first click) → join checked (2nd click) → stayed.
+                stats: { clicks: cards.clickWindows(c.guildId, c.roleId, c.creatorId, now), checked, stayed }
+            };
+        }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        return send(res, 200, { cards: list }, cors);
+    }
+    if (path === '/admin/cards/register' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const r = await cards.register(clients, body?.ref).catch((e) => ({ ok: false, error: e.message }));
+        return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card } : { error: r.error || 'failed' }, cors);
+    }
+    if ((path === '/admin/cards/fix' || path === '/admin/cards/republish' || path === '/admin/cards/delete') && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const mid = String(body?.messageId || '');
+        if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
+        const op = path.endsWith('/fix') ? 'fix' : path.endsWith('/republish') ? 'republish' : 'remove';
+        const r = await cards[op](clients, mid).catch((e) => ({ ok: false, error: e.message }));
+        return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card || null } : { error: r.error || 'failed' }, cors);
+    }
+    if (path === '/admin/cards/edit' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const mid = String(body?.messageId || '');
+        if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
+        const patch = {};
+        if (body.creatorId !== undefined) {
+            if (!/^\d{17,20}$/.test(String(body.creatorId))) return send(res, 400, { error: 'bad creator id' }, cors);
+            patch.creatorId = String(body.creatorId);
+        }
+        if (body.roleId !== undefined) {
+            const rid = String(body.roleId || '');
+            if (rid && !/^\d{17,20}$/.test(rid)) return send(res, 400, { error: 'bad role id' }, cors);
+            patch.roleId = rid || null;
+        }
+        const r = await cards.edit(clients, mid, patch).catch((e) => ({ ok: false, error: e.message }));
+        return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card } : { error: r.error || 'failed' }, cors);
     }
 
     return send(res, 404, { error: 'unknown admin endpoint' }, cors);
