@@ -80,6 +80,14 @@ const startBot = (token) => {
 
     const client = new Client({ intents });
 
+    // Gateway diagnostics — surface WHY a bot never reaches READY (disallowed
+    // intents = close 4014, bad token = 4004, rate-limit/network otherwise).
+    client.on('error', (e) => console.error(`[GW ${botId}] error: ${e?.message || e}`));
+    client.on('shardError', (e) => console.error(`[GW ${botId}] shardError: ${e?.message || e}`));
+    client.on(Events.ShardDisconnect, (ev) => console.warn(`[GW ${botId}] disconnect code=${ev?.code} reason=${ev?.reason || ''}`));
+    client.on(Events.ShardReconnecting, () => console.warn(`[GW ${botId}] reconnecting…`));
+    client.on('invalidated', () => console.error(`[GW ${botId}] session invalidated (bad token / kicked)`));
+
     // Realtime leave-clawback. This event only fires on bots that were given
     // the GuildMembers intent above; for every other sponsor guild the
     // periodic sweep in joincheck.js still catches leaves within ~15 minutes.
