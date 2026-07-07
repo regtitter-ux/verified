@@ -16,6 +16,7 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { logFunds } = require('./fundslog.js');
 const { boostedRate, REFERRAL_RATE } = require('./referral.js');
 const { syncHubMember } = require('./hubrole.js');
+const { joinerCount } = require('./adcreative.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -108,6 +109,48 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId) 
     return perJoin;
 }
 
+// Has the ad for a sponsor server "completed"? Two sources:
+//   • a bought campaign whose purchased joins were delivered (status complete),
+//     with none of that server's campaigns still active / awaiting payment;
+//   • a house ad (global or per-server) that uses a join-limit and has reached
+//     it, with no other limited house ad for that server still under its cap.
+// An active paid campaign, or a limited house ad still delivering, means the ad
+// is NOT complete (so the leave-clawback keeps running — anti-fraud). House ads
+// without a join-limit never "complete" (they run indefinitely).
+async function adCompleteForGuild(clients, gid) {
+    const camps = loadJSON('campaigns.json', {});
+    let campComplete = false, campActive = false;
+    for (const c of Object.values(camps && typeof camps === 'object' ? camps : {})) {
+        if (!c || c.sponsorGuildId !== gid) continue;
+        if (c.status === 'complete') campComplete = true;
+        if (c.status === 'active' || c.status === 'pending_payment') campActive = true;
+    }
+    if (campActive) return false; // a paid campaign is still delivering
+
+    const limits = loadJSON('adlimits.json', {});
+    const creatives = loadJSON('adcreatives.json', {});
+    const verified = loadJSON('verified.json', []);
+    const resolver = (Array.isArray(clients) ? clients : [])[0];
+    let houseComplete = false, houseRunning = false;
+    if (resolver) {
+        for (const [key, lim] of Object.entries(limits && typeof limits === 'object' ? limits : {})) {
+            const limit = Number(lim?.limit) || 0;
+            if (limit <= 0) continue;               // only limited ads can complete
+            const text = creatives[key]?.text;
+            if (!text) continue;
+            let points = false;
+            for (const code of extractInviteCodes(text)) {
+                if ((await inviteGuildId(resolver, code)) === gid) { points = true; break; }
+            }
+            if (!points) continue;
+            const count = joinerCount(verified, key, Number(lim.resetAt) || 0);
+            if (count >= limit) houseComplete = true; else houseRunning = true;
+        }
+    }
+    if (houseRunning) return false; // a limited house ad for this server is still delivering
+    return campComplete || houseComplete;
+}
+
 // Apply the leave-clawback to the given set of joinlink record IDs: reverse the
 // payout on the card owner (and any referrer bonus already earned via a
 // withdrawal), strip the granted role in the card guild, and drop the
@@ -123,24 +166,18 @@ async function finalizeLeavers(clients, leaverIds) {
     if (!Array.isArray(verified)) verified = [];
     let changed = false, verifiedChanged = false;
 
-    // Owner opt-out (per sponsor server): once that server's ad campaign has
-    // completed, the owner can choose NOT to claw back when a member later
-    // leaves — the join is treated as final (money, granted role, and the
-    // verification record all stay). Controlled from the admin Statistics
-    // panel and gated on the campaign actually being complete.
+    // Owner opt-out (per sponsor server): once that server's ad has completed
+    // (bought campaign delivered OR limited house ad hit its cap), the owner
+    // can choose NOT to claw back when a member later leaves — the join is
+    // treated as final (money, granted role, and the verification record all
+    // stay). Controlled from the admin Statistics panel; gated on the ad
+    // actually being complete so it can't be abused mid-delivery.
     const cfg = loadJSON('siteconfig.json', {});
     const clawOff = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
-    const camps = loadJSON('campaigns.json', {});
     const completeCache = new Map();
-    const campaignComplete = (gid) => {
+    const adComplete = async (gid) => {
         if (completeCache.has(gid)) return completeCache.get(gid);
-        let anyComplete = false, anyActive = false;
-        for (const c of Object.values(camps && typeof camps === 'object' ? camps : {})) {
-            if (!c || c.sponsorGuildId !== gid) continue;
-            if (c.status === 'complete') anyComplete = true;
-            if (c.status === 'active' || c.status === 'pending_payment') anyActive = true;
-        }
-        const done = anyComplete && !anyActive;
+        const done = await adCompleteForGuild(clients, gid).catch(() => false);
         completeCache.set(gid, done);
         return done;
     };
@@ -151,11 +188,11 @@ async function finalizeLeavers(clients, leaverIds) {
         // Post-completion clawback opt-out: leave the payout, role and
         // verification intact and finalize the record as 'settled' so no
         // sweep retries it.
-        if (clawOff[rec.guildId] && campaignComplete(rec.guildId)) {
+        if (clawOff[rec.guildId] && await adComplete(rec.guildId)) {
             rec.status = 'settled';
             rec.settledAt = Date.now();
             changed = true;
-            console.log(`[LEAVE] clawback skipped (campaign complete, owner opt-out): sponsor=${rec.guildId} user=${rec.userId}`);
+            console.log(`[LEAVE] clawback skipped (ad complete, owner opt-out): sponsor=${rec.guildId} user=${rec.userId}`);
             continue;
         }
 
