@@ -138,6 +138,36 @@ const startBot = (token) => {
                 value: `${autoOn ? '🟢 On' : '⚪ Off'}${cryptopay.enabled() ? '' : ' · *Crypto Pay not configured*'}`,
                 inline: false
             });
+
+            // Money reconciliation (owner debugging): the "Your verifications"
+            // counter below is GROSS — every successful verification, including
+            // ones that pay nothing (no ad shown, duplicate join, expired
+            // session) and plain-click ads ($ per 100 clicks). Real earnings
+            // come from join-check joins (joinlinks.json) plus batched clicks.
+            // This block shows exactly where the balance came from so a gross
+            // count vs a small balance stops looking like underpayment.
+            const r2 = (n) => +((Number(n) || 0).toFixed(2));
+            const links = loadJSON('joinlinks.json', []);
+            const mineLinks = (Array.isArray(links) ? links : []).filter((r) => r && r.creatorId === userId);
+            const sumAmt = (arr) => r2(arr.reduce((a, r) => a + (Number(r.amount) || 0), 0));
+            const standing = mineLinks.filter((r) => r.status === 'joined' || r.status === 'settled');
+            const clawed = mineLinks.filter((r) => r.status === 'left');
+            const wds = Array.isArray(s.withdrawals) ? s.withdrawals : [];
+            const wdDone = r2(wds.filter((w) => w.status === 'completed').reduce((a, w) => a + (Number(w.amount) || 0), 0));
+            const wdProc = r2(wds.filter((w) => w.status !== 'completed').reduce((a, w) => a + (Number(w.amount) || 0), 0));
+            // What joins alone should have left on the balance (before clicks/manual edits):
+            const expectFromJoins = r2(sumAmt(standing) - wdDone - wdProc);
+            embed.addFields({
+                name: 'Join payout reconciliation',
+                value: [
+                    `Standing joins: **${standing.length}** · paid **$${sumAmt(standing).toFixed(2)}**`,
+                    `Clawed back (left): **${clawed.length}** · −$${sumAmt(clawed).toFixed(2)}`,
+                    `Withdrawn: $${wdDone.toFixed(2)}${wdProc > 0 ? ` · $${wdProc.toFixed(2)} pending` : ''}`,
+                    `Joins − withdrawals = **$${expectFromJoins.toFixed(2)}** · balance now **$${balance.toFixed(2)}**`,
+                    `_(gross verifications below also include unpaid/no-ad/click — not 1:1 with money)_`
+                ].join('\n').slice(0, 1024),
+                inline: false
+            });
         }
 
         // Prominent nudge to add payment details when they're missing (self view only)
