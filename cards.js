@@ -172,6 +172,14 @@ function trackClick(guildId, roleId, creatorId, userId) {
     arr.push({ k: clickKey(guildId, roleId, creatorId), u: String(userId || ''), t: now });
     saveJSON('cardclicks.json', arr);
 }
+// Raw first-click events [{ u, t }] for a card — used to measure the delay
+// from the first click to a successful join-check verification.
+function clicksForKey(guildId, roleId, creatorId) {
+    const k = clickKey(guildId, roleId, creatorId);
+    const list = loadJSON('cardclicks.json', []);
+    return (Array.isArray(list) ? list : []).filter((e) => e.k === k).map((e) => ({ u: e.u, t: e.t }));
+}
+
 // Unique users who first-clicked this card in the last hour / day / week.
 function clickWindows(guildId, roleId, creatorId, now = Date.now()) {
     const k = clickKey(guildId, roleId, creatorId);
@@ -245,5 +253,5 @@ module.exports = {
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate,
     register, fix, edit, remove, republish,
-    trackClick, clickWindows, scanAll, getScanState
+    trackClick, clickWindows, clicksForKey, scanAll, getScanState
 };

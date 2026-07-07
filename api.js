@@ -1116,6 +1116,7 @@ async function handleAdmin(req, res, path, clients, config) {
             }
             return { hour: h.size, day: d.size, week: w.size };
         };
+        const globalDeltas = []; // ms from first click → successful verification, all cards
         const list = cards.loadCards().map((c) => {
             const rid = c.roleId || null;
             // Verified-and-still-standing for this card (stage 3), and clawed
@@ -1125,6 +1126,26 @@ async function handleAdmin(req, res, path, clients, config) {
             const stayed = winOf(vmatch, 'timestamp', 'id');
             const leftW = winOf(leftMatch, 'ts', 'userId');
             const checked = { hour: stayed.hour + leftW.hour, day: stayed.day + leftW.day, week: stayed.week + leftW.week };
+
+            // Average delay: for each successful verification, match the user's
+            // latest first-click at or before it (clicks are pruned to a week,
+            // so only recent verifications contribute).
+            const byUser = {};
+            for (const e of cards.clicksForKey(c.guildId, c.roleId, c.creatorId)) (byUser[e.u] ||= []).push(e.t);
+            for (const u of Object.keys(byUser)) byUser[u].sort((a, b) => a - b);
+            const verifyEvents = [
+                ...vmatch.map((u) => ({ u: u.id, t: Number(u.timestamp) || 0 })),
+                ...leftMatch.map((r) => ({ u: r.userId, t: Number(r.ts) || 0 }))
+            ];
+            const deltas = [];
+            for (const ve of verifyEvents) {
+                const clicks = byUser[ve.u];
+                if (!clicks || !ve.t) continue;
+                let best = null;
+                for (const t of clicks) { if (t <= ve.t) best = t; else break; }
+                if (best != null && ve.t - best >= 0) { deltas.push(ve.t - best); globalDeltas.push(ve.t - best); }
+            }
+            const avgVerifySeconds = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length / 1000) : null;
             return {
                 messageId: c.messageId,
                 channelId: c.channelId,
@@ -1138,11 +1159,14 @@ async function handleAdmin(req, res, path, clients, config) {
                 roleName: roleNameOf(clients, c.guildId, rid),
                 link: (c.guildId && c.channelId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
                 createdAt: c.createdAt || 0,
+                avgVerifySeconds,
                 // Funnel: started (first click) → join checked (2nd click) → stayed.
                 stats: { clicks: cards.clickWindows(c.guildId, c.roleId, c.creatorId, now), checked, stayed }
             };
         }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-        return send(res, 200, { cards: list }, cors);
+        const avgVerifySeconds = globalDeltas.length
+            ? Math.round(globalDeltas.reduce((a, b) => a + b, 0) / globalDeltas.length / 1000) : null;
+        return send(res, 200, { cards: list, avgVerifySeconds }, cors);
     }
     if (path === '/admin/cards/register' && req.method === 'POST') {
         if (!isOwner) return ownerOnly();
