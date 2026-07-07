@@ -1160,13 +1160,18 @@ async function handleAdmin(req, res, path, clients, config) {
                 link: (c.guildId && c.channelId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
                 createdAt: c.createdAt || 0,
                 avgVerifySeconds,
+                deletedAt: c.deletedAt || 0,
+                deletedBy: c.deletedBy || null,
+                deletedByName: c.deletedBy ? userNameOf(clients, c.deletedBy) : null,
                 // Funnel: started (first click) → join checked (2nd click) → stayed.
                 stats: { clicks: cards.clickWindows(c.guildId, c.roleId, c.creatorId, now), checked, stayed }
             };
-        }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        });
         const avgVerifySeconds = globalDeltas.length
             ? Math.round(globalDeltas.reduce((a, b) => a + b, 0) / globalDeltas.length / 1000) : null;
-        return send(res, 200, { cards: list, avgVerifySeconds }, cors);
+        const active = list.filter((c) => !c.deletedAt).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        const deleted = list.filter((c) => c.deletedAt).sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+        return send(res, 200, { cards: active, deletedCards: deleted, avgVerifySeconds }, cors);
     }
     if (path === '/admin/cards/register' && req.method === 'POST') {
         if (!isOwner) return ownerOnly();
@@ -1191,9 +1196,26 @@ async function handleAdmin(req, res, path, clients, config) {
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const mid = String(body?.messageId || '');
         if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
-        const op = path.endsWith('/fix') ? 'fix' : path.endsWith('/republish') ? 'republish' : 'remove';
-        const r = await cards[op](clients, mid).catch((e) => ({ ok: false, error: e.message }));
+        let r;
+        if (path.endsWith('/delete')) r = await cards.remove(clients, mid, session.userId).catch((e) => ({ ok: false, error: e.message }));
+        else r = await cards[path.endsWith('/fix') ? 'fix' : 'republish'](clients, mid).catch((e) => ({ ok: false, error: e.message }));
         return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card || null } : { error: r.error || 'failed' }, cors);
+    }
+    // Permanently drop a card from the (deleted) registry.
+    if (path === '/admin/cards/purge' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const mid = String(body?.messageId || '');
+        if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
+        cards.removeCard(mid);
+        return send(res, 200, { ok: true }, cors);
+    }
+    // On-demand: sweep the fleet for cards whose message is gone.
+    if (path === '/admin/cards/verify' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const marked = await cards.sweepDeleted(clients).catch(() => 0);
+        return send(res, 200, { ok: true, marked }, cors);
     }
     if (path === '/admin/cards/edit' && req.method === 'POST') {
         if (!isOwner) return ownerOnly();

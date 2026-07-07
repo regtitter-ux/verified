@@ -105,6 +105,14 @@ const startBot = (token) => {
     client.on(Events.ShardReconnecting, () => console.warn(`[GW ${botId}] reconnecting…`));
     client.on('invalidated', () => console.error(`[GW ${botId}] session invalidated (bad token / kicked)`));
 
+    // Realtime card-deletion detection (only fires on bots with GuildMessages
+    // intent — the admin bot). Marks a tracked card deleted the moment its
+    // message is removed, and tries to learn who via the audit log. The
+    // periodic sweep catches deletions everywhere else.
+    client.on(Events.MessageDelete, (msg) => {
+        cards.handleMessageDelete(clients, msg).catch((e) => console.error('[CARDS] delete handler:', e.message));
+    });
+
     // Realtime leave-clawback. This event only fires on bots that were given
     // the GuildMembers intent above; for every other sponsor guild the
     // periodic sweep in joincheck.js still catches leaves within ~15 minutes.
@@ -1355,3 +1363,7 @@ startHubRoleSync(clients);
 
 // Buyer campaigns: activate paid orders and complete finished ones.
 campaigns.startCampaignSweep(clients);
+
+// Verification cards: detect ones deleted from their channel and move them to
+// the "deleted" list (keeping their stats).
+cards.startCardSweep(clients);

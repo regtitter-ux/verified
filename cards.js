@@ -5,7 +5,7 @@
 // delete it, or re-publish it — all without touching who created it unless
 // explicitly asked. Only the bot instance that AUTHORED a message can edit or
 // delete it, so each op locates that instance in the fleet.
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AuditLogEvent } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 
 function loadCards() { const r = loadJSON('cards.json', []); return Array.isArray(r) ? r : []; }
@@ -23,6 +23,22 @@ function addCard(rec) {
 }
 function removeCard(messageId) { saveCards(loadCards().filter((c) => c.messageId !== messageId)); }
 function getCard(messageId) { return loadCards().find((c) => c.messageId === messageId) || null; }
+
+// Mark a card deleted (kept in the registry so its stats survive) rather than
+// dropping it. deletedBy = who removed it, when known.
+function markDeleted(messageId, deletedBy = null) {
+    const list = loadCards();
+    const i = list.findIndex((c) => c.messageId === messageId);
+    if (i < 0) return null;
+    if (!list[i].deletedAt) {
+        list[i].deletedAt = Date.now();
+        list[i].deletedBy = deletedBy || list[i].deletedBy || null;
+        saveCards(list);
+    } else if (deletedBy && !list[i].deletedBy) {
+        list[i].deletedBy = deletedBy; saveCards(list);
+    }
+    return list[i];
+}
 
 // The canonical verification-card message payload.
 function buildCard(guild, creatorId, roleId) {
@@ -127,12 +143,13 @@ async function edit(clients, messageId, patch = {}) {
     return { ok: true, card: rec };
 }
 
-// Delete the card's message and drop it from the registry.
-async function remove(clients, messageId) {
+// Delete the card's message and move it to the "deleted" list (stats kept).
+async function remove(clients, messageId, deletedBy = null) {
     const card = getCard(messageId);
-    const loc = card ? await locate(clients, card.channelId, messageId) : null;
+    if (!card) return { ok: true, deleted: false };
+    markDeleted(messageId, deletedBy); // set before the delete so the messageDelete event is a no-op
+    const loc = await locate(clients, card.channelId, messageId);
     if (loc?.client) await loc.msg.delete().catch(() => null);
-    removeCard(messageId);
     return { ok: true, deleted: Boolean(loc?.client) };
 }
 
@@ -249,9 +266,75 @@ function scanAll(clients) {
 }
 function getScanState() { return scanState; }
 
+// ---- Deletion detection ----
+// Definitively decide whether a card's message still exists. Only a real
+// "Unknown Message/Channel" (10008/10003) counts as gone — transient errors
+// stay 'unknown' so we never false-mark a card as deleted.
+async function checkExists(clients, card) {
+    for (const c of Array.isArray(clients) ? clients : []) {
+        let channel;
+        try { channel = await c.channels.fetch(card.channelId); }
+        catch (e) { if (e?.code === 10003) return 'gone'; channel = null; }
+        if (!channel || typeof channel.messages?.fetch !== 'function') continue;
+        try { const msg = await channel.messages.fetch(card.messageId); if (msg) return 'exists'; }
+        catch (e) { if (e?.code === 10008) return 'gone'; }
+    }
+    return 'unknown';
+}
+
+// Periodic sweep: mark any active card whose message is gone as deleted.
+let sweepRunning = false;
+async function sweepDeleted(clients) {
+    if (sweepRunning) return 0;
+    sweepRunning = true;
+    let marked = 0;
+    try {
+        for (const card of loadCards()) {
+            if (card.deletedAt) continue;
+            const state = await checkExists(clients, card).catch(() => 'unknown');
+            if (state === 'gone') { markDeleted(card.messageId, null); marked++; }
+            await sleep(300);
+        }
+    } catch (e) { console.error('[CARDS] sweep error:', e.message); }
+    finally { sweepRunning = false; }
+    return marked;
+}
+function startCardSweep(clients) {
+    const every = Number(process.env.CARD_SWEEP_MS) || 10 * 60 * 1000;
+    const tick = () => sweepDeleted(clients).catch(() => null);
+    setInterval(tick, every);
+    setTimeout(tick, 90 * 1000); // first pass shortly after startup
+    console.log(`[CARDS] deletion sweep every ${Math.round(every / 60000)}m`);
+}
+
+// Realtime: fired from Events.MessageDelete on any bot with the GuildMessages
+// intent. If the deleted message is a tracked active card, mark it deleted and
+// try to learn who removed it from the audit log (needs View Audit Log).
+async function handleMessageDelete(clients, message) {
+    const id = message?.id;
+    if (!id) return;
+    const card = getCard(id);
+    if (!card || card.deletedAt) return;
+    let deletedBy = null;
+    try {
+        const guild = message.guild;
+        if (guild?.fetchAuditLogs) {
+            const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.MessageDelete, limit: 6 }).catch(() => null);
+            const now = Date.now();
+            const entry = logs?.entries?.find((e) =>
+                e?.target?.id === card.botId &&
+                (!e.extra?.channel || e.extra.channel.id === card.channelId) &&
+                (now - (e.createdTimestamp || 0)) < 20000);
+            if (entry?.executor?.id) deletedBy = entry.executor.id;
+        }
+    } catch { /* no audit access → deleter stays unknown */ }
+    markDeleted(id, deletedBy);
+}
+
 module.exports = {
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate,
     register, fix, edit, remove, republish,
-    trackClick, clickWindows, clicksForKey, scanAll, getScanState
+    trackClick, clickWindows, clicksForKey, scanAll, getScanState,
+    markDeleted, removeCard, sweepDeleted, startCardSweep, handleMessageDelete
 };
