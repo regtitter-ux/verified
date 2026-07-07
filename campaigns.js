@@ -117,15 +117,33 @@ async function isInvoicePaid(invoiceId) {
 // Best-effort DM to the buyer from any bot instance.
 async function notifyBuyer(clients, campaign, kind) {
     const list = Array.isArray(clients) ? clients : [];
+    const server = campaign.serverName || campaign.invite;
+    const messages = {
+        started: `✅ Оплата получена — твоя реклама запущена!\nСервер: ${server}\nЗаказано заходов: **${campaign.purchased}**. Следи за прогрессом в личном кабинете.`,
+        complete: `🎉 Реклама выполнена!\nСервер: ${server}\nДоставлено заходов: **${campaign.purchased}/${campaign.purchased}**. Спасибо за заказ!`,
+        invalid: `⚠️ Реклама остановлена: ссылка-приглашение стала недействительной.\nСервер: ${server}\nОбнови приглашение и обратись в поддержку, чтобы возобновить показ.`
+    };
+    const msg = messages[kind];
+    if (!msg) return;
     for (const c of list) {
         const u = await c.users?.fetch(campaign.buyerId).catch(() => null);
         if (!u) continue;
-        const msg = kind === 'started'
-            ? `✅ Оплата получена — твоя реклама запущена!\nСервер: ${campaign.serverName || campaign.invite}\nЗаказано заходов: **${campaign.purchased}**. Следи за прогрессом в личном кабинете.`
-            : `🎉 Реклама выполнена!\nСервер: ${campaign.serverName || campaign.invite}\nДоставлено заходов: **${campaign.purchased}/${campaign.purchased}**. Спасибо за заказ!`;
         const ok = await u.send({ content: msg }).then(() => true).catch(() => false);
         if (ok) return;
     }
+}
+
+const inviteCodeOf = (invite) => { const m = String(invite || '').match(/([a-z0-9-]{2,32})\/?$/i); return m ? m[1] : ''; };
+
+// true = valid, false = definitely invalid (Unknown Invite), null = couldn't
+// tell (network/transient) — don't act on null.
+async function isInviteValid(clients, invite) {
+    const code = inviteCodeOf(invite);
+    if (!code) return false;
+    const client = (Array.isArray(clients) ? clients : [])[0];
+    if (!client) return null;
+    try { const inv = await client.fetchInvite(code); return Boolean(inv?.guild?.id); }
+    catch (e) { return e?.code === 10006 ? false : null; } // 10006 = Unknown Invite
 }
 
 // Periodic reconciliation: activate paid pending campaigns and complete
@@ -134,15 +152,30 @@ async function reconcile(clients) {
     const camps = loadCampaigns();
     const verified = loadJSON('verified.json', []);
     let changed = false;
+    const now = Date.now();
     for (const c of Object.values(camps)) {
         if (!c) continue;
         if (c.status === 'pending_payment' && await isInvoicePaid(c.invoiceId)) {
-            c.status = 'active'; c.paidAt = Date.now(); changed = true;
+            c.status = 'active'; c.paidAt = now; changed = true;
             notifyBuyer(clients, c, 'started').catch(() => null);
         }
-        if (c.status === 'active' && delivered(c, verified) >= c.purchased) {
-            c.status = 'complete'; c.completedAt = Date.now(); changed = true;
-            notifyBuyer(clients, c, 'complete').catch(() => null);
+        if (c.status === 'active') {
+            // Stop the campaign if its invite went invalid (deleted/expired).
+            // Checked at most every 10 min to keep API calls light.
+            if (now - (c.inviteCheckedAt || 0) > 10 * 60 * 1000) {
+                c.inviteCheckedAt = now; changed = true;
+                const valid = await isInviteValid(clients, c.invite);
+                if (valid === false) {
+                    c.status = 'invalid'; c.invalidAt = now;
+                    console.error(`[CAMPAIGN] invite invalid → stopped campaign ${c.id} buyer=${c.buyerId} invite=${c.invite}`);
+                    notifyBuyer(clients, c, 'invalid').catch(() => null);
+                    continue;
+                }
+            }
+            if (delivered(c, verified) >= c.purchased) {
+                c.status = 'complete'; c.completedAt = now; changed = true;
+                notifyBuyer(clients, c, 'complete').catch(() => null);
+            }
         }
     }
     if (changed) saveCampaigns(camps);

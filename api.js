@@ -1007,29 +1007,34 @@ async function handleBuyer(req, res, path, clients, config) {
         if (!cryptopay.enabled()) return send(res, 503, { error: 'Оплата временно недоступна' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
-        const codes = extractInviteCodes(String(body?.invite || ''));
-        if (!codes.length) return send(res, 400, { error: 'Укажите корректную ссылку-приглашение Discord' }, cors);
+        // Strict: the whole field must be a clean Discord invite — no extra
+        // text, spaces or other links around it.
+        const rawInvite = String(body?.invite || '').trim();
+        const m = rawInvite.match(/^(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/([a-z0-9-]{2,32})$/i)
+            || rawInvite.match(/^([a-z0-9-]{2,32})$/i);
+        if (!m) return send(res, 400, { error: 'bad-invite' }, cors);
+        const inviteCode = m[1];
         const joins = Math.floor(Number(body?.joins));
         if (!Number.isFinite(joins) || joins < campaigns.MIN_JOINS) {
-            return send(res, 400, { error: `Минимум ${campaigns.MIN_JOINS} заходов` }, cors);
+            return send(res, 400, { error: 'min-joins' }, cors);
         }
         // Resolve the invite → guild id + name (works without a bot on it).
         let inv = null;
-        for (const c of clients) { inv = await c.fetchInvite(codes[0]).catch(() => null); if (inv) break; }
+        for (const c of clients) { inv = await c.fetchInvite(inviteCode).catch(() => null); if (inv) break; }
         const sponsorGuildId = inv?.guild?.id || null;
-        if (!sponsorGuildId) return send(res, 400, { error: 'Не удалось прочитать приглашение — проверьте ссылку' }, cors);
+        if (!sponsorGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
 
         const price = campaigns.priceFor(joins);
         let invoice = null;
         try { invoice = await cryptopay.createUsdtInvoice(price, { description: `Реклама: ${joins} заходов на сервер ${inv.guild.name || sponsorGuildId}`.slice(0, 1024) }); }
-        catch (e) { return send(res, 502, { error: `Не удалось создать счёт (${e.message})` }, cors); }
+        catch (e) { return send(res, 502, { error: 'invoice-failed' }, cors); }
         const invoiceUrl = invoice.bot_invoice_url || invoice.mini_app_invoice_url || invoice.web_app_invoice_url || invoice.pay_url;
 
         const camps = campaigns.loadCampaigns();
         const id = campaigns.newId();
         camps[id] = {
             id, buyerId,
-            invite: `https://discord.gg/${codes[0]}`,
+            invite: `https://discord.gg/${inviteCode}`,
             sponsorGuildId, serverName: inv.guild?.name || null,
             purchased: joins, price,
             status: 'pending_payment',
