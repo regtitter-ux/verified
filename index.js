@@ -14,6 +14,7 @@ const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const { payShares } = require('./shares.js');
+const campaigns = require('./campaigns.js');
 const { logFunds } = require('./fundslog.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
@@ -1028,6 +1029,17 @@ const startBot = (token) => {
 
             let latest = candidates.reduce((best, cur) => (!best || cur.ts > best.ts ? cur : best), null);
 
+            // Paid buyer campaigns take priority over house ads: round-robin a
+            // campaign eligible for this guild (respects the buyer's per-server
+            // opt-outs, the self-ad rule and the purchased-join cap). Falls
+            // back to the house ad above when there's no eligible campaign.
+            if (!adsOff) {
+                try {
+                    const pick = campaigns.pickForGuild(guild.id, verified);
+                    if (pick) latest = { text: applyTemplate(guild.id, pick.invite), ts: Date.now(), raw: pick.invite };
+                } catch (e) { /* never let campaign selection break verification */ }
+            }
+
             // Join-limit: if this creative has a cap and its NET count of
             // verifications (leavers don't count — their verified.json
             // entries are removed by the clawback) has reached it, stop
@@ -1183,3 +1195,6 @@ startJoinCheckSweep(clients);
 // Hub-role reconciliation: grant HUB_ROLE_ID on HUB_GUILD_ID to every user
 // with an active verification, revoke from anyone without one.
 startHubRoleSync(clients);
+
+// Buyer campaigns: activate paid orders and complete finished ones.
+campaigns.startCampaignSweep(clients);

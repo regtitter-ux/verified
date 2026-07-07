@@ -118,21 +118,27 @@ function adminOrigin() { return ADMIN_ORIGIN; }
 function sign(payload) {
     return crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(payload).digest('hex');
 }
-function issueState() {
-    const payload = `${Date.now()}.${crypto.randomBytes(8).toString('hex')}`;
+// State carries the login kind ('admin' | 'buyer') so one OAuth redirect
+// serves both panels.
+function issueState(kind = 'admin') {
+    const payload = `${Date.now()}.${kind}.${crypto.randomBytes(8).toString('hex')}`;
     return `${payload}.${sign(payload)}`;
 }
+// Returns the kind string on success, null otherwise (falsy → treated as
+// invalid by existing boolean callers).
 function verifyState(state) {
-    if (!state) return false;
+    if (!state) return null;
     const s = String(state);
     const i = s.lastIndexOf('.');
-    if (i <= 0) return false;
+    if (i <= 0) return null;
     const payload = s.slice(0, i), mac = s.slice(i + 1);
     const expected = sign(payload);
-    if (expected.length !== mac.length) return false;
-    if (!crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(mac))) return false;
-    const ts = Number(payload.split('.')[0]);
-    return Number.isFinite(ts) && Date.now() - ts < STATE_TTL_MS;
+    if (expected.length !== mac.length) return null;
+    if (!crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(mac))) return null;
+    const parts = payload.split('.');
+    const ts = Number(parts[0]);
+    if (!Number.isFinite(ts) || Date.now() - ts >= STATE_TTL_MS) return null;
+    return parts[1] || 'admin';
 }
 
 // ---------- Session cookies (role-aware) ----------
@@ -166,31 +172,59 @@ function verifySession(token) {
     return { userId, role };
 }
 
-function readSessionCookie(cookieHeader) {
+function readCookie(cookieHeader, name) {
     if (!cookieHeader) return '';
     for (const chunk of String(cookieHeader).split(';')) {
         const [k, ...v] = chunk.trim().split('=');
-        if (k === SESSION_COOKIE) {
+        if (k === name) {
             try { return decodeURIComponent(v.join('=')); } catch { return ''; }
         }
     }
     return '';
 }
+function readSessionCookie(cookieHeader) { return readCookie(cookieHeader, SESSION_COOKIE); }
 
-function sessionCookieHeader(token, { clear = false } = {}) {
+function cookieHeaderFor(name, token, { clear = false } = {}) {
     const parts = [
-        `${SESSION_COOKIE}=${clear ? '' : encodeURIComponent(token)}`,
+        `${name}=${clear ? '' : encodeURIComponent(token)}`,
         'Path=/', 'HttpOnly', 'Secure', 'SameSite=None'
     ];
     if (clear) parts.push('Max-Age=0');
     else parts.push(`Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
     return parts.join('; ');
 }
+function sessionCookieHeader(token, opts) { return cookieHeaderFor(SESSION_COOKIE, token, opts); }
+
+// ---------- Buyer sessions (any Discord user; no role required) ----------
+const BUYER_COOKIE = 'vemoni_buyer';
+function issueBuyerSession(userId) {
+    const expires = Date.now() + SESSION_TTL_MS;
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const payload = `${expires}.${userId}.${nonce}`;
+    return `${payload}.${sign(payload)}`;
+}
+function verifyBuyerSession(token) {
+    if (!enabled() || !token) return null;
+    const s = String(token);
+    const lastDot = s.lastIndexOf('.');
+    if (lastDot <= 0) return null;
+    const payload = s.slice(0, lastDot), mac = s.slice(lastDot + 1);
+    const expected = sign(payload);
+    if (expected.length !== mac.length) return null;
+    if (!crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(mac))) return null;
+    const [expiresStr, userId] = payload.split('.');
+    const expires = Number(expiresStr);
+    if (!Number.isFinite(expires) || expires <= Date.now() || !/^\d{17,20}$/.test(userId || '')) return null;
+    return { userId };
+}
+function readBuyerCookie(cookieHeader) { return readCookie(cookieHeader, BUYER_COOKIE); }
+function buyerCookieHeader(token, opts) { return cookieHeaderFor(BUYER_COOKIE, token, opts); }
 
 module.exports = {
-    SESSION_COOKIE, SESSION_TTL_MS, OWNER_ID,
+    SESSION_COOKIE, BUYER_COOKIE, SESSION_TTL_MS, OWNER_ID,
     enabled, adminOrigin,
     oauthAuthorizeUrl, resolveOauthUser, issueState, verifyState,
     issueSession, verifySession, readSessionCookie, sessionCookieHeader,
+    issueBuyerSession, verifyBuyerSession, readBuyerCookie, buyerCookieHeader,
     roleOf, loadAdmins, saveAdmins
 };

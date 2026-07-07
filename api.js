@@ -16,6 +16,7 @@ const { syncHubMember } = require('./hubrole.js');
 const { logFunds } = require('./fundslog.js');
 const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares } = require('./shares.js');
 const cryptopay = require('./cryptopay.js');
+const campaigns = require('./campaigns.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -39,6 +40,19 @@ async function adForServer(clients, ownerId, serverId) {
     const gidOk = /^\d{17,20}$/.test(String(serverId || ''));
     if (cfg.adsOff) return { adText: null, sponsor: null, invite: null };
     if (gidOk && cfg.serverAdsOff && cfg.serverAdsOff[serverId]) return { adText: null, sponsor: null, invite: null };
+
+    // Paid buyer campaigns take priority (round-robin, respecting opt-outs +
+    // the self-ad rule + the purchased cap). Falls through to house ads.
+    if (gidOk) {
+        try {
+            const pick = campaigns.pickForGuild(serverId);
+            if (pick) {
+                const sponsor = await resolveSponsorPresence(clients, pick.invite).catch(() => null);
+                const codes = extractInviteCodes(pick.invite);
+                return { adText: applyTemplate(serverId, pick.invite), raw: pick.invite, sponsor, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
+            }
+        } catch (e) { /* fall through to house ads */ }
+    }
 
     const settings = loadJSON('settings.json');
     const s = settings[ownerId] || {};
@@ -237,18 +251,26 @@ async function handleAdmin(req, res, path, clients, config) {
         const url = new URL(req.url, 'http://x');
         const code = url.searchParams.get('code');
         const state = url.searchParams.get('state');
-        const back = adminAuth.adminOrigin() + '/admin/';
-        if (!code || !adminAuth.verifyState(state)) {
+        const kind = adminAuth.verifyState(state); // 'admin' | 'buyer' | null
+        const dest = kind === 'buyer' ? '/order/' : '/admin/';
+        const back = adminAuth.adminOrigin() + dest;
+        if (!code || !kind) {
             res.writeHead(302, { Location: back + '?login=denied' });
             return res.end();
         }
         let uid = null;
         try { uid = await adminAuth.resolveOauthUser(code); } catch { uid = null; }
-        const role = uid ? adminAuth.roleOf(uid) : null;
-        if (!role) {
-            res.writeHead(302, { Location: back + '?login=denied' });
+        if (!uid) { res.writeHead(302, { Location: back + '?login=denied' }); return res.end(); }
+
+        // Buyers: any Discord user may log in to the order panel.
+        if (kind === 'buyer') {
+            const token = adminAuth.issueBuyerSession(uid);
+            res.writeHead(302, { Location: back, 'Set-Cookie': adminAuth.buyerCookieHeader(token) });
             return res.end();
         }
+        // Admins: must be owner or an assigned admin.
+        const role = adminAuth.roleOf(uid);
+        if (!role) { res.writeHead(302, { Location: back + '?login=denied' }); return res.end(); }
         const token = adminAuth.issueSession(uid, role);
         res.writeHead(302, { Location: back, 'Set-Cookie': adminAuth.sessionCookieHeader(token) });
         return res.end();
@@ -946,6 +968,139 @@ function getKey(req) {
     return (req.headers['x-api-key'] || '').trim();
 }
 
+// ---------- Buyer order panel ----------
+// Self-serve ad buying: Discord login, create an order, pay a CryptoBot
+// invoice, then a dashboard with live stats and per-server controls.
+async function handleBuyer(req, res, path, clients, config) {
+    const cors = corsHeaders(req);
+    if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
+    if (!adminAuth.enabled()) return send(res, 503, { error: 'auth not configured' }, cors);
+
+    // OAuth start (top-level nav).
+    if (path === '/order/oauth/login' && req.method === 'GET') {
+        res.writeHead(302, { Location: adminAuth.oauthAuthorizeUrl(adminAuth.issueState('buyer')) });
+        return res.end();
+    }
+    if (path === '/order/logout' && req.method === 'POST') {
+        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': adminAuth.buyerCookieHeader('', { clear: true }) });
+    }
+    if (path === '/order/whoami' && req.method === 'GET') {
+        const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+        return send(res, 200, sess ? { authed: true, userId: sess.userId } : { authed: false }, cors);
+    }
+
+    const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+    if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
+    const buyerId = sess.userId;
+
+    if (path === '/order/config' && req.method === 'GET') {
+        return send(res, 200, {
+            pricePer100: campaigns.PRICE_PER_100,
+            minJoins: campaigns.MIN_JOINS,
+            cryptoEnabled: cryptopay.enabled()
+        }, cors);
+    }
+
+    // Create an order → CryptoBot invoice. Body: { invite, joins }.
+    if (path === '/order/create' && req.method === 'POST') {
+        if (!cryptopay.enabled()) return send(res, 503, { error: 'Оплата временно недоступна' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const codes = extractInviteCodes(String(body?.invite || ''));
+        if (!codes.length) return send(res, 400, { error: 'Укажите корректную ссылку-приглашение Discord' }, cors);
+        const joins = Math.floor(Number(body?.joins));
+        if (!Number.isFinite(joins) || joins < campaigns.MIN_JOINS) {
+            return send(res, 400, { error: `Минимум ${campaigns.MIN_JOINS} заходов` }, cors);
+        }
+        // Resolve the invite → guild id + name (works without a bot on it).
+        let inv = null;
+        for (const c of clients) { inv = await c.fetchInvite(codes[0]).catch(() => null); if (inv) break; }
+        const sponsorGuildId = inv?.guild?.id || null;
+        if (!sponsorGuildId) return send(res, 400, { error: 'Не удалось прочитать приглашение — проверьте ссылку' }, cors);
+
+        const price = campaigns.priceFor(joins);
+        let invoice = null;
+        try { invoice = await cryptopay.createUsdtInvoice(price, { description: `Реклама: ${joins} заходов на сервер ${inv.guild.name || sponsorGuildId}`.slice(0, 1024) }); }
+        catch (e) { return send(res, 502, { error: `Не удалось создать счёт (${e.message})` }, cors); }
+        const invoiceUrl = invoice.bot_invoice_url || invoice.mini_app_invoice_url || invoice.web_app_invoice_url || invoice.pay_url;
+
+        const camps = campaigns.loadCampaigns();
+        const id = campaigns.newId();
+        camps[id] = {
+            id, buyerId,
+            invite: `https://discord.gg/${codes[0]}`,
+            sponsorGuildId, serverName: inv.guild?.name || null,
+            purchased: joins, price,
+            status: 'pending_payment',
+            invoiceId: invoice.invoice_id, invoiceUrl,
+            disabledGuilds: [], paused: false,
+            createdAt: Date.now(), paidAt: 0, completedAt: 0
+        };
+        campaigns.saveCampaigns(camps);
+        return send(res, 200, { ok: true, invoiceUrl, price, campaign: campaigns.publicView(camps[id]) }, cors);
+    }
+
+    // My campaigns (reconciles pending payments first so a just-paid order flips to active).
+    if (path === '/order/campaigns' && req.method === 'GET') {
+        await campaigns.reconcile(clients).catch(() => null);
+        const camps = campaigns.loadCampaigns();
+        const verified = loadJSON('verified.json', []);
+        const mine = Object.values(camps).filter((c) => c.buyerId === buyerId)
+            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+            .map((c) => campaigns.publicView(c, verified));
+        return send(res, 200, { campaigns: mine }, cors);
+    }
+
+    // Per-server delivery breakdown for one campaign.
+    if (path.startsWith('/order/campaigns/') && path.endsWith('/servers') && req.method === 'GET') {
+        const id = path.slice('/order/campaigns/'.length, -('/servers'.length));
+        const camps = campaigns.loadCampaigns();
+        const c = camps[id];
+        if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
+        const key = campaigns.campaignAdKey(c);
+        const verified = loadJSON('verified.json', []);
+        const perGuild = {};
+        for (const u of Array.isArray(verified) ? verified : []) {
+            if (u.adKey !== key || (c.paidAt && u.timestamp < c.paidAt)) continue;
+            (perGuild[u.guildId] ||= new Set()).add(u.id);
+        }
+        const servers = Object.entries(perGuild)
+            .map(([gid, set]) => ({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), count: set.size, disabled: (c.disabledGuilds || []).includes(gid) }))
+            .sort((a, b) => b.count - a.count);
+        return send(res, 200, { servers }, cors);
+    }
+
+    // Pause / resume a campaign.
+    if (path.startsWith('/order/campaigns/') && path.endsWith('/pause') && req.method === 'POST') {
+        const id = path.slice('/order/campaigns/'.length, -('/pause'.length));
+        const camps = campaigns.loadCampaigns();
+        const c = camps[id];
+        if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
+        const body = await readBody(req);
+        c.paused = Boolean(body?.paused);
+        campaigns.saveCampaigns(camps);
+        return send(res, 200, { ok: true, paused: c.paused }, cors);
+    }
+
+    // Toggle a server on/off for this campaign.
+    if (path.startsWith('/order/campaigns/') && path.endsWith('/server') && req.method === 'PUT') {
+        const id = path.slice('/order/campaigns/'.length, -('/server'.length));
+        const camps = campaigns.loadCampaigns();
+        const c = camps[id];
+        if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
+        const body = await readBody(req);
+        const gid = String(body?.gid || '');
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        if (!Array.isArray(c.disabledGuilds)) c.disabledGuilds = [];
+        if (body?.disabled) { if (!c.disabledGuilds.includes(gid)) c.disabledGuilds.push(gid); }
+        else c.disabledGuilds = c.disabledGuilds.filter((x) => x !== gid);
+        campaigns.saveCampaigns(camps);
+        return send(res, 200, { ok: true, disabledGuilds: c.disabledGuilds }, cors);
+    }
+
+    return send(res, 404, { error: 'unknown endpoint' }, cors);
+}
+
 function startApiServer(clients, config) {
     const port = Number(process.env.API_PORT || process.env.PORT || 8080);
 
@@ -963,6 +1118,11 @@ function startApiServer(clients, config) {
             // already returned and become an unhandled rejection.
             if (p.startsWith('/admin/') || p === '/admin') {
                 return await handleAdmin(req, res, p, clients, config);
+            }
+
+            // Buyer order panel (Discord-OAuth, CORS-scoped to ADMIN_ORIGIN).
+            if (p.startsWith('/order/')) {
+                return await handleBuyer(req, res, p, clients, config);
             }
 
             if (!p.startsWith('/api/')) return send(res, 404, { error: 'Not found' });
