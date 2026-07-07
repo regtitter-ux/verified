@@ -123,8 +123,41 @@ async function finalizeLeavers(clients, leaverIds) {
     if (!Array.isArray(verified)) verified = [];
     let changed = false, verifiedChanged = false;
 
+    // Owner opt-out (per sponsor server): once that server's ad campaign has
+    // completed, the owner can choose NOT to claw back when a member later
+    // leaves — the join is treated as final (money, granted role, and the
+    // verification record all stay). Controlled from the admin Statistics
+    // panel and gated on the campaign actually being complete.
+    const cfg = loadJSON('siteconfig.json', {});
+    const clawOff = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
+    const camps = loadJSON('campaigns.json', {});
+    const completeCache = new Map();
+    const campaignComplete = (gid) => {
+        if (completeCache.has(gid)) return completeCache.get(gid);
+        let anyComplete = false, anyActive = false;
+        for (const c of Object.values(camps && typeof camps === 'object' ? camps : {})) {
+            if (!c || c.sponsorGuildId !== gid) continue;
+            if (c.status === 'complete') anyComplete = true;
+            if (c.status === 'active' || c.status === 'pending_payment') anyActive = true;
+        }
+        const done = anyComplete && !anyActive;
+        completeCache.set(gid, done);
+        return done;
+    };
+
     for (const rec of Array.isArray(list) ? list : []) {
         if (rec.status !== 'joined' || !idSet.has(rec.id)) continue;
+
+        // Post-completion clawback opt-out: leave the payout, role and
+        // verification intact and finalize the record as 'settled' so no
+        // sweep retries it.
+        if (clawOff[rec.guildId] && campaignComplete(rec.guildId)) {
+            rec.status = 'settled';
+            rec.settledAt = Date.now();
+            changed = true;
+            console.log(`[LEAVE] clawback skipped (campaign complete, owner opt-out): sponsor=${rec.guildId} user=${rec.userId}`);
+            continue;
+        }
 
         // Reverse the payout (balance may go negative, like manual edits).
         // The portion that pushes the balance below zero is money already paid out

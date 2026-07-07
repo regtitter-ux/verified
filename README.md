@@ -134,7 +134,7 @@ apikeys.json     partner API keys (opaque, hashed reference to the userId)
 adtemplates.json global/per-server ad templates ({link} placeholders)
 adcreatives.json { adKey: {text, firstSeenAt, lastSeenAt} } for per-creative stats
 joinlinks.json   pending / joined / left ledger for join-check clawback
-siteconfig.json  admin-panel state — adsOff kran + serverAdsOff + TOTP replay marker
+siteconfig.json  admin-panel state — adsOff kran + serverAdsOff + clawbackOffAfterComplete + TOTP replay marker
 hubroleusers.json known-tracked members on the hub guild
 serverreferrers.json anti-twink lock: one referrer per server
 fundslog.json    (optional) local mirror of the audit-log channel

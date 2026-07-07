@@ -1148,7 +1148,7 @@ const startBot = (token) => {
             if (sponsor) {
                 const links = loadJSON('joinlinks.json', []);
                 isDupJoin = (Array.isArray(links) ? links : []).some(
-                    (r) => r && r.status === 'joined' && r.userId === user.id && r.guildId === sponsor.guildId
+                    (r) => r && (r.status === 'joined' || r.status === 'settled') && r.userId === user.id && r.guildId === sponsor.guildId
                 );
             }
 

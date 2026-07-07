@@ -335,6 +335,19 @@ async function handleAdmin(req, res, path, clients, config) {
         for (const u of entries) if (u.noAd) (noAdByGuild[u.guildId] ||= []).push(u);
         const ZERO = { hour: 0, day: 0, week: 0, month: 0, total: 0 };
 
+        // Per sponsor server: is its ad campaign complete (≥1 complete, none
+        // still active/awaiting-payment)? Drives the owner-only "keep payouts
+        // after completion" control in the Statistics table.
+        const campsAll = campaigns.loadCampaigns();
+        const complSet = new Set(), activeSet = new Set();
+        for (const c of Object.values(campsAll && typeof campsAll === 'object' ? campsAll : {})) {
+            if (!c || !c.sponsorGuildId) continue;
+            if (c.status === 'complete') complSet.add(c.sponsorGuildId);
+            if (c.status === 'active' || c.status === 'pending_payment') activeSet.add(c.sponsorGuildId);
+        }
+        const campaignCompleteOf = (gid) => complSet.has(gid) && !activeSet.has(gid);
+        const clawOffCfg = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
+
         const grouped = {};
         for (const u of entries) (grouped[u.guildId] ||= []).push(u);
         const perGuild = Object.entries(grouped).map(([gid, list]) => {
@@ -342,7 +355,7 @@ async function handleAdmin(req, res, path, clients, config) {
             const lw = leftWinOf(leftByGuild[gid] || []);
             const gross = { hour: net.hour + lw.hour, day: net.day + lw.day, week: net.week + lw.week, month: net.month + lw.month, total: net.total + lw.total };
             const noAd = noAdByGuild[gid] ? verifStats(noAdByGuild[gid]) : { ...ZERO };
-            return { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ...net, gross, noAd };
+            return { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ...net, gross, noAd, campaignComplete: campaignCompleteOf(gid), clawbackOff: Boolean(clawOffCfg[gid]) };
         });
 
         // A server with a per-server ad or per-server ads-off flag but no
@@ -354,7 +367,7 @@ async function handleAdmin(req, res, path, clients, config) {
         for (const gid of [...adGids, ...offGids]) {
             // Only surface a management row for a guild a bot is still on.
             if (!knownGids.has(gid) && activeGuildIds.has(gid)) {
-                perGuild.push({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0, gross: leftWinOf(leftByGuild[gid] || []), noAd: { ...ZERO } });
+                perGuild.push({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0, gross: leftWinOf(leftByGuild[gid] || []), noAd: { ...ZERO }, campaignComplete: campaignCompleteOf(gid), clawbackOff: Boolean(clawOffCfg[gid]) });
                 knownGids.add(gid);
             }
         }
@@ -377,8 +390,10 @@ async function handleAdmin(req, res, path, clients, config) {
         // ---- Shares (доли) ----
         // Service profit per confirmed join = what we charge (REVENUE_PER_JOIN)
         // minus what the partner was actually paid (joinlinks amount). Only
-        // 'joined' records count — leavers were clawed back and don't sell.
-        const joinedRecs = (Array.isArray(joinlinksRaw) ? joinlinksRaw : []).filter((r) => r && r.status === 'joined');
+        // 'joined' (still-standing) and 'settled' (kept after a post-completion
+        // leave, money not clawed back) records count — those joins were sold.
+        // Clawed-back leavers ('left') don't sell.
+        const joinedRecs = (Array.isArray(joinlinksRaw) ? joinlinksRaw : []).filter((r) => r && (r.status === 'joined' || r.status === 'settled'));
         const pWin = { day: 0, week: 0, month: 0, total: 0 }; // net profit
         const rWin = { day: 0, week: 0, month: 0, total: 0 }; // revenue from joins
         const cWin = { day: 0, week: 0, month: 0, total: 0 }; // partner payouts
@@ -534,6 +549,7 @@ async function handleAdmin(req, res, path, clients, config) {
             adsOff: Boolean(cfg.adsOff),
             adsOffAt: cfg.adsOffAt || 0,
             serverAdsOff: (cfg.serverAdsOff && typeof cfg.serverAdsOff === 'object') ? cfg.serverAdsOff : {},
+            clawbackOffAfterComplete: clawOffCfg,
             templates: {
                 default: typeof t.default === 'string' ? t.default : '',
                 servers: Object.entries(t.servers || {})
@@ -936,6 +952,25 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, { ok: true, gid, off }, cors);
     }
 
+    // Owner-only: for a sponsor server, toggle whether a member leaving AFTER
+    // that server's ad campaign has completed still claws back the partner
+    // payout. Off (flag set) = keep payouts once the campaign is done.
+    if (path === '/admin/leave-clawback-off' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = body?.gid ? String(body.gid) : '';
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        const off = Boolean(body?.off);
+        const cfg = loadJSON('siteconfig.json', {});
+        if (!cfg.clawbackOffAfterComplete || typeof cfg.clawbackOffAfterComplete !== 'object') cfg.clawbackOffAfterComplete = {};
+        if (off) cfg.clawbackOffAfterComplete[gid] = true;
+        else delete cfg.clawbackOffAfterComplete[gid];
+        cfg.clawbackOffAfterCompleteAt = Date.now();
+        saveJSON('siteconfig.json', cfg);
+        return send(res, 200, { ok: true, gid, off }, cors);
+    }
+
     if (path === '/admin/ads-off' && req.method === 'PUT') {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
@@ -1199,7 +1234,7 @@ function startApiServer(clients, config) {
                 // matter which network server / partner delivered the join.
                 const links = loadJSON('joinlinks.json', []);
                 const already = (Array.isArray(links) ? links : []).some(
-                    (r) => r && r.status === 'joined' && r.guildId === sponsor.guildId && r.userId === memberId
+                    (r) => r && (r.status === 'joined' || r.status === 'settled') && r.guildId === sponsor.guildId && r.userId === memberId
                 );
                 if (already) return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
 
