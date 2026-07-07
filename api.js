@@ -310,6 +310,11 @@ async function handleAdmin(req, res, path, clients, config) {
         // drops synthetic 'api' guildIds, which are never in the cache).
         const entries = (Array.isArray(verified) ? verified : [])
             .filter((u) => u.roleId && activeGuildIds.has(u.guildId));
+        // "С рекламой" = only PAID verifications: an entry carries an adKey
+        // exactly when an ad was shown and it wasn't a duplicate join (i.e. a
+        // payout accrued). Entries tagged noAd (no ad shown / duplicate) belong
+        // to the "Без рекламы" side and must not inflate the with-ads numbers.
+        const paidEntries = entries.filter((u) => u.adKey);
         const now = Date.now();
 
         // Reversed join-check verifications (user left the sponsor) are
@@ -345,10 +350,14 @@ async function handleAdmin(req, res, path, clients, config) {
         const adShowingOf = (gid) => (Date.now() - (Number(shows?.[gid]) || 0)) <= SHOW_STALE_MS;
         const clawOffCfg = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
 
-        const grouped = {};
-        for (const u of entries) (grouped[u.guildId] ||= []).push(u);
-        const perGuild = Object.entries(grouped).map(([gid, list]) => {
-            const net = verifStats(list);
+        // Group PAID entries for the with-ads numbers; keep a row for guilds
+        // that only have organic (no-ad) activity so they still show in the
+        // "Без рекламы" mode.
+        const paidByGuild = {};
+        for (const u of paidEntries) (paidByGuild[u.guildId] ||= []).push(u);
+        const statGuildIds = new Set([...Object.keys(paidByGuild), ...Object.keys(noAdByGuild)]);
+        const perGuild = [...statGuildIds].map((gid) => {
+            const net = verifStats(paidByGuild[gid] || []);
             const lw = leftWinOf(leftByGuild[gid] || []);
             const gross = { hour: net.hour + lw.hour, day: net.day + lw.day, week: net.week + lw.week, month: net.month + lw.month, total: net.total + lw.total };
             const noAd = noAdByGuild[gid] ? verifStats(noAdByGuild[gid]) : { ...ZERO };
@@ -530,9 +539,9 @@ async function handleAdmin(req, res, path, clients, config) {
             })))
             .sort((a, b) => (b.active - a.active) || (b.total - a.total));
 
-        // Gross vs "stays" for the headline cards — same leftRecs source as
-        // the per-guild table above.
-        const netStats = verifStats(entries);
+        // Gross vs "stays" for the headline cards — paid verifications only,
+        // same leftRecs source as the per-guild table above.
+        const netStats = verifStats(paidEntries);
         const lAll = leftWinOf(leftRecs);
         const grossStats = {
             hour: netStats.hour + lAll.hour,

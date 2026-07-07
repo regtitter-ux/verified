@@ -188,9 +188,14 @@ const startBot = (token) => {
             }
         }
 
-        // Verification stats for this user's own /v3 cards, grouped by server
+        // Verification stats for this user's own /v3 cards, grouped by server.
+        // Only PAID verifications are counted: an entry carries an adKey exactly
+        // when an ad was shown and it wasn't a duplicate join — i.e. when a
+        // payout was accrued (join $5–7/100 or click $1/100). No-ad and
+        // duplicate verifications are tagged noAd and never paid, so they're
+        // excluded here to keep the counter in step with the balance.
         const verified = loadJSON('verified.json', []);
-        const mine = (Array.isArray(verified) ? verified : []).filter(u => u.creatorId === userId && u.roleId);
+        const mine = (Array.isArray(verified) ? verified : []).filter(u => u.creatorId === userId && u.roleId && u.adKey);
         if (mine.length) {
             const now = Date.now();
             const win = (list) => ({
