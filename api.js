@@ -525,11 +525,16 @@ async function handleAdmin(req, res, path, clients, config) {
                 const joinMode = active
                     ? Boolean(await resolveSponsorPresence(clients, text).catch(() => null))
                     : false;
+                // Does the ad contain a Discord invite at all? An on-air ad with
+                // an invite but no join-check means the invite points to a
+                // server no network bot is on → paid as plain clicks, no
+                // per-join verification. That's what the top banner warns about.
+                const hasInvite = extractInviteCodes(text).length > 0;
                 const reset = Number(limits[key]?.resetAt) || 0;
                 // The limit counter + "Впервые" measure from the last reset.
                 const st = reset ? statsSinceReset(key) : { count: c.total, firstAt: creatives[key]?.firstSeenAt || 0 };
                 return {
-                    key, text, active, joinMode,
+                    key, text, active, joinMode, hasInvite,
                     limit: Number(limits[key]?.limit) || 0,
                     limitCount: st.count,
                     resetAt: reset,
@@ -542,6 +547,14 @@ async function handleAdmin(req, res, path, clients, config) {
                 };
             })))
             .sort((a, b) => (b.active - a.active) || (b.total - a.total));
+
+        // On-air ads whose invite points to a server no network bot is on:
+        // there's no join-check, so they pay as plain clicks ($1/100) instead
+        // of confirmed joins ($5–7/100). Surface them for a top-of-panel
+        // warning so the owner can add the bot (or fix the link).
+        const noJoinCheckAds = adCreatives
+            .filter((c) => c.active && c.hasInvite && !c.joinMode)
+            .map((c) => ({ key: c.key, text: c.text, guilds: c.guilds }));
 
         // Gross vs "stays" for the headline cards — paid verifications only,
         // same leftRecs source as the per-guild table above.
@@ -595,7 +608,8 @@ async function handleAdmin(req, res, path, clients, config) {
             },
             shares: sharesData,
             cryptoBalance: await cryptoUsdtBalance(),
-            adCreatives
+            adCreatives,
+            noJoinCheckAds
         }, cors);
     }
 
