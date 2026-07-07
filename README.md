@@ -133,7 +133,8 @@ verified.json    every verification (id, guildId, roleId, creatorId, timestamp, 
 apikeys.json     partner API keys (opaque, hashed reference to the userId)
 adtemplates.json global/per-server ad templates ({link} placeholders)
 adcreatives.json { adKey: {text, firstSeenAt, lastSeenAt} } for per-creative stats
-joinlinks.json   pending / joined / left ledger for join-check clawback
+joinlinks.json   pending / joined / left / settled ledger for join-check clawback
+sponsorshow.json { sponsorGuildId: lastShownTs } — last time each sponsor's ad was displayed (gates the leave-clawback opt-out)
 siteconfig.json  admin-panel state — adsOff kran + serverAdsOff + clawbackOffAfterComplete + TOTP replay marker
 hubroleusers.json known-tracked members on the hub guild
 serverreferrers.json anti-twink lock: one referrer per server

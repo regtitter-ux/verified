@@ -16,7 +16,6 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { logFunds } = require('./fundslog.js');
 const { boostedRate, REFERRAL_RATE } = require('./referral.js');
 const { syncHubMember } = require('./hubrole.js');
-const { joinerCount } = require('./adcreative.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -109,46 +108,16 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId) 
     return perJoin;
 }
 
-// Has the ad for a sponsor server "completed"? Two sources:
-//   • a bought campaign whose purchased joins were delivered (status complete),
-//     with none of that server's campaigns still active / awaiting payment;
-//   • a house ad (global or per-server) that uses a join-limit and has reached
-//     it, with no other limited house ad for that server still under its cap.
-// An active paid campaign, or a limited house ad still delivering, means the ad
-// is NOT complete (so the leave-clawback keeps running — anti-fraud). House ads
-// without a join-limit never "complete" (they run indefinitely).
-async function adCompleteForGuild(clients, gid) {
-    const camps = loadJSON('campaigns.json', {});
-    let campComplete = false, campActive = false;
-    for (const c of Object.values(camps && typeof camps === 'object' ? camps : {})) {
-        if (!c || c.sponsorGuildId !== gid) continue;
-        if (c.status === 'complete') campComplete = true;
-        if (c.status === 'active' || c.status === 'pending_payment') campActive = true;
-    }
-    if (campActive) return false; // a paid campaign is still delivering
-
-    const limits = loadJSON('adlimits.json', {});
-    const creatives = loadJSON('adcreatives.json', {});
-    const verified = loadJSON('verified.json', []);
-    const resolver = (Array.isArray(clients) ? clients : [])[0];
-    let houseComplete = false, houseRunning = false;
-    if (resolver) {
-        for (const [key, lim] of Object.entries(limits && typeof limits === 'object' ? limits : {})) {
-            const limit = Number(lim?.limit) || 0;
-            if (limit <= 0) continue;               // only limited ads can complete
-            const text = creatives[key]?.text;
-            if (!text) continue;
-            let points = false;
-            for (const code of extractInviteCodes(text)) {
-                if ((await inviteGuildId(resolver, code)) === gid) { points = true; break; }
-            }
-            if (!points) continue;
-            const count = joinerCount(verified, key, Number(lim.resetAt) || 0);
-            if (count >= limit) houseComplete = true; else houseRunning = true;
-        }
-    }
-    if (houseRunning) return false; // a limited house ad for this server is still delivering
-    return campComplete || houseComplete;
+// Is the sponsor server `gid` being advertised on the network right now?
+// index.js stamps sponsorshow.json every time a join-check ad for a sponsor is
+// actually displayed to a user. If the last display is older than the stale
+// window, the ad is considered "not showing" — whatever the reason (campaign
+// delivered, house-ad limit hit, kran closed, ad removed, opted out on every
+// partner server). We treat that as the ad being off.
+const SHOW_STALE_MS = Number(process.env.SPONSOR_SHOW_STALE_MS) || 30 * 60 * 1000;
+function sponsorAdShowing(gid, shows) {
+    const map = shows || loadJSON('sponsorshow.json', {});
+    return (Date.now() - (Number(map?.[gid]) || 0)) <= SHOW_STALE_MS;
 }
 
 // Apply the leave-clawback to the given set of joinlink record IDs: reverse the
@@ -166,33 +135,28 @@ async function finalizeLeavers(clients, leaverIds) {
     if (!Array.isArray(verified)) verified = [];
     let changed = false, verifiedChanged = false;
 
-    // Owner opt-out (per sponsor server): once that server's ad has completed
-    // (bought campaign delivered OR limited house ad hit its cap), the owner
-    // can choose NOT to claw back when a member later leaves — the join is
-    // treated as final (money, granted role, and the verification record all
-    // stay). Controlled from the admin Statistics panel; gated on the ad
-    // actually being complete so it can't be abused mid-delivery.
+    // Owner opt-out (per sponsor server): while that server's ad is NOT being
+    // shown on the network, a member leaving does NOT claw back the payout —
+    // the join is treated as final (money, granted role and verification all
+    // stay). Members who leave during a showing period are still clawed back
+    // as usual, and if the ad resumes, clawbacks resume — but the ones settled
+    // while the ad was off are never revisited. Controlled from the admin
+    // Statistics panel.
     const cfg = loadJSON('siteconfig.json', {});
     const clawOff = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
-    const completeCache = new Map();
-    const adComplete = async (gid) => {
-        if (completeCache.has(gid)) return completeCache.get(gid);
-        const done = await adCompleteForGuild(clients, gid).catch(() => false);
-        completeCache.set(gid, done);
-        return done;
-    };
+    const shows = loadJSON('sponsorshow.json', {});
 
     for (const rec of Array.isArray(list) ? list : []) {
         if (rec.status !== 'joined' || !idSet.has(rec.id)) continue;
 
-        // Post-completion clawback opt-out: leave the payout, role and
-        // verification intact and finalize the record as 'settled' so no
-        // sweep retries it.
-        if (clawOff[rec.guildId] && await adComplete(rec.guildId)) {
+        // Clawback opt-out while the sponsor's ad is off: keep the payout, role
+        // and verification, and finalize the record as 'settled' so no sweep
+        // ever retries it (even after the ad resumes).
+        if (clawOff[rec.guildId] && !sponsorAdShowing(rec.guildId, shows)) {
             rec.status = 'settled';
             rec.settledAt = Date.now();
             changed = true;
-            console.log(`[LEAVE] clawback skipped (ad complete, owner opt-out): sponsor=${rec.guildId} user=${rec.userId}`);
+            console.log(`[LEAVE] clawback skipped (ad not showing, owner opt-out): sponsor=${rec.guildId} user=${rec.userId}`);
             continue;
         }
 

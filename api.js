@@ -335,16 +335,14 @@ async function handleAdmin(req, res, path, clients, config) {
         for (const u of entries) if (u.noAd) (noAdByGuild[u.guildId] ||= []).push(u);
         const ZERO = { hour: 0, day: 0, week: 0, month: 0, total: 0 };
 
-        // Per sponsor server: is its ad campaign complete (≥1 complete, none
-        // still active/awaiting-payment)? Drives the owner-only "keep payouts
-        // after completion" control in the Statistics table.
-        const campsAll = campaigns.loadCampaigns();
-        const complSet = new Set(), activeSet = new Set();
-        for (const c of Object.values(campsAll && typeof campsAll === 'object' ? campsAll : {})) {
-            if (!c || !c.sponsorGuildId) continue;
-            if (c.status === 'complete') complSet.add(c.sponsorGuildId);
-            if (c.status === 'active' || c.status === 'pending_payment') activeSet.add(c.sponsorGuildId);
-        }
+        // Per sponsor server: is its ad being shown on the network right now?
+        // We stamp sponsorshow.json each time a join-check ad for a sponsor is
+        // actually displayed (index.js). "Not showing" = no display for a
+        // while — that's when the owner's clawback opt-out applies. Drives the
+        // control in the Statistics table.
+        const shows = loadJSON('sponsorshow.json', {});
+        const SHOW_STALE_MS = Number(process.env.SPONSOR_SHOW_STALE_MS) || 30 * 60 * 1000;
+        const adShowingOf = (gid) => (Date.now() - (Number(shows?.[gid]) || 0)) <= SHOW_STALE_MS;
         const clawOffCfg = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
 
         const grouped = {};
@@ -354,7 +352,7 @@ async function handleAdmin(req, res, path, clients, config) {
             const lw = leftWinOf(leftByGuild[gid] || []);
             const gross = { hour: net.hour + lw.hour, day: net.day + lw.day, week: net.week + lw.week, month: net.month + lw.month, total: net.total + lw.total };
             const noAd = noAdByGuild[gid] ? verifStats(noAdByGuild[gid]) : { ...ZERO };
-            return { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ...net, gross, noAd, clawbackOff: Boolean(clawOffCfg[gid]) };
+            return { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ...net, gross, noAd, clawbackOff: Boolean(clawOffCfg[gid]), adShowing: adShowingOf(gid) };
         });
 
         // A server with a per-server ad or per-server ads-off flag but no
@@ -366,7 +364,7 @@ async function handleAdmin(req, res, path, clients, config) {
         for (const gid of [...adGids, ...offGids]) {
             // Only surface a management row for a guild a bot is still on.
             if (!knownGids.has(gid) && activeGuildIds.has(gid)) {
-                perGuild.push({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0, gross: leftWinOf(leftByGuild[gid] || []), noAd: { ...ZERO }, clawbackOff: Boolean(clawOffCfg[gid]) });
+                perGuild.push({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hour: 0, day: 0, week: 0, month: 0, total: 0, gross: leftWinOf(leftByGuild[gid] || []), noAd: { ...ZERO }, clawbackOff: Boolean(clawOffCfg[gid]), adShowing: adShowingOf(gid) });
                 knownGids.add(gid);
             }
         }
@@ -510,16 +508,15 @@ async function handleAdmin(req, res, path, clients, config) {
                 const active = Boolean(activeText[key]);
                 // Join-check mode = the ad's invite leads to a guild one of
                 // our bots sits on. Only resolved for on-air creatives (the
-                // invite cache in joincheck.js makes repeat polls cheap). Also
-                // remember which sponsor guild it points at, to drive the
-                // per-server "ad completed" flag for house ads.
-                const sp = active ? await resolveSponsorPresence(clients, text).catch(() => null) : null;
-                const joinMode = Boolean(sp);
+                // invite cache in joincheck.js makes repeat polls cheap).
+                const joinMode = active
+                    ? Boolean(await resolveSponsorPresence(clients, text).catch(() => null))
+                    : false;
                 const reset = Number(limits[key]?.resetAt) || 0;
                 // The limit counter + "Впервые" measure from the last reset.
                 const st = reset ? statsSinceReset(key) : { count: c.total, firstAt: creatives[key]?.firstSeenAt || 0 };
                 return {
-                    key, text, active, joinMode, sponsorGid: sp?.guildId || null,
+                    key, text, active, joinMode,
                     limit: Number(limits[key]?.limit) || 0,
                     limitCount: st.count,
                     resetAt: reset,
@@ -532,25 +529,6 @@ async function handleAdmin(req, res, path, clients, config) {
                 };
             })))
             .sort((a, b) => (b.active - a.active) || (b.total - a.total));
-
-        // Per-server "ad completed" flag for the owner clawback control:
-        //   • bought campaign delivered (complete, none still active), OR
-        //   • a limited house ad pointing at the server hit its cap, with no
-        //     limited house ad for it still under the cap.
-        // An active paid campaign, or a limited house ad still delivering,
-        // keeps the server "not complete". Mirrors adCompleteForGuild() in
-        // joincheck.js, reusing the sponsor guilds resolved just above.
-        const houseComplete = new Set(), houseRunning = new Set();
-        for (const cr of adCreatives) {
-            if (!cr.sponsorGid || !(cr.limit > 0)) continue;
-            if (cr.limitCount >= cr.limit) houseComplete.add(cr.sponsorGid);
-            else houseRunning.add(cr.sponsorGid);
-        }
-        const adCompleteOf = (gid) => {
-            if (activeSet.has(gid) || houseRunning.has(gid)) return false;
-            return complSet.has(gid) || houseComplete.has(gid);
-        };
-        for (const g of perGuild) g.adComplete = adCompleteOf(g.gid);
 
         // Gross vs "stays" for the headline cards — same leftRecs source as
         // the per-guild table above.

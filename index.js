@@ -1103,6 +1103,16 @@ const startBot = (token) => {
             if (latest) {
                 const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
                 if (sp && sp.guildId === guild.id) latest = null;
+                else if (sp) {
+                    // The sponsor's ad is being shown right now. Stamp it so the
+                    // leave-clawback opt-out can tell "ad live" from "ad off"
+                    // (see joincheck.js). Cheap, best-effort.
+                    try {
+                        const shows = loadJSON('sponsorshow.json', {});
+                        shows[sp.guildId] = Date.now();
+                        saveJSON('sponsorshow.json', shows);
+                    } catch { /* stamping must never break verification */ }
+                }
             }
 
             const responseText = latest?.text || 'Great, now click again to open access to the server!';
