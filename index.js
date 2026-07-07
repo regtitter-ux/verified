@@ -1209,7 +1209,10 @@ const startBot = (token) => {
                 }
             }
 
-            const responseText = latest?.text || 'Great, now click again to open access to the server!';
+            // No ad to show → send the owner-configured "заглушка" (fallback),
+            // or a built-in default. Verification still proceeds ad-free.
+            const responseText = latest?.text
+                || ((cfg.fallbackText && String(cfg.fallbackText).trim()) || 'Great, now click again to open access to the server!');
 
             // Only clicks that actually display an ad qualify for balance accrual.
             pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '' });

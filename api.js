@@ -610,6 +610,7 @@ async function handleAdmin(req, res, path, clients, config) {
             adsOffAt: cfg.adsOffAt || 0,
             serverAdsOff: (cfg.serverAdsOff && typeof cfg.serverAdsOff === 'object') ? cfg.serverAdsOff : {},
             clawbackOffAfterComplete: clawOffCfg,
+            fallbackText: typeof cfg.fallbackText === 'string' ? cfg.fallbackText : '',
             templates: {
                 default: typeof t.default === 'string' ? t.default : '',
                 servers: Object.entries(t.servers || {})
@@ -1062,6 +1063,17 @@ async function handleAdmin(req, res, path, clients, config) {
         cfg.adsOffAt = Date.now();
         saveJSON('siteconfig.json', cfg);
         return send(res, 200, { ok: true, adsOff: off }, cors);
+    }
+
+    // The "заглушка" — text shown instead of an ad when there's none.
+    if (path === '/admin/fallback' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const cfg = loadJSON('siteconfig.json', {});
+        cfg.fallbackText = String(body?.text ?? '').slice(0, 2000);
+        cfg.fallbackTextAt = Date.now();
+        saveJSON('siteconfig.json', cfg);
+        return send(res, 200, { ok: true }, cors);
     }
 
     // Owner-only: manage the home-page server feed.
