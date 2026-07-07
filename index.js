@@ -41,7 +41,9 @@ const clients = [];
 
 // Читаем токены из переменных окружения Railway
 const config = {
-    tokens: process.env.TOKENS ? process.env.TOKENS.split(',') : [],
+    // Trim each token — a stray space/newline (easy to paste into Railway)
+    // makes login silently fail with an "invalid token" the gateway rejects.
+    tokens: process.env.TOKENS ? process.env.TOKENS.split(',').map((t) => t.trim()).filter(Boolean) : [],
     ownerId: process.env.OWNER_ID || '743913502997086219',
     adminBotId: process.env.ADMIN_BOT_ID || '1514533989434789998',
     prefix: process.env.PREFIX || '!'
@@ -1209,8 +1211,17 @@ const startBot = (token) => {
       }
     });
 
+    const botTag = botId || token.substring(0, 8);
+    console.log(`[LOGIN] connecting ${botTag}… (intents: ${intents.length})`);
+    // Warn if the gateway never reaches READY — makes a hung/rate-limited
+    // login visible instead of a silent "no [ONLINE]".
+    const readyTimer = setTimeout(() => {
+        if (!clients.includes(client)) console.warn(`[LOGIN] ${botTag} still not READY after 45s — gateway hung or rate-limited`);
+    }, 45000);
+    client.once(Events.ClientReady, () => clearTimeout(readyTimer));
     client.login(token).catch(err => {
-        console.error(`[LOGIN ERROR] ${token.substring(0, 10)}...`, err);
+        clearTimeout(readyTimer);
+        console.error(`[LOGIN ERROR] ${botTag}:`, err?.message || err);
     });
 };
 
