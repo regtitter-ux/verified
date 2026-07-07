@@ -51,14 +51,12 @@ function pruneBuckets(earnings, today) {
 async function payShares(clients, partnerAmount, opts = {}) {
     // Back-compat: a bare number in the 3rd slot used to be nowMs.
     if (typeof opts === 'number') opts = { nowMs: opts };
-    // Net profit = sale price − partner payout − acquiring fee − manager
-    // commission. Manager sales are cheaper ($9/100) and cost us a commission,
-    // so both come straight out of profit before it's split by shares. A
-    // non-manager join keeps the defaults (revenue $0.10, commission 0).
+    // Net profit = actual revenue − partner payout − acquiring fee. Manager
+    // sales simply bring less revenue ($9/100 instead of $10/100), so profit
+    // (and the share split) is naturally lower — no separate commission.
     const amt = Number(partnerAmount) || 0;
     const revenue = Number.isFinite(Number(opts.revenuePerJoin)) ? Number(opts.revenuePerJoin) : REVENUE_PER_JOIN;
-    const managerCommission = Number(opts.managerCommission) || 0;
-    const profit = revenue - amt - amt * ACQUIRING_RATE - managerCommission;
+    const profit = revenue - amt - amt * ACQUIRING_RATE;
     if (!(profit > 0)) return; // costs ≥ what we charge → no profit to split
     const now = Number(opts.nowMs) || Date.now();
     const today = dayNumberOf(now);

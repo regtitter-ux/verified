@@ -1270,32 +1270,25 @@ const startBot = (token) => {
             // duplicate joins accrue nothing.
             if (roleId && pending?.adShown && sponsor && !isDupJoin) {
                 const channelId = message.channelId; // channel the verification card lives in
-                // Manager economics: if this join belongs to a sales manager's
-                // campaign, the sale is cheaper ($9/100) and we owe the manager
-                // a commission. House ads / normal buyers keep the $0.10 default.
+                // Manager economics: a sales manager's campaign simply brings
+                // less revenue ($9/100). No commission is paid — the manager
+                // keeps their margin at the deal. House ads / normal buyers keep
+                // the $0.10 default.
                 const camp = pending?.campaignId ? campaigns.loadCampaigns()[pending.campaignId] : null;
                 const econ = managers.joinEconomics(camp, REVENUE_PER_JOIN);
                 // Confirmed member of the sponsor server: pay the join-check rate,
                 // reversible on leave (role + payout), see joincheck.js.
                 const amount = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId,
-                    { revenue: econ.revenue, managerCommission: econ.managerCommission, managerId: econ.managerId });
+                    { revenue: econ.revenue, managerId: econ.managerId });
                 await logFunds(clients, {
                     type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
                     amount, sponsorGuildId: sponsor.guildId,
                     reason: 'Join verified — member joined the sponsor server'
                 });
-                // Pay the sales manager their commission (credited to balance).
-                if (econ.managerId && econ.managerCommission > 0) {
-                    managers.creditCommission(econ.managerId, econ.managerCommission);
-                    await logFunds(clients, {
-                        type: 'credit', creatorId: econ.managerId, userId: user.id, guildId: guild.id, channelId,
-                        amount: econ.managerCommission, reason: 'Manager commission (sale)'
-                    });
-                    await maybeAutoWithdraw(clients, econ.managerId).catch(() => null);
-                }
-                // Split this join's service profit ($ we charge − partner payout
-                // − acquiring − manager commission) across shareholders.
-                await payShares(clients, amount, { revenuePerJoin: econ.revenue, managerCommission: econ.managerCommission }).catch(() => null);
+                // Split this join's service profit (revenue − partner payout −
+                // acquiring) across shareholders — manager sales just use the
+                // lower revenue.
+                await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
                 await maybeAutoWithdraw(clients, creatorId);
             }
         } catch (e) {

@@ -15,6 +15,7 @@ const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes } = req
 const { syncHubMember } = require('./hubrole.js');
 const { logFunds } = require('./fundslog.js');
 const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares } = require('./shares.js');
+const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
@@ -415,18 +416,19 @@ async function handleAdmin(req, res, path, clients, config) {
         const rWin = { day: 0, week: 0, month: 0, total: 0 }; // revenue from joins
         const cWin = { day: 0, week: 0, month: 0, total: 0 }; // partner payouts
         const aWin = { day: 0, week: 0, month: 0, total: 0 }; // acquiring fee on those payouts
-        const mWin = { day: 0, week: 0, month: 0, total: 0 }; // manager commissions
+        const mWin = { day: 0, week: 0, month: 0, total: 0 }; // manager margin (retail − our price)
         for (const r of joinedRecs) {
             const amt = Number(r.amount) || 0;
-            // Per-join revenue and manager commission are stored on the record
-            // for manager sales (cheaper + commission); older/house-ad joins
-            // fall back to the standard $0.10 revenue with no commission.
+            // Per-join revenue is stored on the record for manager sales
+            // ($9/100); older/house-ad joins fall back to the standard $0.10.
+            // The manager's margin = retail minus what we actually charged them
+            // — foregone revenue, shown as a "manager cost" line.
             const rev = Number.isFinite(Number(r.revenue)) ? Number(r.revenue) : REVENUE_PER_JOIN;
-            const mgr = Number(r.managerCommission) || 0;
+            const mgrMargin = Math.max(0, REVENUE_PER_JOIN - rev);
             const acq = amt * ACQUIRING_RATE;
-            const prof = rev - amt - acq - mgr;
+            const prof = rev - amt - acq;
             const wins = [['total', true], ['day', r.ts > now - 86400000], ['week', r.ts > now - 604800000], ['month', r.ts > now - 2592000000]];
-            for (const [k, inWin] of wins) if (inWin) { rWin[k] += rev; cWin[k] += amt; aWin[k] += acq; mWin[k] += mgr; pWin[k] += prof; }
+            for (const [k, inWin] of wins) if (inWin) { rWin[k] += rev; cWin[k] += amt; aWin[k] += acq; mWin[k] += mgrMargin; pWin[k] += prof; }
         }
         const shareCfg = loadShares();
         const shareEarnings = loadJSON('shareearnings.json', {});
@@ -726,11 +728,14 @@ async function handleAdmin(req, res, path, clients, config) {
         const settings = loadJSON('settings.json');
         const verified = loadJSON('verified.json', []);
 
-        // One O(n) pass over verified.json — count per creator.
+        // One O(n) pass over verified.json — count PAID verifications per
+        // creator (adKey set = a join-check join actually paid; no-ad and
+        // duplicate verifications aren't paid, so they don't count).
         const vCount = {};
         for (const u of Array.isArray(verified) ? verified : []) {
-            if (u.roleId && u.creatorId) vCount[u.creatorId] = (vCount[u.creatorId] || 0) + 1;
+            if (u.roleId && u.adKey && u.creatorId) vCount[u.creatorId] = (vCount[u.creatorId] || 0) + 1;
         }
+        const nowTs = Date.now();
 
         let users = Object.keys(settings).map((uid) => {
             const s = settings[uid] || {};
@@ -738,13 +743,23 @@ async function handleAdmin(req, res, path, clients, config) {
             const withdrawnTotal = money(withdrawals
                 .filter((w) => w.status === 'completed')
                 .reduce((sum, w) => sum + (Number(w.amount) || 0), 0));
+            // Join-check rate ($ per 100 joins). While a referral boost is
+            // active it acts as a floor of BOOST_RATE; report the time left.
+            const baseJoin = Number.isFinite(Number(s.joinBid)) ? Number(s.joinBid) : 5;
+            const boosted = boostActive(s);
+            const joinRate = boosted ? Math.max(baseJoin, BOOST_RATE) : baseJoin;
+            const boostLeftMs = boosted ? Math.max(0, BOOST_MS - (nowTs - Number(s.referrerAt || 0))) : 0;
             return {
                 userId: uid,
+                username: userNameOf(clients, uid),
                 balance: money(s.balance),
                 requisites: (s.requisites || '').trim(),
                 hasRequisites: Boolean((s.requisites || '').trim()),
                 bid: getBid(s),
-                joinBid: Number.isFinite(Number(s.joinBid)) ? Number(s.joinBid) : 5,
+                joinBid: baseJoin,
+                joinRate,
+                boosted,
+                boostLeftMs,
                 refBonusAccrued: money(s.refBonusAccrued),
                 autoPayout: Boolean(s.autoPayout),
                 referrer: s.referrer || null,
@@ -772,7 +787,8 @@ async function handleAdmin(req, res, path, clients, config) {
             withdrawn: (u) => u.withdrawnTotal,
             verifications: (u) => u.verifications,
             referrals: (u) => u.referralsCount,
-            bid: (u) => u.bid
+            rate: (u) => u.joinRate,
+            bid: (u) => u.joinRate
         };
         const sortKey = sortMap[sort] ? sort : 'balance';
         users.sort((a, b) => (sortMap[sortKey](a) - sortMap[sortKey](b)) * dir);
@@ -791,7 +807,8 @@ async function handleAdmin(req, res, path, clients, config) {
         if (!s) return send(res, 404, { error: 'user not found' }, cors);
 
         const verified = loadJSON('verified.json', []);
-        const mine = (Array.isArray(verified) ? verified : []).filter((u) => u.creatorId === userId && u.roleId);
+        // Paid verifications only (adKey set), same rule as the list + /bal.
+        const mine = (Array.isArray(verified) ? verified : []).filter((u) => u.creatorId === userId && u.roleId && u.adKey);
         const grouped = {};
         // Same synthetic-gid skip as in /admin/state — no "Unknown Server"
         // rows for partner-API verifications without a real guildId.
@@ -808,12 +825,18 @@ async function handleAdmin(req, res, path, clients, config) {
             .filter((w) => w.status === 'completed')
             .reduce((sum, w) => sum + (Number(w.amount) || 0), 0));
 
+        const baseJoinD = Number.isFinite(Number(s.joinBid)) ? Number(s.joinBid) : 5;
+        const boostedD = boostActive(s);
         return send(res, 200, {
             userId,
+            username: userNameOf(clients, userId),
             balance: money(s.balance),
             requisites: (s.requisites || '').trim(),
             bid: getBid(s),
-            joinBid: Number.isFinite(Number(s.joinBid)) ? Number(s.joinBid) : 5,
+            joinBid: baseJoinD,
+            joinRate: boostedD ? Math.max(baseJoinD, BOOST_RATE) : baseJoinD,
+            boosted: boostedD,
+            boostLeftMs: boostedD ? Math.max(0, BOOST_MS - (Date.now() - Number(s.referrerAt || 0))) : 0,
             refBonusAccrued: money(s.refBonusAccrued),
             autoPayout: Boolean(s.autoPayout),
             referrer: s.referrer || null,
@@ -1313,20 +1336,13 @@ function startApiServer(clients, config) {
                 // tagged with the shown creative's adKey, hub role, audit log,
                 // campaign-complete notice.
                 const adKey = touchCreative(ad.raw);
-                // Manager economics (same as the in-Discord flow).
+                // Manager economics (same as the in-Discord flow): lower revenue
+                // for manager campaigns, no commission paid.
                 const camp = ad.campaignId ? campaigns.loadCampaigns()[ad.campaignId] : null;
                 const econ = managers.joinEconomics(camp, REVENUE_PER_JOIN);
                 const amount = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null,
-                    { revenue: econ.revenue, managerCommission: econ.managerCommission, managerId: econ.managerId });
-                if (econ.managerId && econ.managerCommission > 0) {
-                    managers.creditCommission(econ.managerId, econ.managerCommission);
-                    await logFunds(clients, {
-                        type: 'credit', creatorId: econ.managerId, userId: memberId, guildId: serverId,
-                        amount: econ.managerCommission, reason: 'Manager commission (sale)'
-                    }).catch(() => null);
-                    await maybeAutoWithdraw(clients, econ.managerId).catch(() => null);
-                }
-                await payShares(clients, amount, { revenuePerJoin: econ.revenue, managerCommission: econ.managerCommission }).catch(() => null);
+                    { revenue: econ.revenue, managerId: econ.managerId });
+                await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
                 const fresh = recordApiVerified({ creatorId: userId, memberId, serverId, adKey });
                 syncHubMember(clients, memberId).catch(() => null);
                 await logFunds(clients, {

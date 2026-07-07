@@ -106,11 +106,10 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
         ts: Date.now(), status: 'joined'
     };
     // Optional economics for the shares/revenue stats: revenue (what the buyer
-    // paid per join) and managerCommission (paid to a sales manager). Absent =
-    // the standard $0.10 revenue, no commission (recomputed downstream).
+    // actually paid per join — lower for a manager sale). Absent = the standard
+    // $0.10 revenue (recomputed downstream).
     if (extra && typeof extra === 'object') {
         if (Number.isFinite(Number(extra.revenue))) rec.revenue = round4(Number(extra.revenue));
-        if (Number(extra.managerCommission) > 0) rec.managerCommission = round4(Number(extra.managerCommission));
         if (extra.managerId) rec.managerId = String(extra.managerId);
     }
     arr.push(rec);

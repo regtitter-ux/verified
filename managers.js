@@ -1,15 +1,19 @@
 // Sales managers.
 //
 // The owner can appoint sales managers on the order page. A manager buys joins
-// at a discounted rate (MANAGER_PRICE per 100 instead of the public price) and
-// earns a commission (MANAGER_COMMISSION_RATE of every join they sell) credited
-// to their bot balance. That commission is a real cost, so it's subtracted from
-// service profit before shares are split (see shares.js / api.js stats).
+// from us at a discounted rate (MANAGER_PRICE per 100 instead of the public
+// price) and keeps their margin at the deal — buyers pay the manager the retail
+// price directly, the manager pays us the discounted price. So we DON'T credit
+// managers anything; a manager sale simply brings less revenue ($9/100 instead
+// of $10/100). That discount is surfaced as "manager margin" in the stats and
+// naturally lowers profit before shares are split (see shares.js / api.js).
 const { loadJSON, saveJSON } = require('./database.js');
 
 const PRICE_PER_100 = Number(process.env.MANAGER_PRICE) || 9;          // $ per 100 joins for managers
+// Manager margin as a fraction of retail = (retail − manager) / retail. Only
+// used to describe the discount on the order page; no money is paid out.
 const COMMISSION_RATE = Number.isFinite(Number(process.env.MANAGER_COMMISSION_RATE))
-    ? Number(process.env.MANAGER_COMMISSION_RATE) : 0.10;               // 10% of the sale
+    ? Number(process.env.MANAGER_COMMISSION_RATE) : 0.10;
 
 const round2 = (n) => +(Number(n) || 0).toFixed(2);
 const round4 = (n) => +(Number(n) || 0).toFixed(4);
@@ -35,29 +39,15 @@ function priceForBuyer(buyerId, publicPricePer100) {
     return { manager, pricePer100: per100 };
 }
 
-// Per-join economics for a confirmed join, given the campaign it belongs to
-// (or null for a house-ad join) and the public per-join revenue. Manager
-// campaigns charge less and owe a commission; everything else keeps the
-// public revenue with no commission.
+// Per-join revenue for a confirmed join, given the campaign it belongs to (or
+// null for a house-ad join). Manager campaigns bring the discounted price;
+// everything else keeps the public revenue. No commission is ever paid — the
+// manager's margin lives entirely in the retail-vs-discount spread.
 function joinEconomics(campaign, publicRevenuePerJoin) {
     const pub = Number(publicRevenuePerJoin) || 0;
-    if (!campaign || !campaign.managerId) return { revenue: pub, managerCommission: 0, managerId: null };
+    if (!campaign || !campaign.managerId) return { revenue: pub, managerId: null };
     const per100 = Number(campaign.pricePer100) || PRICE_PER_100;
-    const revenue = round4(per100 / 100);
-    const rate = Number.isFinite(Number(campaign.commissionRate)) ? Number(campaign.commissionRate) : COMMISSION_RATE;
-    return { revenue, managerCommission: round4(revenue * rate), managerId: String(campaign.managerId) };
+    return { revenue: round4(per100 / 100), managerId: String(campaign.managerId) };
 }
 
-// Credit a manager's commission straight to their bot balance. Loads settings
-// fresh so it never clobbers a concurrent partner/share credit.
-function creditCommission(managerId, amount) {
-    const amt = round4(amount);
-    if (!managerId || !(amt > 0)) return 0;
-    const settings = loadJSON('settings.json');
-    if (!settings[managerId]) settings[managerId] = { advText: '', serverAds: {}, partners: [] };
-    settings[managerId].balance = round2((Number(settings[managerId].balance) || 0) + amt);
-    saveJSON('settings.json', settings);
-    return amt;
-}
-
-module.exports = { PRICE_PER_100, COMMISSION_RATE, loadManagers, saveManagers, isManager, priceForBuyer, joinEconomics, creditCommission, round2, round4 };
+module.exports = { PRICE_PER_100, COMMISSION_RATE, loadManagers, saveManagers, isManager, priceForBuyer, joinEconomics, round2, round4 };
