@@ -16,6 +16,14 @@ const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('
 const { payShares } = require('./shares.js');
 const campaigns = require('./campaigns.js');
 const { logFunds } = require('./fundslog.js');
+
+// Global safety net: a stray rejection or throw (background sweeps, Discord
+// REST hiccups, a bad interaction path) must NOT kill the whole fleet — on
+// Node 15+ an unhandled rejection terminates the process, taking every bot
+// offline and turning every interaction into "This interaction failed".
+// Log and keep running instead.
+process.on('unhandledRejection', (reason) => { console.error('[unhandledRejection]', reason); });
+process.on('uncaughtException', (err) => { console.error('[uncaughtException]', err); });
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
 
@@ -412,6 +420,7 @@ const startBot = (token) => {
     }
 
     client.on(Events.InteractionCreate, async (interaction) => {
+      try {
         // /bal — ephemeral balance + payment details (optional id: owner may view others)
         if (interaction.isChatInputCommand() && interaction.commandName === 'bal') {
             const idParam = (interaction.options.getString('id') || '').trim();
@@ -1172,6 +1181,13 @@ const startBot = (token) => {
         } catch (e) {
             console.error(e);
         }
+      } catch (e) {
+        // Outer guard: no interaction handler path can crash the fleet or
+        // leave a dangling rejection. Try a last-ditch ack so the user isn't
+        // left staring at a spinner.
+        console.error('[INTERACTION]', e);
+        try { if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) await interaction.reply({ content: '⚠️ Что-то пошло не так, попробуйте ещё раз.', flags: [64] }); } catch {}
+      }
     });
 
     client.login(token).catch(err => {
