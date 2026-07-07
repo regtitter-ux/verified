@@ -132,7 +132,11 @@ function recordApiVerified({ creatorId, memberId, serverId, adKey, noAd }) {
 
 function userStats(userId) {
     const verified = loadJSON('verified.json', []);
-    const mine = (Array.isArray(verified) ? verified : []).filter(u => u.creatorId === userId && u.roleId);
+    // Paid verifications only (adKey set = an ad was shown and it wasn't a
+    // duplicate join). Excludes no-ad/ads-off and duplicate verifications, and
+    // leavers are already gone from verified.json — so the count matches the
+    // balance, same rule as /bal and the admin "С рекламой" stats.
+    const mine = (Array.isArray(verified) ? verified : []).filter(u => u.creatorId === userId && u.roleId && u.adKey);
     const now = Date.now();
     const win = (list) => ({
         hour: list.filter(u => u.timestamp > now - 3600000).length,

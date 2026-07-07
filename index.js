@@ -189,13 +189,19 @@ const startBot = (token) => {
         }
 
         // Verification stats for this user's own /v3 cards, grouped by server.
-        // Only PAID verifications are counted: an entry carries an adKey exactly
-        // when an ad was shown and it wasn't a duplicate join — i.e. when a
-        // payout was accrued (join $5–7/100 or click $1/100). No-ad and
-        // duplicate verifications are tagged noAd and never paid, so they're
-        // excluded here to keep the counter in step with the balance.
+        // Only PAID, still-standing verifications are counted, so the number
+        // matches the balance exactly. An entry carries an adKey only when an
+        // ad was actually shown and it wasn't a duplicate join — i.e. a payout
+        // accrued (join $5–7/100 or click $1/100). This automatically excludes:
+        //   • verifications where ads were off (kran closed / no showable ad /
+        //     self-ad) — those are tagged noAd, never paid;
+        //   • duplicate joins (already counted on this sponsor) — also noAd;
+        //   • anyone who left the sponsor server — the clawback deletes their
+        //     verified.json entry, so it's gone from this count too.
         const verified = loadJSON('verified.json', []);
-        const mine = (Array.isArray(verified) ? verified : []).filter(u => u.creatorId === userId && u.roleId && u.adKey);
+        const mine = (Array.isArray(verified) ? verified : []).filter(u =>
+            u.creatorId === userId && u.roleId && u.adKey
+        );
         if (mine.length) {
             const now = Date.now();
             const win = (list) => ({
