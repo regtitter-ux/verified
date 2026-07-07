@@ -22,8 +22,16 @@ const { logFunds } = require('./fundslog.js');
 // Node 15+ an unhandled rejection terminates the process, taking every bot
 // offline and turning every interaction into "This interaction failed".
 // Log and keep running instead.
+// A stray promise rejection (background sweep, DM, REST hiccup) must not
+// crash the fleet — log and keep running.
 process.on('unhandledRejection', (reason) => { console.error('[unhandledRejection]', reason); });
-process.on('uncaughtException', (err) => { console.error('[uncaughtException]', err); });
+// A genuine uncaught exception can leave the process in a broken state (e.g.
+// a dead gateway while the process lives → bot shows offline but Railway
+// never restarts). Log and exit so the platform restarts us clean.
+process.on('uncaughtException', (err) => {
+    console.error('[uncaughtException]', err);
+    setTimeout(() => process.exit(1), 500);
+});
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
 
@@ -986,6 +994,13 @@ const startBot = (token) => {
             return interaction.reply({ content: "✅ You're already verified", flags: [64] }).catch(() => null);
         }
 
+        // Ack within Discord's 3-second window BEFORE any slow work (invite
+        // lookups, big JSON reads, membership fetches) so the user never sees
+        // "Interaction failed". We then edit this ephemeral reply.
+        if (!interaction.deferred && !interaction.replied) {
+            await interaction.deferReply({ flags: [64] }).catch(() => null);
+        }
+
         const pendingKey = `${user.id}_${guild.id}_${roleId || 'v'}`;
 
         if (!pendingVerification.has(pendingKey)) {
@@ -1086,7 +1101,7 @@ const startBot = (token) => {
             pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '' });
             setTimeout(() => pendingVerification.delete(pendingKey), 300000);
 
-            return interaction.reply({ content: responseText, flags: [64] }).catch(() => null);
+            return interaction.editReply({ content: responseText }).catch(() => null);
         }
 
         const pending = pendingVerification.get(pendingKey);
@@ -1100,14 +1115,13 @@ const startBot = (token) => {
         if (sponsor) {
             const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
             if (joined !== true) {
-                return interaction.reply({
-                    content: pending.adText || 'Please join the server first, then click again.',
-                    flags: [64]
+                return interaction.editReply({
+                    content: pending.adText || 'Please join the server first, then click again.'
                 }).catch(() => null);
             }
         }
 
-        await interaction.reply({ content: '✅ Success! Access granted', flags: [64] }).catch(() => null);
+        await interaction.editReply({ content: '✅ Success! Access granted' }).catch(() => null);
 
         try {
             if (verifiedRole?.editable) await member.roles.add(verifiedRole).catch(() => null);
@@ -1186,7 +1200,12 @@ const startBot = (token) => {
         // leave a dangling rejection. Try a last-ditch ack so the user isn't
         // left staring at a spinner.
         console.error('[INTERACTION]', e);
-        try { if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) await interaction.reply({ content: '⚠️ Что-то пошло не так, попробуйте ещё раз.', flags: [64] }); } catch {}
+        try {
+            if (interaction.isRepliable?.()) {
+                if (interaction.deferred || interaction.replied) await interaction.editReply({ content: '⚠️ Что-то пошло не так, попробуйте ещё раз.' });
+                else await interaction.reply({ content: '⚠️ Что-то пошло не так, попробуйте ещё раз.', flags: [64] });
+            }
+        } catch {}
       }
     });
 
