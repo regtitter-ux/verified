@@ -1374,3 +1374,29 @@ cards.startCardSweep(clients);
 
 // Data backups: rolling local snapshots + off-site copies to a Discord channel.
 backup.startBackupSweep(clients);
+
+// Uptime monitoring: alert to ALERT_CHANNEL when a bot goes offline / recovers.
+const ALERT_CHANNEL = (process.env.ALERT_CHANNEL || '').trim();
+async function sendAlert(text) {
+    if (!ALERT_CHANNEL) return;
+    const bot = clients.find((c) => c.user?.id === config.adminBotId && c.isReady?.()) || clients.find((c) => c.isReady?.());
+    if (!bot) return;
+    const ch = bot.channels.cache.get(ALERT_CHANNEL) || await bot.channels.fetch(ALERT_CHANNEL).catch(() => null);
+    if (ch) ch.send({ content: text }).catch(() => null);
+}
+const botOnlineState = new Map();
+function startHealthMonitor() {
+    setInterval(() => {
+        for (const c of clients) {
+            const id = c.user?.id;
+            if (!id) continue;
+            const on = Boolean(c.isReady?.());
+            const prev = botOnlineState.get(id);
+            if (prev === undefined) { botOnlineState.set(id, on); continue; }
+            if (prev && !on) { botOnlineState.set(id, false); console.warn(`[HEALTH] ${c.user?.tag || id} OFFLINE`); sendAlert(`🔴 Бот \`${c.user?.tag || id}\` ушёл в офлайн`); }
+            else if (!prev && on) { botOnlineState.set(id, true); console.log(`[HEALTH] ${c.user?.tag || id} recovered`); sendAlert(`🟢 Бот \`${c.user?.tag || id}\` снова онлайн`); }
+        }
+    }, 60 * 1000);
+    console.log(`[HEALTH] monitor every 60s${ALERT_CHANNEL ? '' : ' (alerts OFF — set ALERT_CHANNEL)'}`);
+}
+startHealthMonitor();

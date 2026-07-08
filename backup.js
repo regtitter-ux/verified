@@ -73,11 +73,14 @@ async function toDiscord(clients) {
     } catch (e) { console.error('[BACKUP] discord upload failed:', e.message); return { ok: false, reason: e.message }; }
 }
 
+let lastRun = null;
 async function runOnce(clients) {
     const dest = snapshotLocal();
     const off = await toDiscord(clients);
-    return { local: Boolean(dest), offsite: off };
+    lastRun = { at: Date.now(), local: Boolean(dest), offsite: off?.ok || false, files: dataFiles().length };
+    return lastRun;
 }
+function getLastRun() { return lastRun; }
 
 function startBackupSweep(clients) {
     const tick = () => runOnce(clients).catch((e) => console.error('[BACKUP] sweep error:', e.message));
@@ -86,4 +89,4 @@ function startBackupSweep(clients) {
     console.log(`[BACKUP] every ${Math.round(INTERVAL_MS / 3600000)}h · local keep ${KEEP_LOCAL}${BACKUP_CHANNEL ? ' · off-site ON' : ' · off-site OFF (set BACKUP_CHANNEL)'}`);
 }
 
-module.exports = { snapshotLocal, toDiscord, runOnce, startBackupSweep, dataFiles, BACKUP_DIR };
+module.exports = { snapshotLocal, toDiscord, runOnce, getLastRun, startBackupSweep, dataFiles, BACKUP_DIR, BACKUP_CHANNEL };

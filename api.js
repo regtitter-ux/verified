@@ -21,6 +21,8 @@ const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
 const feed = require('./feed.js');
 const cards = require('./cards.js');
+const audit = require('./auditlog.js');
+const backup = require('./backup.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -322,6 +324,77 @@ async function handleAdmin(req, res, path, clients, config) {
     const isOwner = session.role === 'owner';
     // Owner-only areas: Templates, Balances, Crypto Pay top-up, admin mgmt.
     const ownerOnly = () => send(res, 403, { error: 'owner only' }, cors);
+    // Record a mutating panel action against whoever is signed in.
+    const auditDo = (action, detail) => audit.logAction(session.userId, action, detail);
+
+    // Owner-only: read the admin action audit log.
+    if (path === '/admin/audit' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const url = new URL(req.url, 'http://x');
+        const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 300));
+        const entries = audit.recent(limit).map((e) => ({ ...e, userName: userNameOf(clients, e.userId) }));
+        return send(res, 200, { entries }, cors);
+    }
+
+    // Owner-only: fleet health (monitoring).
+    if (path === '/admin/health' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const bots = (Array.isArray(clients) ? clients : []).map((c) => ({
+            id: c.user?.id || null,
+            tag: c.user?.tag || null,
+            online: Boolean(c.isReady?.()),
+            ping: Math.round(Number(c.ws?.ping) >= 0 ? c.ws.ping : -1),
+            guilds: c.guilds?.cache?.size || 0,
+            uptimeMs: c.uptime || 0
+        })).sort((a, b) => (b.guilds - a.guilds));
+        return send(res, 200, {
+            bots,
+            online: bots.filter((b) => b.online).length,
+            total: bots.length,
+            alertChannel: Boolean(process.env.ALERT_CHANNEL),
+            backup: { last: backup.getLastRun(), offsite: Boolean(backup.BACKUP_CHANNEL) },
+            serverTime: Date.now()
+        }, cors);
+    }
+
+    // Owner-only: run a backup now.
+    if (path === '/admin/backup' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const r = await backup.runOnce(clients).catch((e) => ({ error: e.message }));
+        auditDo('backup.manual', r?.offsite ? 'local+offsite' : 'local');
+        return send(res, 200, { ok: true, result: r }, cors);
+    }
+
+    // Owner-only: financial reconciliation & solvency.
+    if (path === '/admin/finance' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const settings = loadJSON('settings.json');
+        let owed = 0, negative = 0, withdrawnDone = 0, withdrawnPending = 0, accountsOwed = 0, accountsNeg = 0;
+        for (const uid of Object.keys(settings || {})) {
+            const b = Number(settings[uid]?.balance) || 0;
+            if (b > 0) { owed += b; accountsOwed++; }
+            else if (b < 0) { negative += b; accountsNeg++; }
+            for (const w of (Array.isArray(settings[uid]?.withdrawals) ? settings[uid].withdrawals : [])) {
+                if (w.status === 'completed') withdrawnDone += Number(w.amount) || 0;
+                else withdrawnPending += Number(w.amount) || 0;
+            }
+        }
+        const jl = loadJSON('joinlinks.json', []);
+        let paidOutJoins = 0, clawedBack = 0;
+        for (const r of Array.isArray(jl) ? jl : []) {
+            if (r.status === 'joined' || r.status === 'settled') paidOutJoins += Number(r.amount) || 0;
+            else if (r.status === 'left') clawedBack += Number(r.amount) || 0;
+        }
+        const cryptoBal = await cryptoUsdtBalance();
+        return send(res, 200, {
+            owed: money(owed), accountsOwed,
+            negative: money(negative), accountsNeg,
+            withdrawnDone: money(withdrawnDone), withdrawnPending: money(withdrawnPending),
+            paidOutJoins: money(paidOutJoins), clawedBack: money(clawedBack),
+            cryptoBalance: cryptoBal, solvency: cryptoBal != null ? money(cryptoBal - owed) : null,
+            solvent: cryptoBal != null ? cryptoBal >= owed : null
+        }, cors);
+    }
 
     if (path === '/admin/state' && req.method === 'GET') {
         const uid = config.ownerId;
@@ -665,6 +738,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const list = adminAuth.loadAdmins();
         const next = body?.remove ? list.filter((x) => x !== id) : [...list, id];
         const saved = adminAuth.saveAdmins(next);
+        auditDo(body?.remove ? 'admin.remove' : 'admin.add', id);
         return send(res, 200, { ok: true, admins: saved }, cors);
     }
 
@@ -907,6 +981,7 @@ async function handleAdmin(req, res, path, clients, config) {
             if (Math.abs(delta) > 1_000_000) return send(res, 400, { error: 'delta too large' }, cors);
             s.balance = money((Number(s.balance) || 0) + delta);
             saveJSON('settings.json', settings);
+            auditDo('balance.change', `${userId}: ${delta > 0 ? '+' : ''}${delta} → $${s.balance}`);
             if (delta > 0) maybeAutoWithdraw(clients, userId).catch(() => null);
             return send(res, 200, { ok: true, balance: s.balance }, cors);
         }
@@ -915,6 +990,7 @@ async function handleAdmin(req, res, path, clients, config) {
             if (!Number.isFinite(bid) || bid < 0) return send(res, 400, { error: 'bad bid' }, cors);
             s.bid = +bid.toFixed(4);
             saveJSON('settings.json', settings);
+            auditDo('rate.bid', `${userId}: $${s.bid}/100 clicks`);
             return send(res, 200, { ok: true, bid: s.bid }, cors);
         }
         if (field === 'joinbid') {
@@ -922,11 +998,13 @@ async function handleAdmin(req, res, path, clients, config) {
             if (!Number.isFinite(bid) || bid < 0) return send(res, 400, { error: 'bad joinBid' }, cors);
             s.joinBid = +bid.toFixed(4);
             saveJSON('settings.json', settings);
+            auditDo('rate.joinbid', `${userId}: $${s.joinBid}/100 joins`);
             return send(res, 200, { ok: true, joinBid: s.joinBid }, cors);
         }
         if (field === 'autopayout') {
             s.autoPayout = Boolean(body.autoPayout);
             saveJSON('settings.json', settings);
+            auditDo('autopayout', `${userId}: ${s.autoPayout ? 'on' : 'off'}`);
             return send(res, 200, { ok: true, autoPayout: s.autoPayout }, cors);
         }
         if (field === 'referrals') {
@@ -998,6 +1076,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const inv = await cryptopay.createUsdtInvoice(n.toFixed(2)).catch((e) => ({ __err: e.message }));
         const url = inv && (inv.bot_invoice_url || inv.mini_app_invoice_url || inv.pay_url);
         if (!url) return send(res, 502, { error: `Не удалось создать счёт${inv?.__err ? ` (${inv.__err})` : ''}` }, cors);
+        auditDo('cryptopay.topup', `$${n.toFixed(2)} invoice created`);
         return send(res, 200, { ok: true, url, amount: n.toFixed(2) }, cors);
     }
 
@@ -1015,6 +1094,7 @@ async function handleAdmin(req, res, path, clients, config) {
         if (pct <= 0) delete cfg[uid];
         else cfg[uid] = { ...(cfg[uid] || {}), pct: +pct.toFixed(2), addedAt: cfg[uid]?.addedAt || Date.now() };
         saveJSON('shares.json', cfg);
+        auditDo('shares.set', `${uid}: ${cfg[uid]?.pct || 0}%`);
         return send(res, 200, { ok: true, userId: uid, pct: cfg[uid]?.pct || 0 }, cors);
     }
 
@@ -1032,6 +1112,7 @@ async function handleAdmin(req, res, path, clients, config) {
         else delete cfg.serverAdsOff[gid];
         cfg.serverAdsOffAt = Date.now();
         saveJSON('siteconfig.json', cfg);
+        auditDo('kran.server', `${gid}: ${off ? 'closed' : 'open'}`);
         return send(res, 200, { ok: true, gid, off }, cors);
     }
 
@@ -1062,6 +1143,7 @@ async function handleAdmin(req, res, path, clients, config) {
         cfg.adsOff = off;
         cfg.adsOffAt = Date.now();
         saveJSON('siteconfig.json', cfg);
+        auditDo('kran.global', off ? 'closed (ads off)' : 'open');
         return send(res, 200, { ok: true, adsOff: off }, cors);
     }
 
@@ -1098,6 +1180,7 @@ async function handleAdmin(req, res, path, clients, config) {
             return send(res, 409, { error: 'exists' }, cors);
         }
         list.push(feed.itemFromInvite(inv, code));
+        auditDo('feed.add', `${inv.guild.name || ''} (${code})`);
         return send(res, 200, { ok: true, servers: feed.saveFeed(list) }, cors);
     }
     if (path === '/admin/feed' && req.method === 'DELETE') {
@@ -1108,6 +1191,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const id = String(body?.id || '');
         if (!code && !id) return send(res, 400, { error: 'bad request' }, cors);
         const list = feed.loadFeed().filter((s) => !((code && s.code === code) || (id && s.id === id)));
+        auditDo('feed.remove', code || id);
         return send(res, 200, { ok: true, servers: feed.saveFeed(list) }, cors);
     }
 
@@ -1211,8 +1295,10 @@ async function handleAdmin(req, res, path, clients, config) {
         const mid = String(body?.messageId || '');
         if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
         let r;
-        if (path.endsWith('/delete')) r = await cards.remove(clients, mid, session.userId).catch((e) => ({ ok: false, error: e.message }));
-        else r = await cards[path.endsWith('/fix') ? 'fix' : 'republish'](clients, mid).catch((e) => ({ ok: false, error: e.message }));
+        const op = path.endsWith('/delete') ? 'delete' : path.endsWith('/fix') ? 'fix' : 'republish';
+        if (op === 'delete') r = await cards.remove(clients, mid, session.userId).catch((e) => ({ ok: false, error: e.message }));
+        else r = await cards[op](clients, mid).catch((e) => ({ ok: false, error: e.message }));
+        if (r.ok) auditDo('card.' + op, mid);
         return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card || null } : { error: r.error || 'failed' }, cors);
     }
     // Permanently drop a card from the (deleted) registry.
@@ -1249,6 +1335,7 @@ async function handleAdmin(req, res, path, clients, config) {
         }
         if (body.description !== undefined) patch.description = String(body.description).slice(0, 4000);
         const r = await cards.edit(clients, mid, patch).catch((e) => ({ ok: false, error: e.message }));
+        if (r.ok) auditDo('card.edit', `${mid} ${Object.keys(patch).join(',')}`);
         return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card } : { error: r.error || 'failed' }, cors);
     }
 
@@ -1330,6 +1417,7 @@ async function handleBuyer(req, res, path, clients, config) {
         if (!/^\d{17,20}$/.test(uid)) return send(res, 400, { error: 'bad user id' }, cors);
         const list = managers.loadManagers();
         const next = body?.remove ? list.filter((x) => x !== uid) : [...list, uid];
+        audit.logAction(buyerId, body?.remove ? 'manager.remove' : 'manager.add', uid);
         return send(res, 200, { ok: true, managers: managers.saveManagers(next) }, cors);
     }
 
