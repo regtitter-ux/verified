@@ -1552,10 +1552,11 @@ async function handleBuyer(req, res, path, clients, config) {
         await campaigns.reconcile(clients).catch(() => null);
         const camps = campaigns.loadCampaigns();
         const verified = loadJSON('verified.json', []);
+        const joinlinks = loadJSON('joinlinks.json', []);
         const fleet = campaigns.fleetGuildIds(clients);
         const mine = Object.values(camps).filter((c) => c.buyerId === buyerId)
             .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-            .map((c) => ({ ...campaigns.publicView(c, verified), botPresent: campaigns.botPresent(c, fleet) }));
+            .map((c) => ({ ...campaigns.publicView(c, verified), botPresent: campaigns.botPresent(c, fleet), retention: campaigns.retention(c, verified, joinlinks) }));
         return send(res, 200, { campaigns: mine }, cors);
     }
 

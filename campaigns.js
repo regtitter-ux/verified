@@ -189,8 +189,48 @@ function startCampaignSweep(clients) {
     console.log(`[CAMPAIGN] reconciliation every ${Math.round(every / 1000)}s`);
 }
 
+// Retention: of the joiners this campaign delivered, how many were still on the
+// sponsor server 1 / 7 / 30 days after joining. A joiner still present now is
+// retained at every window up to their tenure; a leaver is retained only if
+// they stayed at least that long. Only joiners who joined ≥ the window ago are
+// eligible (younger ones can't have hit that mark yet).
+function retention(campaign, verifiedList, joinlinks, now = Date.now()) {
+    const key = campaignAdKey(campaign);
+    const since = campaign.paidAt || 0;
+    const verified = Array.isArray(verifiedList) ? verifiedList : [];
+    const jl = Array.isArray(joinlinks) ? joinlinks : [];
+
+    const joinTime = new Map(); // still-present joiners → earliest join ts
+    for (const u of verified) {
+        if (u.adKey !== key || (Number(u.timestamp) || 0) < since) continue;
+        const t = Number(u.timestamp) || 0;
+        if (!joinTime.has(u.id) || t < joinTime.get(u.id)) joinTime.set(u.id, t);
+    }
+    const left = new Map(); // leavers of this sponsor → { joinTs, leftAt }
+    for (const r of jl) {
+        if (r.status !== 'left' || r.guildId !== campaign.sponsorGuildId || (Number(r.ts) || 0) < since) continue;
+        if (joinTime.has(r.userId)) continue; // rejoined → treat as present
+        const prev = left.get(r.userId);
+        if (!prev || (Number(r.ts) || 0) < prev.joinTs) left.set(r.userId, { joinTs: Number(r.ts) || 0, leftAt: Number(r.leftAt) || now });
+    }
+
+    const joiners = [];
+    for (const t of joinTime.values()) joiners.push({ joinTs: t, tenure: now - t });
+    for (const v of left.values()) joiners.push({ joinTs: v.joinTs, tenure: Math.max(0, v.leftAt - v.joinTs) });
+
+    const windows = { d1: 86400000, d7: 604800000, d30: 2592000000 };
+    const out = {};
+    for (const [k, ms] of Object.entries(windows)) {
+        const eligible = joiners.filter((j) => (now - j.joinTs) >= ms);
+        const retained = eligible.filter((j) => j.tenure >= ms).length;
+        out[k] = eligible.length ? Math.round(retained / eligible.length * 100) : null;
+        out[`${k}_n`] = eligible.length;
+    }
+    return out;
+}
+
 module.exports = {
     PRICE_PER_100, MIN_JOINS, priceFor, round2, newId,
     loadCampaigns, saveCampaigns, campaignAdKey, delivered, publicView, pickForGuild, botPresent, fleetGuildIds,
-    isInvoicePaid, reconcile, startCampaignSweep
+    isInvoicePaid, reconcile, startCampaignSweep, retention
 };
