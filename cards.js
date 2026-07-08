@@ -5,7 +5,7 @@
 // delete it, or re-publish it — all without touching who created it unless
 // explicitly asked. Only the bot instance that AUTHORED a message can edit or
 // delete it, so each op locates that instance in the fleet.
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AuditLogEvent } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AuditLogEvent, PermissionsBitField } = require('discord.js');
 const { loadJSON, saveJSON } = require('./database.js');
 
 function loadCards() { const r = loadJSON('cards.json', []); return Array.isArray(r) ? r : []; }
@@ -184,6 +184,62 @@ async function republish(clients, messageId) {
     return { ok: true, card: rec };
 }
 
+// Can a deleted card be re-published in its original channel? Cache-based (no
+// API calls) so it's cheap to compute for the whole deleted list. Returns
+// { can, reason, botId }. reason ∈ 'no-owner' | 'no-bot' (kicked) |
+// 'no-channel' (deleted) | 'no-perms' (can't post there).
+function restoreInfo(clients, card) {
+    if (!card || !card.creatorId) return { can: false, reason: 'no-owner' };
+    if (!card.channelId || !card.guildId) return { can: false, reason: 'no-channel' };
+    const arr = Array.isArray(clients) ? clients : [];
+    // Prefer the bot that originally authored the card, then any fleet bot on the guild.
+    let candidates = arr.filter((c) => c.guilds?.cache?.has(card.guildId));
+    if (card.botId) {
+        const own = candidates.find((c) => c.user?.id === card.botId);
+        if (own) candidates = [own, ...candidates.filter((c) => c !== own)];
+    }
+    if (!candidates.length) return { can: false, reason: 'no-bot' };
+    let sawChannel = false;
+    for (const c of candidates) {
+        const guild = c.guilds.cache.get(card.guildId);
+        const channel = guild?.channels?.cache?.get(card.channelId);
+        if (!channel || typeof channel.isTextBased !== 'function' || !channel.isTextBased()) continue;
+        sawChannel = true;
+        const me = guild.members?.me;
+        const perms = me && typeof channel.permissionsFor === 'function' ? channel.permissionsFor(me) : null;
+        if (perms && perms.has(PermissionsBitField.Flags.ViewChannel) && perms.has(PermissionsBitField.Flags.SendMessages)) {
+            return { can: true, reason: null, botId: c.user.id };
+        }
+    }
+    return { can: false, reason: sawChannel ? 'no-perms' : 'no-channel' };
+}
+
+// Re-publish a previously deleted card in its ORIGINAL channel, keeping owner +
+// role + description. The record moves to the new message id and its deleted
+// markers are cleared; funnel stats (keyed by guild/role/creator) carry over.
+async function restore(clients, messageId) {
+    const card = getCard(messageId);
+    if (!card) return { ok: false, error: 'not-tracked' };
+    if (!card.deletedAt) return { ok: false, error: 'not-deleted' };
+    const info = restoreInfo(clients, card);
+    if (!info.can) return { ok: false, error: info.reason };
+    const arr = Array.isArray(clients) ? clients : [];
+    const client = arr.find((c) => c.user?.id === info.botId) || arr.find((c) => c.guilds?.cache?.has(card.guildId));
+    if (!client) return { ok: false, error: 'no-bot' };
+    const guild = client.guilds.cache.get(card.guildId);
+    const channel = await client.channels.fetch(card.channelId).catch(() => null);
+    if (!channel || typeof channel.send !== 'function') return { ok: false, error: 'no-channel' };
+    const sent = await channel.send(buildCard(guild, card.creatorId, card.roleId, card.description || null)).catch(() => null);
+    if (!sent) return { ok: false, error: 'send-failed' };
+    removeCard(messageId); // fresh record (no deletedAt) under the new message id
+    const rec = addCard({
+        messageId: sent.id, channelId: sent.channelId, guildId: card.guildId,
+        creatorId: card.creatorId, roleId: card.roleId, description: card.description || null,
+        botId: client.user.id, createdAt: card.createdAt || Date.now()
+    });
+    return { ok: true, card: rec };
+}
+
 // ---- First-click tracking (funnel metric #1) ----
 // A card is identified for stats by (guild, role, creator) — the same tuple a
 // verified.json entry / joinlinks record carries, so all three funnel stages
@@ -346,7 +402,7 @@ async function handleMessageDelete(clients, message) {
 module.exports = {
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate, DEFAULT_DESCRIPTION,
-    register, fix, edit, remove, republish,
+    register, fix, edit, remove, republish, restore, restoreInfo,
     trackClick, clickWindows, clicksForKey, scanAll, getScanState,
     markDeleted, removeCard, sweepDeleted, startCardSweep, handleMessageDelete
 };

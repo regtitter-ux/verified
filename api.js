@@ -1315,6 +1315,7 @@ async function handleAdmin(req, res, path, clients, config) {
                 if (best != null && ve.t - best >= 0) { deltas.push(ve.t - best); globalDeltas.push(ve.t - best); }
             }
             const avgVerifySeconds = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length / 1000) : null;
+            const rinfo = c.deletedAt ? cards.restoreInfo(clients, c) : null;
             return {
                 messageId: c.messageId,
                 channelId: c.channelId,
@@ -1334,6 +1335,8 @@ async function handleAdmin(req, res, path, clients, config) {
                 deletedAt: c.deletedAt || 0,
                 deletedBy: c.deletedBy || null,
                 deletedByName: c.deletedBy ? userNameOf(clients, c.deletedBy) : null,
+                canRestore: rinfo ? rinfo.can : false,
+                restoreReason: rinfo ? rinfo.reason : null,
                 // Funnel: started (first click) → join checked (2nd click) → stayed.
                 stats: { clicks: cards.clickWindows(c.guildId, c.roleId, c.creatorId, now), checked, stayed }
             };
@@ -1361,14 +1364,14 @@ async function handleAdmin(req, res, path, clients, config) {
         if (!isOwner) return ownerOnly();
         return send(res, 200, { scan: cards.getScanState() }, cors);
     }
-    if ((path === '/admin/cards/fix' || path === '/admin/cards/republish' || path === '/admin/cards/delete') && req.method === 'POST') {
+    if ((path === '/admin/cards/fix' || path === '/admin/cards/republish' || path === '/admin/cards/delete' || path === '/admin/cards/restore') && req.method === 'POST') {
         if (!isOwner) return ownerOnly();
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const mid = String(body?.messageId || '');
         if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
         let r;
-        const op = path.endsWith('/delete') ? 'delete' : path.endsWith('/fix') ? 'fix' : 'republish';
+        const op = path.endsWith('/delete') ? 'delete' : path.endsWith('/fix') ? 'fix' : path.endsWith('/restore') ? 'restore' : 'republish';
         if (op === 'delete') r = await cards.remove(clients, mid, session.userId).catch((e) => ({ ok: false, error: e.message }));
         else r = await cards[op](clients, mid).catch((e) => ({ ok: false, error: e.message }));
         if (r.ok) auditDo('card.' + op, mid);
