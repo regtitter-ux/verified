@@ -1164,6 +1164,14 @@ async function handleAdmin(req, res, path, clients, config) {
         const pct = Number(body?.pct);
         if (!Number.isFinite(pct) || pct < 0 || pct > 100) return send(res, 400, { error: 'pct must be 0..100' }, cors);
         const cfg = loadShares();
+        // Can't hand out more than 100% total — reject if the sum of everyone
+        // else's shares plus the new value would exceed 100%.
+        if (pct > 0) {
+            const others = Object.entries(cfg).reduce((s, [k, v]) => k === uid ? s : s + (Number(v?.pct) || 0), 0);
+            if (others + pct > 100 + 1e-6) {
+                return send(res, 400, { error: 'exceeds-100', available: +(100 - others).toFixed(2) }, cors);
+            }
+        }
         if (pct <= 0) delete cfg[uid];
         else cfg[uid] = { ...(cfg[uid] || {}), pct: +pct.toFixed(2), addedAt: cfg[uid]?.addedAt || Date.now() };
         saveJSON('shares.json', cfg);
