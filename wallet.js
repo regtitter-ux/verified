@@ -59,4 +59,10 @@ function recentTopups(buyerId, limit = 20) {
         .map((t) => ({ amount: round2(t.amount), status: t.status, createdAt: t.createdAt || 0, paidAt: t.paidAt || 0 }));
 }
 
-module.exports = { MIN_TOPUP, balanceOf, credit, debit, addTopup, reconcileTopups, recentTopups, round2 };
+// Total prepaid money sitting on all buyer wallets (topped up, not yet spent).
+function totalHeld() {
+    const w = loadWallets();
+    return round2(Object.values(w).reduce((a, x) => a + (Number(x?.balance) || 0), 0));
+}
+
+module.exports = { MIN_TOPUP, balanceOf, credit, debit, addTopup, reconcileTopups, recentTopups, totalHeld, round2 };

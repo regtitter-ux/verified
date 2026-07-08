@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
 const { adKeyOf, joinerCount } = require('./adcreative.js');
 const cryptopay = require('./cryptopay.js');
+const sales = require('./sales.js');
 
 const PRICE_PER_100 = Number(process.env.JOIN_SALE_PRICE) || 10; // $ per 100 verified joins
 const MIN_JOINS = Number(process.env.MIN_ORDER_JOINS) || 100;
@@ -157,6 +158,7 @@ async function reconcile(clients) {
         if (!c) continue;
         if (c.status === 'pending_payment' && await isInvoicePaid(c.invoiceId)) {
             c.status = 'active'; c.paidAt = now; changed = true;
+            sales.recordSale({ campaignId: c.id, buyerId: c.buyerId, amount: c.price, joins: c.purchased, sponsorGuildId: c.sponsorGuildId, managerId: c.managerId, via: 'invoice' });
             notifyBuyer(clients, c, 'started').catch(() => null);
         }
         if (c.status === 'active') {

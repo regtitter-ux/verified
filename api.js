@@ -24,6 +24,7 @@ const cards = require('./cards.js');
 const audit = require('./auditlog.js');
 const backup = require('./backup.js');
 const wallet = require('./wallet.js');
+const sales = require('./sales.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -387,12 +388,25 @@ async function handleAdmin(req, res, path, clients, config) {
             if (r.status === 'joined' || r.status === 'settled') paidOutJoins += Number(r.amount) || 0;
             else if (r.status === 'left') clawedBack += Number(r.amount) || 0;
         }
+        // Ad sales (what buyers paid) and where undistributed money sits:
+        // prepaid wallet balances + paid-but-not-yet-delivered campaign value.
+        const verifiedF = loadJSON('verified.json', []);
+        let prepaidUndelivered = 0;
+        for (const c of Object.values(campaigns.loadCampaigns())) {
+            if (!c || c.status !== 'active') continue;
+            const rem = Math.max(0, (Number(c.purchased) || 0) - campaigns.delivered(c, verifiedF));
+            const perJoin = (Number(c.purchased) > 0) ? (Number(c.price) || 0) / c.purchased : 0;
+            prepaidUndelivered += rem * perJoin;
+        }
         const cryptoBal = await cryptoUsdtBalance();
         return send(res, 200, {
             owed: money(owed), accountsOwed,
             negative: money(negative), accountsNeg,
             withdrawnDone: money(withdrawnDone), withdrawnPending: money(withdrawnPending),
             paidOutJoins: money(paidOutJoins), clawedBack: money(clawedBack),
+            adSales: sales.salesWindows(),
+            walletsHeld: wallet.totalHeld(),
+            prepaidUndelivered: money(prepaidUndelivered),
             cryptoBalance: cryptoBal, solvency: cryptoBal != null ? money(cryptoBal - owed) : null,
             solvent: cryptoBal != null ? cryptoBal >= owed : null
         }, cors);
@@ -441,6 +455,7 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, {
             weeks,
             revenue30: money(rev30),
+            adSales: sales.salesWindows(),
             activePartners7: partners7.size, activePartners30: partners30.size,
             joins7, joins30,
             churnPct: +(churn * 100).toFixed(1),
@@ -1545,6 +1560,7 @@ async function handleBuyer(req, res, path, clients, config) {
             createdAt: Date.now(), paidAt: Date.now(), completedAt: 0
         };
         campaigns.saveCampaigns(camps);
+        sales.recordSale({ campaignId: id, buyerId, amount: price, joins, sponsorGuildId, managerId: isMgr ? buyerId : null, via: 'wallet' });
         return send(res, 200, { ok: true, price, balance: wallet.balanceOf(buyerId), campaign: campaigns.publicView(camps[id]) }, cors);
     }
 
