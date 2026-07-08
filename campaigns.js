@@ -32,11 +32,30 @@ function saveCampaigns(c) { saveJSON('campaigns.json', c); }
 // house ads — so delivery counting shares the unique-joiner logic.
 function campaignAdKey(campaign) { return adKeyOf(campaign.invite); }
 
-// Unique verified joins delivered since the campaign went active.
+// Every ad-key this campaign has ever run under. The buyer can swap the invite
+// link mid-flight (e.g. the old one expired); the previous keys are kept in
+// `adKeys` so already-delivered joins still count toward the purchased total.
+function campaignAdKeys(campaign) {
+    const set = new Set();
+    const cur = campaignAdKey(campaign);
+    if (cur) set.add(cur);
+    for (const k of (Array.isArray(campaign?.adKeys) ? campaign.adKeys : [])) if (k) set.add(k);
+    return set;
+}
+
+// Unique verified joins delivered since the campaign went active — counted
+// across every invite the campaign has used (deduped by user), so changing the
+// link never resets progress or lets the campaign over-deliver.
 function delivered(campaign, verifiedList) {
     if (!campaign || !campaign.paidAt) return 0;
     const list = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
-    return joinerCount(list, campaignAdKey(campaign), campaign.paidAt);
+    const keys = campaignAdKeys(campaign);
+    if (!keys.size) return 0;
+    const seen = new Set();
+    for (const u of list) {
+        if (u && keys.has(u.adKey) && Number(u.timestamp) > campaign.paidAt) seen.add(u.id);
+    }
+    return seen.size;
 }
 
 // A public-safe view of a campaign for the buyer dashboard.
@@ -197,14 +216,14 @@ function startCampaignSweep(clients) {
 // they stayed at least that long. Only joiners who joined ≥ the window ago are
 // eligible (younger ones can't have hit that mark yet).
 function retention(campaign, verifiedList, joinlinks, now = Date.now()) {
-    const key = campaignAdKey(campaign);
+    const keys = campaignAdKeys(campaign);
     const since = campaign.paidAt || 0;
     const verified = Array.isArray(verifiedList) ? verifiedList : [];
     const jl = Array.isArray(joinlinks) ? joinlinks : [];
 
     const joinTime = new Map(); // still-present joiners → earliest join ts
     for (const u of verified) {
-        if (u.adKey !== key || (Number(u.timestamp) || 0) < since) continue;
+        if (!keys.has(u.adKey) || (Number(u.timestamp) || 0) < since) continue;
         const t = Number(u.timestamp) || 0;
         if (!joinTime.has(u.id) || t < joinTime.get(u.id)) joinTime.set(u.id, t);
     }
@@ -233,6 +252,6 @@ function retention(campaign, verifiedList, joinlinks, now = Date.now()) {
 
 module.exports = {
     PRICE_PER_100, MIN_JOINS, priceFor, round2, newId,
-    loadCampaigns, saveCampaigns, campaignAdKey, delivered, publicView, pickForGuild, botPresent, fleetGuildIds,
+    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, publicView, pickForGuild, botPresent, fleetGuildIds,
     isInvoicePaid, reconcile, startCampaignSweep, retention
 };

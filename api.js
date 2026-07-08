@@ -1586,11 +1586,11 @@ async function handleBuyer(req, res, path, clients, config) {
         const camps = campaigns.loadCampaigns();
         const c = camps[id];
         if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
-        const key = campaigns.campaignAdKey(c);
+        const keys = campaigns.campaignAdKeys(c);
         const verified = loadJSON('verified.json', []);
         const perGuild = {};
         for (const u of Array.isArray(verified) ? verified : []) {
-            if (u.adKey !== key || (c.paidAt && u.timestamp < c.paidAt)) continue;
+            if (!keys.has(u.adKey) || (c.paidAt && u.timestamp < c.paidAt)) continue;
             (perGuild[u.guildId] ||= new Set()).add(u.id);
         }
         const servers = Object.entries(perGuild)
@@ -1625,6 +1625,48 @@ async function handleBuyer(req, res, path, clients, config) {
         else c.disabledGuilds = c.disabledGuilds.filter((x) => x !== gid);
         campaigns.saveCampaigns(camps);
         return send(res, 200, { ok: true, disabledGuilds: c.disabledGuilds }, cors);
+    }
+
+    // Change a running campaign's invite link mid-flight (e.g. the old one
+    // expired). Validates that the new link actually resolves AND that a
+    // network bot is on its server (otherwise joins can't be verified).
+    // Delivery progress is preserved — the outgoing ad-key is kept so joins
+    // already delivered still count toward the purchased total.
+    if (path.startsWith('/order/campaigns/') && path.endsWith('/invite') && req.method === 'PUT') {
+        const id = path.slice('/order/campaigns/'.length, -('/invite'.length));
+        const camps = campaigns.loadCampaigns();
+        const c = camps[id];
+        if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
+        if (c.status !== 'active') return send(res, 400, { error: 'not-active' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const rawInvite = String(body?.invite || '').trim();
+        const m = rawInvite.match(/^(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/([a-z0-9-]{2,32})$/i)
+            || rawInvite.match(/^([a-z0-9-]{2,32})$/i);
+        if (!m) return send(res, 400, { error: 'bad-invite' }, cors);
+        const inviteCode = m[1];
+        // Link must resolve (works)…
+        let inv = null;
+        for (const cl of clients) { inv = await cl.fetchInvite(inviteCode).catch(() => null); if (inv) break; }
+        const newGuildId = inv?.guild?.id || null;
+        if (!newGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
+        // …and a network bot must be on the target server (join-checkable).
+        const fleet = campaigns.fleetGuildIds(clients);
+        if (!fleet.has(newGuildId)) return send(res, 400, { error: 'no-bot' }, cors);
+
+        const newInvite = `https://discord.gg/${inviteCode}`;
+        if (newInvite !== c.invite) {
+            const oldKey = campaigns.campaignAdKey(c);
+            if (!Array.isArray(c.adKeys)) c.adKeys = [];
+            if (oldKey && !c.adKeys.includes(oldKey)) c.adKeys.push(oldKey);
+            c.invite = newInvite;
+            c.sponsorGuildId = newGuildId;
+            c.serverName = inv.guild?.name || c.serverName || null;
+            c.inviteChangedAt = Date.now();
+            campaigns.saveCampaigns(camps);
+        }
+        const verified = loadJSON('verified.json', []);
+        return send(res, 200, { ok: true, campaign: campaigns.publicView(camps[id], verified) }, cors);
     }
 
     return send(res, 404, { error: 'unknown endpoint' }, cors);
@@ -1670,6 +1712,12 @@ async function handlePartner(req, res, path, clients, config) {
         const standing = mine.filter((r) => r.status === 'joined' || r.status === 'settled');
         const clawed = mine.filter((r) => r.status === 'left');
 
+        // Per-server count of joiners who verified but later left (clawed back).
+        // Keyed by the card's own server (cardGuildId) so it lines up with the
+        // per-guild verification rows, which group verified.json by that server.
+        const leftByGuild = {};
+        for (const r of clawed) { const g = r.cardGuildId || r.guildId; if (g) leftByGuild[g] = (leftByGuild[g] || 0) + 1; }
+
         const wds = Array.isArray(s.withdrawals) ? s.withdrawals : [];
         const withdrawnDone = r2(wds.filter((w) => w.status === 'completed').reduce((a, w) => a + (Number(w.amount) || 0), 0));
 
@@ -1694,7 +1742,7 @@ async function handlePartner(req, res, path, clients, config) {
             withdrawnDone,
             verifications: {
                 all: stats.total,
-                perGuild: stats.perGuild.map((g) => ({ ...g, name: guildNameOf(clients, g.guildId) }))
+                perGuild: stats.perGuild.map((g) => ({ ...g, name: guildNameOf(clients, g.guildId), left: leftByGuild[g.guildId] || 0 }))
             },
             withdrawals: wds
                 .map((w) => ({ id: w.id, amount: money(w.amount), status: w.status, createdAt: w.createdAt || 0, completedAt: w.completedAt || 0 }))
