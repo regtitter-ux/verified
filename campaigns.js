@@ -13,7 +13,6 @@ const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
 const { adKeyOf, joinerCount } = require('./adcreative.js');
 const cryptopay = require('./cryptopay.js');
-const sales = require('./sales.js');
 
 const PRICE_PER_100 = Number(process.env.JOIN_SALE_PRICE) || 10; // $ per 100 verified joins
 const MIN_JOINS = Number(process.env.MIN_ORDER_JOINS) || 100;
@@ -175,11 +174,10 @@ async function reconcile(clients) {
     const now = Date.now();
     for (const c of Object.values(camps)) {
         if (!c) continue;
-        if (c.status === 'pending_payment' && await isInvoicePaid(c.invoiceId)) {
-            c.status = 'active'; c.paidAt = now; changed = true;
-            sales.recordSale({ campaignId: c.id, buyerId: c.buyerId, amount: c.price, joins: c.purchased, sponsorGuildId: c.sponsorGuildId, managerId: c.managerId, via: 'invoice' });
-            notifyBuyer(clients, c, 'started').catch(() => null);
-        }
+        // Legacy invoice-checkout campaigns are gone — orders are now paid
+        // straight from the prepaid wallet and created 'active'. Any lingering
+        // unpaid campaign is a dead checkout from the old system: purge it.
+        if (c.status === 'pending_payment') { delete camps[c.id]; changed = true; continue; }
         if (c.status === 'active') {
             // Stop the campaign if its invite went invalid (deleted/expired).
             // Checked at most every 10 min to keep API calls light.

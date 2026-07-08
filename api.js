@@ -1575,14 +1575,15 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, { ok: true, price, balance: wallet.balanceOf(buyerId), campaign: campaigns.publicView(camps[id]) }, cors);
     }
 
-    // My campaigns (reconciles pending payments first so a just-paid order flips to active).
+    // My campaigns (reconcile first: purges dead legacy unpaid campaigns and
+    // completes finished ones).
     if (path === '/order/campaigns' && req.method === 'GET') {
         await campaigns.reconcile(clients).catch(() => null);
         const camps = campaigns.loadCampaigns();
         const verified = loadJSON('verified.json', []);
         const joinlinks = loadJSON('joinlinks.json', []);
         const fleet = campaigns.fleetGuildIds(clients);
-        const mine = Object.values(camps).filter((c) => c.buyerId === buyerId)
+        const mine = Object.values(camps).filter((c) => c.buyerId === buyerId && c.status !== 'pending_payment')
             .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
             .map((c) => ({ ...campaigns.publicView(c, verified), botPresent: campaigns.botPresent(c, fleet), retention: campaigns.retention(c, verified, joinlinks) }));
         return send(res, 200, { campaigns: mine }, cors);
