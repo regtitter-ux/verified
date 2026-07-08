@@ -1712,11 +1712,23 @@ async function handlePartner(req, res, path, clients, config) {
         const standing = mine.filter((r) => r.status === 'joined' || r.status === 'settled');
         const clawed = mine.filter((r) => r.status === 'left');
 
-        // Per-server count of joiners who verified but later left (clawed back).
-        // Keyed by the card's own server (cardGuildId) so it lines up with the
-        // per-guild verification rows, which group verified.json by that server.
+        // Per-server, per-window count of joiners who verified but later left
+        // (clawed back). Keyed by the card's own server (cardGuildId) so it
+        // lines up with the per-guild verification rows, and windowed by the
+        // JOIN time (r.ts, same basis as verified.json timestamps) so
+        // "joined = stayed + left" is consistent per window.
         const leftByGuild = {};
-        for (const r of clawed) { const g = r.cardGuildId || r.guildId; if (g) leftByGuild[g] = (leftByGuild[g] || 0) + 1; }
+        for (const r of clawed) {
+            const g = r.cardGuildId || r.guildId; if (!g) continue;
+            const t = Number(r.ts) || 0;
+            const w = (leftByGuild[g] ||= { hour: 0, day: 0, week: 0, month: 0, total: 0 });
+            w.total++;
+            if (t > now - 3600000) w.hour++;
+            if (t > now - 86400000) w.day++;
+            if (t > now - 604800000) w.week++;
+            if (t > now - 2592000000) w.month++;
+        }
+        const zeroLeft = { hour: 0, day: 0, week: 0, month: 0, total: 0 };
 
         const wds = Array.isArray(s.withdrawals) ? s.withdrawals : [];
         const withdrawnDone = r2(wds.filter((w) => w.status === 'completed').reduce((a, w) => a + (Number(w.amount) || 0), 0));
@@ -1742,7 +1754,7 @@ async function handlePartner(req, res, path, clients, config) {
             withdrawnDone,
             verifications: {
                 all: stats.total,
-                perGuild: stats.perGuild.map((g) => ({ ...g, name: guildNameOf(clients, g.guildId), left: leftByGuild[g.guildId] || 0 }))
+                perGuild: stats.perGuild.map((g) => ({ ...g, name: guildNameOf(clients, g.guildId), left: leftByGuild[g.guildId] || zeroLeft }))
             },
             withdrawals: wds
                 .map((w) => ({ id: w.id, amount: money(w.amount), status: w.status, createdAt: w.createdAt || 0, completedAt: w.completedAt || 0 }))
