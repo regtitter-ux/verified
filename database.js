@@ -39,11 +39,22 @@ const loadJSON = (file, fallback = {}) => {
     return fallback;
 };
 
+// Atomic write: serialize to a temp file, fsync it, then rename over the target.
+// rename() is atomic on the same filesystem, so a crash mid-write can never
+// leave a half-written (corrupt) JSON file — readers always see either the old
+// or the new complete file. (This does NOT serialize concurrent writers to the
+// same file — last rename wins, same as before; that needs a DB/queue.)
 const saveJSON = (file, data) => {
+    const target = persistPath(file);
+    const tmp = `${target}.tmp`;
     try {
-        fs.writeFileSync(persistPath(file), JSON.stringify(data, null, 2));
+        const json = JSON.stringify(data, null, 2);
+        const fd = fs.openSync(tmp, 'w');
+        try { fs.writeSync(fd, json); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+        fs.renameSync(tmp, target);
     } catch (e) {
         console.error(`[ERROR] Failed to save ${file}:`, e);
+        try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
     }
 };
 

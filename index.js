@@ -17,6 +17,7 @@ const { payShares, REVENUE_PER_JOIN } = require('./shares.js');
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
 const cards = require('./cards.js');
+const backup = require('./backup.js');
 const { logFunds } = require('./fundslog.js');
 
 // Global safety net: a stray rejection or throw (background sweeps, Discord
@@ -1370,3 +1371,6 @@ campaigns.startCampaignSweep(clients);
 // Verification cards: detect ones deleted from their channel and move them to
 // the "deleted" list (keeping their stats).
 cards.startCardSweep(clients);
+
+// Data backups: rolling local snapshots + off-site copies to a Discord channel.
+backup.startBackupSweep(clients);
