@@ -401,6 +401,7 @@ async function handleAdmin(req, res, path, clients, config) {
     // Owner-only: business KPIs (#12) + ad inventory / overselling (#8).
     if (path === '/admin/bi' && req.method === 'GET') {
         if (!isOwner) return ownerOnly();
+        const now = Date.now();
         const WEEK = 604800000;
         const jl = loadJSON('joinlinks.json', []);
         const jArr = Array.isArray(jl) ? jl : [];
