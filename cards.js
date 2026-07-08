@@ -6,7 +6,23 @@
 // explicitly asked. Only the bot instance that AUTHORED a message can edit or
 // delete it, so each op locates that instance in the fleet.
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AuditLogEvent, PermissionsBitField } = require('discord.js');
+const https = require('https');
 const { loadJSON, saveJSON } = require('./database.js');
+
+// Fetch a small image URL (role icon) into a Buffer. Best-effort; null on error.
+function fetchBuffer(url) {
+    return new Promise((resolve) => {
+        try {
+            https.get(url, (res) => {
+                if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+                const chunks = [];
+                res.on('data', (c) => chunks.push(c));
+                res.on('end', () => resolve(Buffer.concat(chunks)));
+                res.on('error', () => resolve(null));
+            }).on('error', () => resolve(null));
+        } catch { resolve(null); }
+    });
+}
 
 function loadCards() { const r = loadJSON('cards.json', []); return Array.isArray(r) ? r : []; }
 function saveCards(list) { saveJSON('cards.json', Array.isArray(list) ? list : []); return loadCards(); }
@@ -182,6 +198,79 @@ async function republish(clients, messageId) {
     removeCard(messageId);
     const rec = addCard({ messageId: sent.id, channelId: sent.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, description, botId: loc.client.user.id, createdAt: card.createdAt });
     return { ok: true, card: rec };
+}
+
+// Reset a card's verification role: recreate an identical role from scratch
+// (name, colour, icon/emoji, server permissions AND every per-channel overwrite),
+// repoint the card at the new role, then delete the old one. Deleting the old
+// role strips it from every member, so everyone must verify again — without the
+// owner manually rebuilding the role, its channel permissions and the card.
+async function resetRole(clients, messageId) {
+    const card = getCard(messageId);
+    if (!card) return { ok: false, error: 'not-tracked' };
+    const loc = await locate(clients, card.channelId, messageId);
+    if (!loc) return { ok: false, error: 'not-found' };
+    if (!loc.client) return { ok: false, error: 'not-own-message' };
+    const guild = loc.channel.guild;
+    if (!guild) return { ok: false, error: 'no-guild' };
+
+    // Resolve the role: explicit card role, else the legacy "Verified" role.
+    const oldRole = card.roleId
+        ? guild.roles.cache.get(card.roleId)
+        : guild.roles.cache.find((r) => r.name === 'Verified');
+    if (!oldRole) return { ok: false, error: 'no-role' };
+    if (oldRole.id === guild.id) return { ok: false, error: 'role-everyone' };
+    if (oldRole.managed) return { ok: false, error: 'role-managed' }; // bot/integration role
+
+    const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
+    if (!me?.permissions.has(PermissionsBitField.Flags.ManageRoles)) return { ok: false, error: 'no-perms' };
+    // The bot's highest role must sit ABOVE the target to delete/recreate it.
+    if (me.roles.highest.comparePositionTo(oldRole) <= 0) return { ok: false, error: 'role-too-high' };
+
+    // 1) Recreate the role with identical core settings. Icon needs boost L2 —
+    //    if it's rejected, retry without it rather than fail the whole reset.
+    let icon = null;
+    if (oldRole.icon) {
+        icon = await fetchBuffer(oldRole.iconURL({ size: 256, extension: 'png' })).catch(() => null);
+    }
+    const baseOpts = {
+        name: oldRole.name,
+        color: oldRole.color,
+        hoist: oldRole.hoist,
+        mentionable: oldRole.mentionable,
+        permissions: oldRole.permissions,
+        reason: 'Verification reset — recreate role'
+    };
+    if (oldRole.unicodeEmoji) baseOpts.unicodeEmoji = oldRole.unicodeEmoji;
+    let newRole;
+    try {
+        newRole = await guild.roles.create(icon ? { ...baseOpts, icon } : baseOpts);
+    } catch (e) {
+        if (!icon) return { ok: false, error: 'create-failed' };
+        newRole = await guild.roles.create(baseOpts).catch(() => null);
+        if (!newRole) return { ok: false, error: 'create-failed' };
+    }
+
+    // 2) Copy every per-channel permission overwrite from the old role.
+    for (const channel of guild.channels.cache.values()) {
+        if (!channel?.permissionOverwrites) continue;
+        const ow = channel.permissionOverwrites.cache.get(oldRole.id);
+        if (!ow) continue;
+        const opts = {};
+        for (const p of ow.allow.toArray()) opts[p] = true;
+        for (const p of ow.deny.toArray()) opts[p] = false;
+        await channel.permissionOverwrites.create(newRole, opts, { reason: 'Verification reset — copy overwrites' }).catch(() => null);
+    }
+
+    // 3) Match hierarchy position (best-effort), then remove the old role.
+    await newRole.setPosition(oldRole.position).catch(() => null);
+    await oldRole.delete('Verification reset — old role removed').catch(() => null);
+
+    // 4) Repoint the card at the new role and rebuild its message.
+    const rec = addCard({ ...card, roleId: newRole.id });
+    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(guild, card.creatorId, newRole.id, card.description ?? null) }).catch(() => null);
+
+    return { ok: true, card: rec, oldRoleId: oldRole.id, newRoleId: newRole.id, roleName: newRole.name };
 }
 
 // Can a deleted card be re-published in its original channel? Cache-based (no
@@ -402,7 +491,7 @@ async function handleMessageDelete(clients, message) {
 module.exports = {
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate, DEFAULT_DESCRIPTION,
-    register, fix, edit, remove, republish, restore, restoreInfo,
+    register, fix, edit, remove, republish, restore, restoreInfo, resetRole,
     trackClick, clickWindows, clicksForKey, scanAll, getScanState,
     markDeleted, removeCard, sweepDeleted, startCardSweep, handleMessageDelete
 };

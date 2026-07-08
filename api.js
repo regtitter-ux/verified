@@ -1402,6 +1402,18 @@ async function handleAdmin(req, res, path, clients, config) {
         if (r.ok) auditDo('card.' + op, mid);
         return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card || null } : { error: r.error || 'failed' }, cors);
     }
+    // Reset a card's verification role: recreate an identical role (perms +
+    // channel overwrites + name/colour/icon), repoint the card, delete the old.
+    if (path === '/admin/cards/reset-role' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const mid = String(body?.messageId || '');
+        if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
+        const r = await cards.resetRole(clients, mid).catch((e) => ({ ok: false, error: e.message }));
+        if (r.ok) auditDo('card.reset-role', `${mid} ${r.oldRoleId}→${r.newRoleId}`);
+        return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card, roleName: r.roleName } : { error: r.error || 'failed' }, cors);
+    }
     // Permanently drop a card from the (deleted) registry.
     if (path === '/admin/cards/purge' && req.method === 'POST') {
         if (!isOwner) return ownerOnly();
