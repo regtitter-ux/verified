@@ -40,13 +40,16 @@ function markDeleted(messageId, deletedBy = null) {
     return list[i];
 }
 
-// The canonical verification-card message payload.
-function buildCard(guild, creatorId, roleId) {
+const DEFAULT_DESCRIPTION = 'To gain full access to the server, you must complete verification\nClick the button';
+
+// The canonical verification-card message payload. `description` overrides the
+// embed body per card (empty → the default text).
+function buildCard(guild, creatorId, roleId, description) {
     const icon = guild?.iconURL?.({ dynamic: true }) || null;
     const embed = new EmbedBuilder()
         .setAuthor({ name: guild?.name || 'Server', iconURL: icon })
         .setTitle('Get verified!')
-        .setDescription('To gain full access to the server, you must complete verification\nClick the button')
+        .setDescription((description && String(description).trim()) ? String(description) : DEFAULT_DESCRIPTION)
         .setThumbnail(icon)
         .setColor('#5865F2')
         .setFooter({ text: `Created by: ${creatorId}` });
@@ -66,10 +69,11 @@ function parseMsgRef(input) {
     return null;
 }
 
-// Recover a card's owner (footer) and role (button customId) from a message.
+// Recover a card's owner (footer), role (button customId) and embed body.
 function extractCard(msg) {
     const footer = msg?.embeds?.[0]?.footer?.text || '';
     const creatorId = (footer.match(/Created by:\s*(\d{17,20})/) || [])[1] || null;
+    const description = msg?.embeds?.[0]?.description || null;
     let roleId = null;
     for (const row of msg?.components || []) {
         for (const comp of row.components || []) {
@@ -78,7 +82,7 @@ function extractCard(msg) {
         }
         if (roleId) break;
     }
-    return { creatorId, roleId };
+    return { creatorId, roleId, description };
 }
 
 // Locate the message and the fleet client that AUTHORED it (the only one that
@@ -105,10 +109,11 @@ async function register(clients, ref) {
     const loc = await locate(clients, r.channelId, r.messageId);
     if (!loc) return { ok: false, error: 'not-found' };
     if (!loc.client) return { ok: false, error: 'not-own-message' };
-    const { creatorId, roleId } = extractCard(loc.msg);
+    const { creatorId, roleId, description } = extractCard(loc.msg);
     if (!creatorId) return { ok: false, error: 'not-a-card' };
-    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId) }).catch(() => null);
-    const rec = addCard({ messageId: r.messageId, channelId: r.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, botId: loc.client.user.id });
+    const desc = (description && description !== DEFAULT_DESCRIPTION) ? description : null;
+    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId, desc) }).catch(() => null);
+    const rec = addCard({ messageId: r.messageId, channelId: r.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, description: desc, botId: loc.client.user.id });
     return { ok: true, card: rec };
 }
 
@@ -122,9 +127,10 @@ async function fix(clients, messageId) {
     const ex = extractCard(loc.msg);
     const creatorId = card.creatorId || ex.creatorId;
     const roleId = card.roleId ?? ex.roleId;
+    const description = card.description ?? ((ex.description && ex.description !== DEFAULT_DESCRIPTION) ? ex.description : null);
     if (!creatorId) return { ok: false, error: 'no-owner' };
-    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId) });
-    addCard({ ...card, creatorId, roleId });
+    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId, description) });
+    addCard({ ...card, creatorId, roleId, description });
     return { ok: true };
 }
 
@@ -137,9 +143,14 @@ async function edit(clients, messageId, patch = {}) {
     if (!loc.client) return { ok: false, error: 'not-own-message' };
     const creatorId = patch.creatorId || card.creatorId;
     const roleId = patch.roleId !== undefined ? (patch.roleId || null) : card.roleId;
+    let description = card.description ?? null;
+    if (patch.description !== undefined) {
+        const d = String(patch.description).trim();
+        description = d ? patch.description : null; // empty → default text
+    }
     if (!creatorId) return { ok: false, error: 'no-owner' };
-    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId) });
-    const rec = addCard({ ...card, creatorId, roleId });
+    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId, description) });
+    const rec = addCard({ ...card, creatorId, roleId, description });
     return { ok: true, card: rec };
 }
 
@@ -163,12 +174,13 @@ async function republish(clients, messageId) {
     const ex = extractCard(loc.msg);
     const creatorId = card.creatorId || ex.creatorId;
     const roleId = card.roleId ?? ex.roleId;
+    const description = card.description ?? ((ex.description && ex.description !== DEFAULT_DESCRIPTION) ? ex.description : null);
     if (!creatorId) return { ok: false, error: 'no-owner' };
-    const sent = await loc.channel.send(buildCard(loc.channel.guild, creatorId, roleId)).catch(() => null);
+    const sent = await loc.channel.send(buildCard(loc.channel.guild, creatorId, roleId, description)).catch(() => null);
     if (!sent) return { ok: false, error: 'send-failed' };
     await loc.msg.delete().catch(() => null);
     removeCard(messageId);
-    const rec = addCard({ messageId: sent.id, channelId: sent.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, botId: loc.client.user.id, createdAt: card.createdAt });
+    const rec = addCard({ messageId: sent.id, channelId: sent.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, description, botId: loc.client.user.id, createdAt: card.createdAt });
     return { ok: true, card: rec };
 }
 
@@ -333,7 +345,7 @@ async function handleMessageDelete(clients, message) {
 
 module.exports = {
     loadCards, saveCards, addCard, removeCard, getCard,
-    buildCard, parseMsgRef, extractCard, locate,
+    buildCard, parseMsgRef, extractCard, locate, DEFAULT_DESCRIPTION,
     register, fix, edit, remove, republish,
     trackClick, clickWindows, clicksForKey, scanAll, getScanState,
     markDeleted, removeCard, sweepDeleted, startCardSweep, handleMessageDelete

@@ -1169,6 +1169,8 @@ async function handleAdmin(req, res, path, clients, config) {
                 creatorName: userNameOf(clients, c.creatorId),
                 roleId: rid,
                 roleName: roleNameOf(clients, c.guildId, rid),
+                description: c.description || cards.DEFAULT_DESCRIPTION,
+                customDescription: Boolean(c.description),
                 link: (c.guildId && c.channelId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
                 createdAt: c.createdAt || 0,
                 avgVerifySeconds,
@@ -1245,6 +1247,7 @@ async function handleAdmin(req, res, path, clients, config) {
             if (rid && !/^\d{17,20}$/.test(rid)) return send(res, 400, { error: 'bad role id' }, cors);
             patch.roleId = rid || null;
         }
+        if (body.description !== undefined) patch.description = String(body.description).slice(0, 4000);
         const r = await cards.edit(clients, mid, patch).catch((e) => ({ ok: false, error: e.message }));
         return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card } : { error: r.error || 'failed' }, cors);
     }
