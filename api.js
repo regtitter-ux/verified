@@ -286,8 +286,8 @@ async function handleAdmin(req, res, path, clients, config) {
         const url = new URL(req.url, 'http://x');
         const code = url.searchParams.get('code');
         const state = url.searchParams.get('state');
-        const kind = adminAuth.verifyState(state); // 'admin' | 'buyer' | null
-        const dest = kind === 'buyer' ? '/order/' : '/admin/';
+        const kind = adminAuth.verifyState(state); // 'admin' | 'buyer' | 'partner' | null
+        const dest = kind === 'buyer' ? '/order/' : kind === 'partner' ? '/partner/' : '/admin/';
         const back = adminAuth.adminOrigin() + dest;
         if (!code || !kind) {
             res.writeHead(302, { Location: back + '?login=denied' });
@@ -297,8 +297,9 @@ async function handleAdmin(req, res, path, clients, config) {
         try { uid = await adminAuth.resolveOauthUser(code); } catch { uid = null; }
         if (!uid) { res.writeHead(302, { Location: back + '?login=denied' }); return res.end(); }
 
-        // Buyers: any Discord user may log in to the order panel.
-        if (kind === 'buyer') {
+        // Buyers and partners: any Discord user may log in (same user session
+        // cookie); only the destination page differs.
+        if (kind === 'buyer' || kind === 'partner') {
             const token = adminAuth.issueBuyerSession(uid);
             res.writeHead(302, { Location: back, 'Set-Cookie': adminAuth.buyerCookieHeader(token) });
             return res.end();
@@ -1588,6 +1589,93 @@ async function handleBuyer(req, res, path, clients, config) {
     return send(res, 404, { error: 'unknown endpoint' }, cors);
 }
 
+// ---------- Partner cabinet ----------
+// A Discord-login dashboard for partners: earnings, paid verifications, payout
+// history, requisites. Same user session cookie as the order panel.
+async function handlePartner(req, res, path, clients, config) {
+    const cors = corsHeaders(req);
+    if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
+    if (!adminAuth.enabled()) return send(res, 503, { error: 'auth not configured' }, cors);
+
+    if (path === '/partner/oauth/login' && req.method === 'GET') {
+        res.writeHead(302, { Location: adminAuth.oauthAuthorizeUrl(adminAuth.issueState('partner')) });
+        return res.end();
+    }
+    if (path === '/partner/logout' && req.method === 'POST') {
+        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': adminAuth.buyerCookieHeader('', { clear: true }) });
+    }
+    if (path === '/partner/whoami' && req.method === 'GET') {
+        const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+        return send(res, 200, sess ? { authed: true, userId: sess.userId } : { authed: false }, cors);
+    }
+
+    const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+    if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
+    const userId = sess.userId;
+
+    if (path === '/partner/me' && req.method === 'GET') {
+        const settings = loadJSON('settings.json');
+        const s = settings[userId] || {};
+        const now = Date.now();
+
+        // Paid verifications (adKey), grouped by server + windows.
+        const stats = userStats(userId);
+
+        // Earnings reconciliation from joinlinks (same as the /bal owner view).
+        const jl = loadJSON('joinlinks.json', []);
+        const mine = (Array.isArray(jl) ? jl : []).filter((r) => r && r.creatorId === userId);
+        const r2 = (n) => +((Number(n) || 0).toFixed(2));
+        const sumAmt = (arr) => r2(arr.reduce((a, r) => a + (Number(r.amount) || 0), 0));
+        const standing = mine.filter((r) => r.status === 'joined' || r.status === 'settled');
+        const clawed = mine.filter((r) => r.status === 'left');
+
+        const wds = Array.isArray(s.withdrawals) ? s.withdrawals : [];
+        const withdrawnDone = r2(wds.filter((w) => w.status === 'completed').reduce((a, w) => a + (Number(w.amount) || 0), 0));
+
+        const baseJoin = Number.isFinite(Number(s.joinBid)) ? Number(s.joinBid) : 5;
+        const boosted = boostActive(s);
+
+        return send(res, 200, {
+            userId,
+            balance: money(s.balance),
+            requisites: (s.requisites || '').trim(),
+            joinRate: boosted ? Math.max(baseJoin, BOOST_RATE) : baseJoin,
+            boosted,
+            boostLeftMs: boosted ? Math.max(0, BOOST_MS - (now - Number(s.referrerAt || 0))) : 0,
+            referrer: s.referrer || null,
+            referralsCount: Array.isArray(s.referrals) ? s.referrals.length : 0,
+            refBonusAccrued: money(s.refBonusAccrued),
+            autoPayout: Boolean(s.autoPayout),
+            standingJoins: standing.length,
+            standingPaid: sumAmt(standing),
+            clawedJoins: clawed.length,
+            clawedAmount: sumAmt(clawed),
+            withdrawnDone,
+            verifications: {
+                all: stats.total,
+                perGuild: stats.perGuild.map((g) => ({ ...g, name: guildNameOf(clients, g.guildId) }))
+            },
+            withdrawals: wds
+                .map((w) => ({ id: w.id, amount: money(w.amount), status: w.status, createdAt: w.createdAt || 0, completedAt: w.completedAt || 0 }))
+                .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+                .slice(0, 50),
+            minWithdraw: 10
+        }, cors);
+    }
+
+    if (path === '/partner/requisites' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const settings = loadJSON('settings.json');
+        if (!settings[userId]) settings[userId] = blankUser();
+        settings[userId].requisites = String(body?.requisites ?? '').trim().slice(0, 1000);
+        saveJSON('settings.json', settings);
+        return send(res, 200, { ok: true, requisites: settings[userId].requisites }, cors);
+    }
+
+    return send(res, 404, { error: 'unknown endpoint' }, cors);
+}
+
 function startApiServer(clients, config) {
     const port = Number(process.env.API_PORT || process.env.PORT || 8080);
 
@@ -1614,6 +1702,11 @@ function startApiServer(clients, config) {
             // Buyer order panel (Discord-OAuth, CORS-scoped to ADMIN_ORIGIN).
             if (p.startsWith('/order/')) {
                 return await handleBuyer(req, res, p, clients, config);
+            }
+
+            // Partner cabinet (same user session as the order panel).
+            if (p.startsWith('/partner/')) {
+                return await handlePartner(req, res, p, clients, config);
             }
 
             if (!p.startsWith('/api/')) return send(res, 404, { error: 'Not found' });
