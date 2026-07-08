@@ -931,6 +931,7 @@ async function handleAdmin(req, res, path, clients, config) {
                 boostLeftMs,
                 refBonusAccrued: money(s.refBonusAccrued),
                 autoPayout: Boolean(s.autoPayout),
+                autoTransfer: Boolean(s.autoTransfer),
                 referrer: s.referrer || null,
                 referralsCount: Array.isArray(s.referrals) ? s.referrals.length : 0,
                 verifications: vCount[uid] || 0,
@@ -1008,6 +1009,8 @@ async function handleAdmin(req, res, path, clients, config) {
             boostLeftMs: boostedD ? Math.max(0, BOOST_MS - (Date.now() - Number(s.referrerAt || 0))) : 0,
             refBonusAccrued: money(s.refBonusAccrued),
             autoPayout: Boolean(s.autoPayout),
+            autoTransfer: Boolean(s.autoTransfer),
+            tgUserId: s.tgUserId || null,
             referrer: s.referrer || null,
             referrals: Array.isArray(s.referrals) ? s.referrals : [],
             botId: s.botId || null,
@@ -1079,6 +1082,20 @@ async function handleAdmin(req, res, path, clients, config) {
             saveJSON('settings.json', settings);
             auditDo('autopayout', `${userId}: ${s.autoPayout ? 'on' : 'off'}`);
             return send(res, 200, { ok: true, autoPayout: s.autoPayout }, cors);
+        }
+        // Direct-transfer auto-payout (no check): a toggle + the recipient's
+        // numeric Telegram id. Can't enable without an id to send to.
+        if (field === 'autotransfer') {
+            if (body.tgUserId !== undefined) {
+                const tg = String(body.tgUserId || '').trim();
+                if (tg && !/^\d{5,15}$/.test(tg)) return send(res, 400, { error: 'bad-tg-id' }, cors);
+                s.tgUserId = tg || null;
+            }
+            s.autoTransfer = Boolean(body.autoTransfer);
+            if (s.autoTransfer && !s.tgUserId) return send(res, 400, { error: 'tg-id-required' }, cors);
+            saveJSON('settings.json', settings);
+            auditDo('autotransfer', `${userId}: ${s.autoTransfer ? 'on' : 'off'}${s.tgUserId ? ' tg=' + s.tgUserId : ''}`);
+            return send(res, 200, { ok: true, autoTransfer: s.autoTransfer, tgUserId: s.tgUserId || null }, cors);
         }
         if (field === 'referrals') {
             const raw = Array.isArray(body.referrals) ? body.referrals : [];

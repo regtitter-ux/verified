@@ -60,6 +60,21 @@ async function createUsdtCheck(amount, opts = {}) {
     return call('createCheck', { asset: 'USDT', amount: String(amount), ...opts });
 }
 
+// Send USDT DIRECTLY to a user's Crypto Pay balance — no check to claim, the
+// money just lands in their @CryptoBot wallet. Needs the recipient's numeric
+// Telegram user_id (Crypto Pay does not accept @username). `spendId` makes the
+// transfer idempotent: repeating the same spend_id never double-pays. Returns
+// the Transfer object (has transfer_id, status 'completed').
+async function transferUsdt(telegramUserId, amount, spendId, opts = {}) {
+    return call('transfer', {
+        user_id: Number(telegramUserId),
+        asset: 'USDT',
+        amount: String(amount),
+        spend_id: String(spendId).slice(0, 64),
+        ...opts
+    });
+}
+
 // Create a USDT invoice. Paying it from your own @CryptoBot wallet is how you top up
 // the app balance (there's no direct deposit — the app pool is fed by paid invoices).
 // Returns the Invoice object (has bot_invoice_url / mini_app_invoice_url / pay_url).
@@ -67,4 +82,4 @@ async function createUsdtInvoice(amount, opts = {}) {
     return call('createInvoice', { asset: 'USDT', amount: String(amount), ...opts });
 }
 
-module.exports = { enabled, call, usdtAvailable, createUsdtCheck, createUsdtInvoice, HOST };
+module.exports = { enabled, call, usdtAvailable, createUsdtCheck, transferUsdt, createUsdtInvoice, HOST };

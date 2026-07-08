@@ -154,13 +154,23 @@ async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
 
     const amount = balance;
 
-    // Fully-automatic USDT payout — only for users the owner opted in (s.autoPayout)
-    // and only when Crypto Pay is configured. Reserve the balance atomically first
-    // (set 0 + save, before any await) so a concurrent trigger can't double-pay.
+    // Fully-automatic USDT payout. Two modes the owner opts a user into; both
+    // reserve the balance atomically first (set 0 + save, before any await) so a
+    // concurrent trigger can't double-pay. The bonus-first drain excludes any
+    // referral income from what the referrer earns 10% on, so commissions don't
+    // compound.
+    //
+    // Direct transfer (no check) takes precedence: money lands straight in the
+    // recipient's @CryptoBot wallet, no claim link. Needs their Telegram id.
+    if (cryptopay.enabled() && s.autoTransfer && s.tgUserId) {
+        s.balance = 0;
+        const eligible = drainRefBonusPool(s, amount);
+        saveJSON('settings.json', settings);
+        return autoPayViaTransfer(clients, userId, amount, _seen, eligible);
+    }
+    // Otherwise fall back to a redeemable USDT check the user claims themselves.
     if (cryptopay.enabled() && s.autoPayout) {
         s.balance = 0;
-        // Bonus-first drain: excludes any referral income from what the
-        // referrer earns 10% on, so referral commissions don't compound.
         const eligible = drainRefBonusPool(s, amount);
         saveJSON('settings.json', settings);
         return autoPayViaCheck(clients, userId, amount, _seen, eligible);
@@ -335,6 +345,115 @@ async function autoPayViaCheck(clients, userId, amount, _seen, eligibleForReferr
     } catch (e) {
         console.error('[CRYPTOPAY] audit post failed:', e.message);
     }
+}
+
+// The balance was already reserved (set to 0). Send USDT DIRECTLY to the user's
+// Crypto Pay balance (no check to claim) using their configured Telegram id.
+// On any failure, refund the reservation so it retries on the next earnings.
+async function autoPayViaTransfer(clients, userId, amount, _seen, eligibleForReferral = amount) {
+    const settings0 = loadJSON('settings.json');
+    const tgUserId = String(settings0[userId]?.tgUserId || '').trim();
+    if (!/^\d{5,15}$/.test(tgUserId)) {
+        refundReserved(userId, amount);
+        return alertOwnerTransferConfig(clients, userId, amount, 'no valid Telegram id configured');
+    }
+
+    // Make sure the app actually has the funds before transferring.
+    const available = await cryptopay.usdtAvailable().catch(() => null);
+    if (available === null) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'Crypto Pay is unreachable'); }
+    if (available < amount) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, `insufficient app USDT balance (have $${round2(available).toFixed(2)})`); }
+
+    const withdrawalId = `${userId}-${Date.now()}`;
+    let transfer;
+    try {
+        // spend_id = withdrawalId → idempotent; a network retry can't double-pay.
+        transfer = await cryptopay.transferUsdt(tgUserId, amount, withdrawalId, {
+            comment: 'Vemoni payout'
+        });
+    } catch (e) {
+        refundReserved(userId, amount);
+        const msg = e.message || 'unknown';
+        if (CRYPTOPAY_ADMIN_ERRORS.has(msg)) {
+            await alertOwnerCryptoPayConfig(clients, msg);
+            await dmOwner(clients, userId, {
+                content: `⚠️ Your auto-payout of **$${amount.toFixed(2)} USDT** is on hold — the admin has been notified. Your balance has been restored; it'll be sent as soon as the payout system is restored.`
+            }).catch(() => null);
+            return;
+        }
+        // Bad recipient (wrong id / never used @CryptoBot) — the OWNER set the
+        // Telegram id, so ping the owner to fix it rather than the user.
+        if (msg === 'USER_NOT_FOUND' || msg === 'RECIPIENT_NOT_FOUND') {
+            return alertOwnerTransferConfig(clients, userId, amount, `Crypto Pay rejected the recipient (${msg}) — check the Telegram id`);
+        }
+        return alertPayoutDeferred(clients, userId, amount, `direct transfer failed (${msg})`);
+    }
+
+    // Record the completed withdrawal.
+    const settings = loadJSON('settings.json');
+    if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
+    if (!Array.isArray(settings[userId].withdrawals)) settings[userId].withdrawals = [];
+    const withdrawal = {
+        id: withdrawalId,
+        amount,
+        status: 'completed',
+        method: 'cryptopay_transfer',
+        transferId: transfer.transfer_id || null,
+        tgUserId,
+        createdAt: Date.now(),
+        completedAt: Date.now()
+    };
+    settings[userId].withdrawals.push(withdrawal);
+    saveJSON('settings.json', settings);
+
+    logFunds(clients, {
+        type: 'debit', creatorId: userId, amount,
+        reason: `Auto-payout (direct USDT transfer #${transfer.transfer_id || '?'} → tg:${tgUserId})`
+    });
+
+    // Referral: pay whoever referred this user 10% of the eligible portion.
+    payReferral(clients, userId, eligibleForReferral, _seen);
+
+    // The money is already in their @CryptoBot wallet — just tell them.
+    await dmOwner(clients, userId, {
+        content: `✅ Your withdrawal of **$${amount.toFixed(2)} USDT** has been sent directly to your @CryptoBot wallet.`
+    }).catch(() => null);
+
+    // Audit record in the payout channel.
+    try {
+        const channel = await findPayoutChannel(clients);
+        if (channel) {
+            const user = await channel.client.users.fetch(userId).catch(() => null);
+            const embed = new EmbedBuilder()
+                .setTitle('Withdrawal auto-paid (direct USDT transfer)')
+                .setColor('#57F287')
+                .addFields(
+                    { name: 'User', value: `<@${userId}>${user ? ` (${user.tag})` : ''}`, inline: false },
+                    { name: 'Amount', value: `$${amount.toFixed(2)}`, inline: false },
+                    { name: 'Telegram ID', value: `\`${tgUserId}\``, inline: false },
+                    { name: 'Transfer ID', value: `\`${transfer.transfer_id || '—'}\``, inline: false },
+                    { name: 'Status', value: statusLabel('completed'), inline: false }
+                )
+                .setFooter({ text: `auto:${userId}:${withdrawal.id}` })
+                .setTimestamp();
+            await channel.send({ embeds: [embed] });
+        }
+    } catch (e) {
+        console.error('[CRYPTOPAY] transfer audit post failed:', e.message);
+    }
+}
+
+// Ping the service OWNER when a direct transfer can't go out because its
+// per-user config (the Telegram id they entered) is wrong. Throttled 6h per
+// affected user so a repeatedly-triggering balance doesn't spam.
+async function alertOwnerTransferConfig(clients, userId, amount, why) {
+    const settings = loadJSON('settings.json');
+    const now = Date.now();
+    if (settings[userId] && settings[userId]._transferAlertAt && now - settings[userId]._transferAlertAt < 6 * 3600000) return;
+    if (settings[userId]) { settings[userId]._transferAlertAt = now; saveJSON('settings.json', settings); }
+    await dmOwner(clients, OWNER_ID, {
+        content: `⚠️ **Прямой авто-вывод не прошёл** для <@${userId}> на **$${amount.toFixed(2)} USDT**: ${why}.\nПроверь Telegram ID получателя в настройках баланса. Баланс пользователя восстановлен — выплата повторится после исправления.`
+    }).catch(() => null);
+    console.error(`[CRYPTOPAY] transfer config issue for ${userId}: ${why}`);
 }
 
 // Mark a withdrawal as completed. Returns the withdrawal object or null.
