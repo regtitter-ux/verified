@@ -1719,7 +1719,7 @@ async function handlePartner(req, res, path, clients, config) {
         // "joined = stayed + left" is consistent per window.
         const leftByGuild = {};
         for (const r of clawed) {
-            const g = r.cardGuildId || r.guildId; if (!g) continue;
+            const g = r.cardGuildId; if (!g) continue; // only the partner's own card server
             const t = Number(r.ts) || 0;
             const w = (leftByGuild[g] ||= { hour: 0, day: 0, week: 0, month: 0, total: 0 });
             w.total++;
@@ -1774,7 +1774,12 @@ async function handlePartner(req, res, path, clients, config) {
         const r2 = (n) => +((Number(n) || 0).toFixed(2));
         const servers = {};
         for (const r of mine) {
-            const sv = r.cardGuildId || r.guildId || 'unknown';
+            // Group strictly by the partner's OWN card server. Legacy records
+            // predating cardGuildId have it null — never fall back to guildId
+            // (that's the SPONSOR server, which would show a server the partner
+            // has no card on and isn't even a member of).
+            const sv = r.cardGuildId;
+            if (!sv) continue;
             const sp = r.guildId || 'unknown';
             const standing = r.status === 'joined' || r.status === 'settled';
             const left = r.status === 'left';
