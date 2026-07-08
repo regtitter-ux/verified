@@ -396,6 +396,61 @@ async function handleAdmin(req, res, path, clients, config) {
         }, cors);
     }
 
+    // Owner-only: business KPIs (#12) + ad inventory / overselling (#8).
+    if (path === '/admin/bi' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const WEEK = 604800000;
+        const jl = loadJSON('joinlinks.json', []);
+        const jArr = Array.isArray(jl) ? jl : [];
+        const paid = jArr.filter((r) => r.status === 'joined' || r.status === 'settled');
+
+        // Weekly revenue & joins, last 8 weeks (oldest→newest).
+        const weeks = [];
+        for (let i = 7; i >= 0; i--) {
+            const start = now - (i + 1) * WEEK, end = now - i * WEEK;
+            let rev = 0, joins = 0;
+            for (const r of paid) {
+                const t = Number(r.ts) || 0;
+                if (t > start && t <= end) { rev += Number.isFinite(Number(r.revenue)) ? Number(r.revenue) : REVENUE_PER_JOIN; joins++; }
+            }
+            weeks.push({ revenue: money(rev), joins });
+        }
+
+        const partners7 = new Set(), partners30 = new Set();
+        for (const r of paid) { const t = Number(r.ts) || 0; if (t > now - WEEK) partners7.add(r.creatorId); if (t > now - 4 * WEEK) partners30.add(r.creatorId); }
+        const joins7 = paid.filter((r) => (Number(r.ts) || 0) > now - WEEK).length;
+        const joins30 = paid.filter((r) => (Number(r.ts) || 0) > now - 4 * WEEK).length;
+        const left30 = jArr.filter((r) => r.status === 'left' && (Number(r.leftAt || r.ts) || 0) > now - 4 * WEEK).length;
+        const churn = (joins30 + left30) > 0 ? left30 / (joins30 + left30) : 0;
+        let rev30 = 0; for (const r of paid) if ((Number(r.ts) || 0) > now - 4 * WEEK) rev30 += Number.isFinite(Number(r.revenue)) ? Number(r.revenue) : REVENUE_PER_JOIN;
+
+        const camps = Object.values(campaigns.loadCampaigns());
+        const activeCamps = camps.filter((c) => c.status === 'active');
+        const buyers30 = new Set(camps.filter((c) => (Number(c.paidAt || c.createdAt) || 0) > now - 4 * WEEK).map((c) => c.buyerId));
+
+        // Inventory: realized join throughput vs unmet campaign demand.
+        const verified = loadJSON('verified.json', []);
+        let demand = 0;
+        for (const c of activeCamps) demand += Math.max(0, (Number(c.purchased) || 0) - campaigns.delivered(c, verified));
+        const capacityPerDay = joins7 / 7;
+        const coverageDays = capacityPerDay > 0 ? demand / capacityPerDay : null;
+
+        return send(res, 200, {
+            weeks,
+            revenue30: money(rev30),
+            activePartners7: partners7.size, activePartners30: partners30.size,
+            joins7, joins30,
+            churnPct: +(churn * 100).toFixed(1),
+            activeCampaigns: activeCamps.length, buyers30: buyers30.size,
+            inventory: {
+                demand,
+                capacityPerDay: Math.round(capacityPerDay),
+                coverageDays: coverageDays != null ? +coverageDays.toFixed(1) : null,
+                oversold: coverageDays != null && coverageDays > 14
+            }
+        }, cors);
+    }
+
     if (path === '/admin/state' && req.method === 'GET') {
         const uid = config.ownerId;
         const settings = loadJSON('settings.json');
