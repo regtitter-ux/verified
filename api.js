@@ -1764,6 +1764,49 @@ async function handlePartner(req, res, path, clients, config) {
         }, cors);
     }
 
+    // History of every ad (sponsor) that ran on the partner's server(s), with
+    // per-server stats: how many joined via it, how many are still standing,
+    // how many left, and how much the partner earned from it. Grouped by the
+    // partner's own server (cardGuildId) → sponsor (guildId), from joinlinks.
+    if (path === '/partner/ad-history' && req.method === 'GET') {
+        const jl = loadJSON('joinlinks.json', []);
+        const mine = (Array.isArray(jl) ? jl : []).filter((r) => r && r.creatorId === userId);
+        const r2 = (n) => +((Number(n) || 0).toFixed(2));
+        const servers = {};
+        for (const r of mine) {
+            const sv = r.cardGuildId || r.guildId || 'unknown';
+            const sp = r.guildId || 'unknown';
+            const standing = r.status === 'joined' || r.status === 'settled';
+            const left = r.status === 'left';
+            const amt = Number(r.amount) || 0;
+            const t = Number(r.ts) || 0;
+            const S = (servers[sv] ||= { guildId: sv, ads: {}, totalJoined: 0, totalStayed: 0, totalLeft: 0, totalEarned: 0, lastAt: 0 });
+            const A = (S.ads[sp] ||= { sponsorGuildId: sp, joined: 0, stayed: 0, left: 0, earned: 0, firstAt: 0, lastAt: 0 });
+            A.joined++; S.totalJoined++;
+            if (standing) { A.stayed++; A.earned += amt; S.totalStayed++; S.totalEarned += amt; }
+            if (left) { A.left++; S.totalLeft++; }
+            if (t) { A.firstAt = A.firstAt ? Math.min(A.firstAt, t) : t; A.lastAt = Math.max(A.lastAt, t); S.lastAt = Math.max(S.lastAt, t); }
+        }
+        const out = Object.values(servers).map((S) => ({
+            guildId: S.guildId,
+            name: guildNameOf(clients, S.guildId),
+            icon: guildIconOf(clients, S.guildId),
+            totalJoined: S.totalJoined,
+            totalStayed: S.totalStayed,
+            totalLeft: S.totalLeft,
+            totalEarned: r2(S.totalEarned),
+            lastAt: S.lastAt,
+            ads: Object.values(S.ads).map((A) => ({
+                sponsorGuildId: A.sponsorGuildId,
+                sponsorName: guildNameOf(clients, A.sponsorGuildId),
+                sponsorIcon: guildIconOf(clients, A.sponsorGuildId),
+                joined: A.joined, stayed: A.stayed, left: A.left,
+                earned: r2(A.earned), firstAt: A.firstAt, lastAt: A.lastAt
+            })).sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0))
+        })).sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+        return send(res, 200, { servers: out }, cors);
+    }
+
     if (path === '/partner/requisites' && req.method === 'PUT') {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
