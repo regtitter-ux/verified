@@ -367,9 +367,15 @@ async function autoPayViaTransfer(clients, userId, amount, _seen, eligibleForRef
     let transfer;
     try {
         // spend_id = withdrawalId → idempotent; a network retry can't double-pay.
-        transfer = await cryptopay.transferUsdt(tgUserId, amount, withdrawalId, {
-            comment: 'Vemoni payout'
-        });
+        try {
+            transfer = await cryptopay.transferUsdt(tgUserId, amount, withdrawalId, { comment: 'Vemoni payout' });
+        } catch (e) {
+            // Some apps aren't allowed to attach comments — the comment is
+            // cosmetic, so retry the SAME transfer (same spend_id) without it.
+            if ((e.message || '') === 'CANNOT_ATTACH_COMMENT') {
+                transfer = await cryptopay.transferUsdt(tgUserId, amount, withdrawalId);
+            } else throw e;
+        }
     } catch (e) {
         refundReserved(userId, amount);
         const msg = e.message || 'unknown';
