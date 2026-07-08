@@ -23,6 +23,7 @@ const feed = require('./feed.js');
 const cards = require('./cards.js');
 const audit = require('./auditlog.js');
 const backup = require('./backup.js');
+const wallet = require('./wallet.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -1477,37 +1478,57 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, { ok: true, managers: managers.saveManagers(next) }, cors);
     }
 
-    // Create an order → CryptoBot invoice. Body: { invite, joins }.
-    if (path === '/order/create' && req.method === 'POST') {
+    // Wallet: balance + recent top-ups (reconciles pending top-ups first).
+    if (path === '/order/wallet' && req.method === 'GET') {
+        await wallet.reconcileTopups(buyerId, campaigns.isInvoicePaid).catch(() => null);
+        return send(res, 200, {
+            balance: wallet.balanceOf(buyerId),
+            topups: wallet.recentTopups(buyerId),
+            minTopup: wallet.MIN_TOPUP,
+            cryptoEnabled: cryptopay.enabled()
+        }, cors);
+    }
+    // Top up the wallet via a CryptoBot invoice. Body: { amount }.
+    if (path === '/order/wallet/topup' && req.method === 'POST') {
         if (!cryptopay.enabled()) return send(res, 503, { error: 'Оплата временно недоступна' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
-        // Strict: the whole field must be a clean Discord invite — no extra
-        // text, spaces or other links around it.
+        const amount = +(Number(body?.amount) || 0).toFixed(2);
+        if (!(amount >= wallet.MIN_TOPUP)) return send(res, 400, { error: 'min-topup' }, cors);
+        let invoice = null;
+        try { invoice = await cryptopay.createUsdtInvoice(amount.toFixed(2), { description: `Пополнение баланса Vemoni на $${amount.toFixed(2)}`.slice(0, 1024) }); }
+        catch (e) { return send(res, 502, { error: 'invoice-failed' }, cors); }
+        const invoiceUrl = invoice.bot_invoice_url || invoice.mini_app_invoice_url || invoice.web_app_invoice_url || invoice.pay_url;
+        wallet.addTopup(buyerId, { invoiceId: invoice.invoice_id, amount, status: 'pending', createdAt: Date.now() });
+        return send(res, 200, { ok: true, invoiceUrl, amount }, cors);
+    }
+
+    // Create a campaign, paid instantly from the wallet balance. Body: { invite, joins }.
+    if (path === '/order/create' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const rawInvite = String(body?.invite || '').trim();
         const m = rawInvite.match(/^(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/([a-z0-9-]{2,32})$/i)
             || rawInvite.match(/^([a-z0-9-]{2,32})$/i);
         if (!m) return send(res, 400, { error: 'bad-invite' }, cors);
         const inviteCode = m[1];
         const joins = Math.floor(Number(body?.joins));
-        if (!Number.isFinite(joins) || joins < campaigns.MIN_JOINS) {
-            return send(res, 400, { error: 'min-joins' }, cors);
-        }
-        // Resolve the invite → guild id + name (works without a bot on it).
+        if (!Number.isFinite(joins) || joins < campaigns.MIN_JOINS) return send(res, 400, { error: 'min-joins' }, cors);
+
         let inv = null;
         for (const c of clients) { inv = await c.fetchInvite(inviteCode).catch(() => null); if (inv) break; }
         const sponsorGuildId = inv?.guild?.id || null;
         if (!sponsorGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
 
-        // Managers buy at a discounted per-100 rate and earn a commission on
-        // each delivered join (recorded on the campaign for the stats + payout).
         const isMgr = managers.isManager(buyerId);
         const pricePer100 = isMgr ? managers.PRICE_PER_100 : campaigns.PRICE_PER_100;
         const price = +(joins * pricePer100 / 100).toFixed(2);
-        let invoice = null;
-        try { invoice = await cryptopay.createUsdtInvoice(price, { description: `Реклама: ${joins} заходов на сервер ${inv.guild.name || sponsorGuildId}`.slice(0, 1024) }); }
-        catch (e) { return send(res, 502, { error: 'invoice-failed' }, cors); }
-        const invoiceUrl = invoice.bot_invoice_url || invoice.mini_app_invoice_url || invoice.web_app_invoice_url || invoice.pay_url;
+
+        // Pay from the prepaid wallet (reconcile pending top-ups first).
+        await wallet.reconcileTopups(buyerId, campaigns.isInvoicePaid).catch(() => null);
+        const bal = wallet.balanceOf(buyerId);
+        if (bal < price) return send(res, 402, { error: 'insufficient', balance: bal, price, shortfall: +(price - bal).toFixed(2) }, cors);
+        if (wallet.debit(buyerId, price) === null) return send(res, 402, { error: 'insufficient', balance: bal, price }, cors);
 
         const camps = campaigns.loadCampaigns();
         const id = campaigns.newId();
@@ -1518,13 +1539,12 @@ async function handleBuyer(req, res, path, clients, config) {
             purchased: joins, price, pricePer100,
             managerId: isMgr ? buyerId : null,
             commissionRate: isMgr ? managers.COMMISSION_RATE : 0,
-            status: 'pending_payment',
-            invoiceId: invoice.invoice_id, invoiceUrl,
+            status: 'active', paidFromWallet: true,
             disabledGuilds: [], paused: false,
-            createdAt: Date.now(), paidAt: 0, completedAt: 0
+            createdAt: Date.now(), paidAt: Date.now(), completedAt: 0
         };
         campaigns.saveCampaigns(camps);
-        return send(res, 200, { ok: true, invoiceUrl, price, campaign: campaigns.publicView(camps[id]) }, cors);
+        return send(res, 200, { ok: true, price, balance: wallet.balanceOf(buyerId), campaign: campaigns.publicView(camps[id]) }, cors);
     }
 
     // My campaigns (reconciles pending payments first so a just-paid order flips to active).
