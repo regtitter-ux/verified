@@ -1860,12 +1860,50 @@ async function handlePartner(req, res, path, clients, config) {
     }
 
     // The partner's own active verification cards — same rich stats as the
-    // admin "Экстренно" list, but scoped to cards this partner owns (read-only).
+    // admin "Экстренно" list, scoped to cards this partner owns.
     if (path === '/partner/cards' && req.method === 'GET') {
         const mine = cards.loadCards().filter((c) => c.creatorId === userId && !c.deletedAt);
         const { list, avgVerifySeconds } = enrichCards(clients, mine);
         const active = list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
         return send(res, 200, { cards: active, avgVerifySeconds }, cors);
+    }
+
+    // Card management, same actions as the admin "Экстренно" panel but a partner
+    // may only touch cards they own. The ownership guard reads the CURRENT owner
+    // before any change (so a partner can't act on someone else's card).
+    const ownCard = (mid) => { const c = cards.getCard(mid); return (c && c.creatorId === userId && !c.deletedAt) ? c : null; };
+    if ((path === '/partner/cards/fix' || path === '/partner/cards/republish' || path === '/partner/cards/delete' || path === '/partner/cards/reset-role') && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const mid = String(body?.messageId || '');
+        if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
+        if (!ownCard(mid)) return send(res, 403, { error: 'not-your-card' }, cors);
+        let r;
+        if (path.endsWith('/delete')) r = await cards.remove(clients, mid, userId).catch((e) => ({ ok: false, error: e.message }));
+        else if (path.endsWith('/fix')) r = await cards.fix(clients, mid).catch((e) => ({ ok: false, error: e.message }));
+        else if (path.endsWith('/republish')) r = await cards.republish(clients, mid).catch((e) => ({ ok: false, error: e.message }));
+        else r = await cards.resetRole(clients, mid).catch((e) => ({ ok: false, error: e.message }));
+        return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card || null, roleName: r.roleName } : { error: r.error || 'failed' }, cors);
+    }
+    if (path === '/partner/cards/edit' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const mid = String(body?.messageId || '');
+        if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
+        if (!ownCard(mid)) return send(res, 403, { error: 'not-your-card' }, cors);
+        const patch = {};
+        if (body.creatorId !== undefined) {
+            if (!/^\d{17,20}$/.test(String(body.creatorId))) return send(res, 400, { error: 'bad creator id' }, cors);
+            patch.creatorId = String(body.creatorId);
+        }
+        if (body.roleId !== undefined) {
+            const rid = String(body.roleId || '');
+            if (rid && !/^\d{17,20}$/.test(rid)) return send(res, 400, { error: 'bad role id' }, cors);
+            patch.roleId = rid || null;
+        }
+        if (body.description !== undefined) patch.description = String(body.description).slice(0, 4000);
+        const r = await cards.edit(clients, mid, patch).catch((e) => ({ ok: false, error: e.message }));
+        return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card } : { error: r.error || 'failed' }, cors);
     }
 
     if (path === '/partner/requisites' && req.method === 'PUT') {
