@@ -167,6 +167,86 @@ function userStats(userId) {
     return { total: win(mine), perGuild };
 }
 
+// Enrich verification-card records with the funnel stats (first click →
+// join checked → stayed), the average first-click→verify delay, and
+// guild/channel/role/owner names. Shared by the admin registry and the
+// partner cabinet so both show identical card cards. Returns
+// { list, avgVerifySeconds }, list mirroring the input order.
+function enrichCards(clients, records) {
+    const now = Date.now();
+    const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
+    const jArr = (() => { const j = loadJSON('joinlinks.json', []); return Array.isArray(j) ? j : []; })();
+    // Unique users per hour/day/week for a matched set of records.
+    const winOf = (items, tsField, uField) => {
+        const h = new Set(), d = new Set(), w = new Set();
+        for (const x of items) {
+            const t = Number(x[tsField]) || 0, u = x[uField];
+            if (t > now - 3600000) h.add(u);
+            if (t > now - 86400000) d.add(u);
+            if (t > now - 604800000) w.add(u);
+        }
+        return { hour: h.size, day: d.size, week: w.size };
+    };
+    const globalDeltas = []; // ms from first click → successful verification
+    const list = (Array.isArray(records) ? records : []).map((c) => {
+        const rid = c.roleId || null;
+        // Verified-and-still-standing for this card (stage 3), and clawed
+        // leavers (verified then left) — together they make "join checked".
+        const vmatch = vArr.filter((u) => u.creatorId === c.creatorId && u.guildId === c.guildId && (u.roleId || null) === rid);
+        const leftMatch = jArr.filter((r) => r.status === 'left' && r.creatorId === c.creatorId && r.cardGuildId === c.guildId && (r.roleId || null) === rid);
+        const stayed = winOf(vmatch, 'timestamp', 'id');
+        const leftW = winOf(leftMatch, 'ts', 'userId');
+        const checked = { hour: stayed.hour + leftW.hour, day: stayed.day + leftW.day, week: stayed.week + leftW.week };
+
+        // Average delay: for each successful verification, match the user's
+        // latest first-click at or before it (clicks are pruned to a week).
+        const byUser = {};
+        for (const e of cards.clicksForKey(c.guildId, c.roleId, c.creatorId)) (byUser[e.u] ||= []).push(e.t);
+        for (const u of Object.keys(byUser)) byUser[u].sort((a, b) => a - b);
+        const verifyEvents = [
+            ...vmatch.map((u) => ({ u: u.id, t: Number(u.timestamp) || 0 })),
+            ...leftMatch.map((r) => ({ u: r.userId, t: Number(r.ts) || 0 }))
+        ];
+        const deltas = [];
+        for (const ve of verifyEvents) {
+            const clicks = byUser[ve.u];
+            if (!clicks || !ve.t) continue;
+            let best = null;
+            for (const t of clicks) { if (t <= ve.t) best = t; else break; }
+            if (best != null && ve.t - best >= 0) { deltas.push(ve.t - best); globalDeltas.push(ve.t - best); }
+        }
+        const avgVerifySeconds = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length / 1000) : null;
+        const rinfo = c.deletedAt ? cards.restoreInfo(clients, c) : null;
+        return {
+            messageId: c.messageId,
+            channelId: c.channelId,
+            guildId: c.guildId,
+            guildName: guildNameOf(clients, c.guildId),
+            guildIcon: guildIconOf(clients, c.guildId),
+            channelName: channelNameOf(clients, c.channelId),
+            creatorId: c.creatorId || null,
+            creatorName: userNameOf(clients, c.creatorId),
+            roleId: rid,
+            roleName: roleNameOf(clients, c.guildId, rid),
+            description: c.description || cards.DEFAULT_DESCRIPTION,
+            customDescription: Boolean(c.description),
+            link: (c.guildId && c.channelId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
+            createdAt: c.createdAt || 0,
+            avgVerifySeconds,
+            deletedAt: c.deletedAt || 0,
+            deletedBy: c.deletedBy || null,
+            deletedByName: c.deletedBy ? userNameOf(clients, c.deletedBy) : null,
+            canRestore: rinfo ? rinfo.can : false,
+            restoreReason: rinfo ? rinfo.reason : null,
+            // Funnel: started (first click) → join checked (2nd click) → stayed.
+            stats: { clicks: cards.clickWindows(c.guildId, c.roleId, c.creatorId, now), checked, stayed }
+        };
+    });
+    const avgVerifySeconds = globalDeltas.length
+        ? Math.round(globalDeltas.reduce((a, b) => a + b, 0) / globalDeltas.length / 1000) : null;
+    return { list, avgVerifySeconds };
+}
+
 
 const DOCS = {
     name: 'Verification API',
@@ -1296,78 +1376,7 @@ async function handleAdmin(req, res, path, clients, config) {
     // Owner-only: verification-card registry + remote management.
     if (path === '/admin/cards' && req.method === 'GET') {
         if (!isOwner) return ownerOnly();
-        const now = Date.now();
-        const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
-        const jArr = (() => { const j = loadJSON('joinlinks.json', []); return Array.isArray(j) ? j : []; })();
-        // Unique users per hour/day/week for a matched set of records.
-        const winOf = (items, tsField, uField) => {
-            const h = new Set(), d = new Set(), w = new Set();
-            for (const x of items) {
-                const t = Number(x[tsField]) || 0, u = x[uField];
-                if (t > now - 3600000) h.add(u);
-                if (t > now - 86400000) d.add(u);
-                if (t > now - 604800000) w.add(u);
-            }
-            return { hour: h.size, day: d.size, week: w.size };
-        };
-        const globalDeltas = []; // ms from first click → successful verification, all cards
-        const list = cards.loadCards().map((c) => {
-            const rid = c.roleId || null;
-            // Verified-and-still-standing for this card (stage 3), and clawed
-            // leavers (verified then left) — together they make "join checked".
-            const vmatch = vArr.filter((u) => u.creatorId === c.creatorId && u.guildId === c.guildId && (u.roleId || null) === rid);
-            const leftMatch = jArr.filter((r) => r.status === 'left' && r.creatorId === c.creatorId && r.cardGuildId === c.guildId && (r.roleId || null) === rid);
-            const stayed = winOf(vmatch, 'timestamp', 'id');
-            const leftW = winOf(leftMatch, 'ts', 'userId');
-            const checked = { hour: stayed.hour + leftW.hour, day: stayed.day + leftW.day, week: stayed.week + leftW.week };
-
-            // Average delay: for each successful verification, match the user's
-            // latest first-click at or before it (clicks are pruned to a week,
-            // so only recent verifications contribute).
-            const byUser = {};
-            for (const e of cards.clicksForKey(c.guildId, c.roleId, c.creatorId)) (byUser[e.u] ||= []).push(e.t);
-            for (const u of Object.keys(byUser)) byUser[u].sort((a, b) => a - b);
-            const verifyEvents = [
-                ...vmatch.map((u) => ({ u: u.id, t: Number(u.timestamp) || 0 })),
-                ...leftMatch.map((r) => ({ u: r.userId, t: Number(r.ts) || 0 }))
-            ];
-            const deltas = [];
-            for (const ve of verifyEvents) {
-                const clicks = byUser[ve.u];
-                if (!clicks || !ve.t) continue;
-                let best = null;
-                for (const t of clicks) { if (t <= ve.t) best = t; else break; }
-                if (best != null && ve.t - best >= 0) { deltas.push(ve.t - best); globalDeltas.push(ve.t - best); }
-            }
-            const avgVerifySeconds = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length / 1000) : null;
-            const rinfo = c.deletedAt ? cards.restoreInfo(clients, c) : null;
-            return {
-                messageId: c.messageId,
-                channelId: c.channelId,
-                guildId: c.guildId,
-                guildName: guildNameOf(clients, c.guildId),
-                guildIcon: guildIconOf(clients, c.guildId),
-                channelName: channelNameOf(clients, c.channelId),
-                creatorId: c.creatorId || null,
-                creatorName: userNameOf(clients, c.creatorId),
-                roleId: rid,
-                roleName: roleNameOf(clients, c.guildId, rid),
-                description: c.description || cards.DEFAULT_DESCRIPTION,
-                customDescription: Boolean(c.description),
-                link: (c.guildId && c.channelId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
-                createdAt: c.createdAt || 0,
-                avgVerifySeconds,
-                deletedAt: c.deletedAt || 0,
-                deletedBy: c.deletedBy || null,
-                deletedByName: c.deletedBy ? userNameOf(clients, c.deletedBy) : null,
-                canRestore: rinfo ? rinfo.can : false,
-                restoreReason: rinfo ? rinfo.reason : null,
-                // Funnel: started (first click) → join checked (2nd click) → stayed.
-                stats: { clicks: cards.clickWindows(c.guildId, c.roleId, c.creatorId, now), checked, stayed }
-            };
-        });
-        const avgVerifySeconds = globalDeltas.length
-            ? Math.round(globalDeltas.reduce((a, b) => a + b, 0) / globalDeltas.length / 1000) : null;
+        const { list, avgVerifySeconds } = enrichCards(clients, cards.loadCards());
         const active = list.filter((c) => !c.deletedAt).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
         const deleted = list.filter((c) => c.deletedAt).sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
         return send(res, 200, { cards: active, deletedCards: deleted, avgVerifySeconds }, cors);
@@ -1848,6 +1857,15 @@ async function handlePartner(req, res, path, clients, config) {
             })).sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0))
         })).sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
         return send(res, 200, { servers: out }, cors);
+    }
+
+    // The partner's own active verification cards — same rich stats as the
+    // admin "Экстренно" list, but scoped to cards this partner owns (read-only).
+    if (path === '/partner/cards' && req.method === 'GET') {
+        const mine = cards.loadCards().filter((c) => c.creatorId === userId && !c.deletedAt);
+        const { list, avgVerifySeconds } = enrichCards(clients, mine);
+        const active = list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        return send(res, 200, { cards: active, avgVerifySeconds }, cors);
     }
 
     if (path === '/partner/requisites' && req.method === 'PUT') {
