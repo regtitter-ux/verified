@@ -29,6 +29,24 @@ const MIN_BUY = Number(process.env.INVEST_MIN_INVITES) || 100;
 
 function load() { const r = loadJSON('investors.json', {}); return (r && typeof r === 'object' && !Array.isArray(r)) ? r : {}; }
 function save(o) { saveJSON('investors.json', o); }
+
+// Owner-curated whitelist of servers investors may buy invites of. A server can
+// only be added while it has an active verification card (checked by the API).
+function loadEnabledServers() { const r = loadJSON('investservers.json', []); return Array.isArray(r) ? r.map(String) : []; }
+function saveEnabledServers(list) { const uniq = [...new Set((Array.isArray(list) ? list : []).map(String))]; saveJSON('investservers.json', uniq); return uniq; }
+function isServerEnabled(id) { return loadEnabledServers().includes(String(id)); }
+function addEnabledServer(id) { const l = loadEnabledServers(); if (!l.includes(String(id))) l.push(String(id)); return saveEnabledServers(l); }
+function removeEnabledServer(id) { return saveEnabledServers(loadEnabledServers().filter((x) => x !== String(id))); }
+
+// Owner-side manual credit of an investment account (bypasses CryptoBot).
+function manualTopup(userId, amount) {
+    const amt = round2(amount);
+    if (!(amt > 0)) return { ok: false, error: 'bad-amount' };
+    const all = load(); const u = ensure(all, userId);
+    u.topups.push({ amount: amt, status: 'paid', manual: true, createdAt: Date.now(), paidAt: Date.now() });
+    save(all);
+    return { ok: true, amount: amt };
+}
 function ensure(o, id) {
     if (!o[id]) o[id] = { topups: [], positions: [], withdrawn: 0 };
     const u = o[id];
@@ -159,10 +177,14 @@ function serversFor(userId, verified, now = Date.now()) {
     };
     const myPos = {};
     for (const p of (all[userId]?.positions || [])) (myPos[p.serverId] ||= []).push(p);
+    const enabled = new Set(loadEnabledServers());
 
     const out = [];
-    for (const serverId of Object.keys(byServer)) {
-        const flow = win(byServer[serverId]);
+    // Owner-enabled servers + any the investor already holds (so their positions
+    // stay visible even if the owner later removes a server).
+    const serverIds = new Set([...enabled, ...Object.keys(myPos)]);
+    for (const serverId of serverIds) {
+        const flow = win(byServer[serverId] || []);
         let mine = null;
         if (myPos[serverId]) {
             const fills = allocateServer(serverId, all, verified);
@@ -176,7 +198,7 @@ function serversFor(userId, verified, now = Date.now()) {
                 earnedWin: { hour: round2(ew.hour * RET_PER_INVITE), day: round2(ew.day * RET_PER_INVITE), week: round2(ew.week * RET_PER_INVITE) }
             };
         }
-        out.push({ serverId, flow, mine });
+        out.push({ serverId, flow, mine, enabled: enabled.has(serverId) });
     }
     out.sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0) || b.flow.week - a.flow.week || b.flow.total - a.flow.total);
     return out;
@@ -184,5 +206,6 @@ function serversFor(userId, verified, now = Date.now()) {
 
 module.exports = {
     BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY,
-    accountOf, addTopup, reconcileTopups, recentTopups, buy, withdraw, serversFor
+    accountOf, addTopup, reconcileTopups, recentTopups, buy, withdraw, serversFor,
+    loadEnabledServers, saveEnabledServers, isServerEnabled, addEnabledServer, removeEnabledServer, manualTopup
 };

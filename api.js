@@ -1186,6 +1186,16 @@ async function handleAdmin(req, res, path, clients, config) {
             auditDo('autopayout', `${userId}: ${s.autoPayout ? 'on' : 'off'}`);
             return send(res, 200, { ok: true, autoPayout: s.autoPayout }, cors);
         }
+        // Manual credit to the user's investment account.
+        if (field === 'investtopup') {
+            const amount = Number(body.amount);
+            if (!Number.isFinite(amount) || amount <= 0) return send(res, 400, { error: 'amount must be > 0' }, cors);
+            if (amount > 1_000_000) return send(res, 400, { error: 'amount too large' }, cors);
+            const r = investors.manualTopup(userId, amount);
+            if (!r.ok) return send(res, 400, { error: r.error }, cors);
+            auditDo('invest.topup', `${userId}: +$${r.amount}`);
+            return send(res, 200, { ok: true, amount: r.amount }, cors);
+        }
         // Direct-transfer auto-payout (no check): a toggle + the recipient's
         // numeric Telegram id. Can't enable without an id to send to.
         if (field === 'autotransfer') {
@@ -1482,6 +1492,42 @@ async function handleAdmin(req, res, path, clients, config) {
         const r = await cards.edit(clients, mid, patch).catch((e) => ({ ok: false, error: e.message }));
         if (r.ok) auditDo('card.edit', `${mid} ${Object.keys(patch).join(',')}`);
         return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card } : { error: r.error || 'failed' }, cors);
+    }
+
+    // Owner-only: servers investors may buy invites of. Candidates are servers
+    // with an active (non-deleted) verification card; enabling requires one.
+    if (path === '/admin/invest-servers' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const cardGuilds = new Set(cards.loadCards().filter((c) => !c.deletedAt && c.guildId).map((c) => String(c.guildId)));
+        const enabledIds = investors.loadEnabledServers();
+        const enabledSet = new Set(enabledIds);
+        const enabled = enabledIds.map((gid) => ({ serverId: gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), hasCard: cardGuilds.has(gid) }));
+        const candidates = [...cardGuilds].filter((gid) => !enabledSet.has(gid))
+            .map((gid) => ({ serverId: gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid) }))
+            .sort((a, b) => (a.name || a.serverId).localeCompare(b.name || b.serverId));
+        return send(res, 200, { enabled, candidates }, cors);
+    }
+    if (path === '/admin/invest-servers' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = String(body?.serverId || '');
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        const hasActiveCard = cards.loadCards().some((c) => !c.deletedAt && String(c.guildId) === gid);
+        if (!hasActiveCard) return send(res, 400, { error: 'no-active-card' }, cors);
+        investors.addEnabledServer(gid);
+        auditDo('invest.server.add', gid);
+        return send(res, 200, { ok: true, enabled: investors.loadEnabledServers() }, cors);
+    }
+    if (path === '/admin/invest-servers' && req.method === 'DELETE') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = String(body?.serverId || '');
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        investors.removeEnabledServer(gid);
+        auditDo('invest.server.remove', gid);
+        return send(res, 200, { ok: true, enabled: investors.loadEnabledServers() }, cors);
     }
 
     return send(res, 404, { error: 'unknown admin endpoint' }, cors);
@@ -1985,7 +2031,7 @@ async function handleInvestor(req, res, path, clients, config) {
     // Servers with sold-invite throughput + this investor's position on each.
     if (path === '/investor/servers' && req.method === 'GET') {
         const list = investors.serversFor(userId, verified())
-            .filter((s) => s.mine || s.flow.total > 0)
+            .filter((s) => s.enabled || s.mine)
             .slice(0, 60)
             .map((s) => ({
                 ...s,
@@ -2014,6 +2060,7 @@ async function handleInvestor(req, res, path, clients, config) {
     if (path === '/investor/buy' && req.method === 'POST') {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        if (!investors.isServerEnabled(String(body?.serverId || ''))) return send(res, 400, { error: 'server-disabled' }, cors);
         await investors.reconcileTopups(userId, campaigns.isInvoicePaid).catch(() => null);
         const r = investors.buy(userId, String(body?.serverId || ''), body?.qty, verified());
         if (!r.ok) return send(res, r.error === 'insufficient' ? 402 : 400, r, cors);
