@@ -59,7 +59,11 @@ function delivered(campaign, verifiedList) {
 
 // A public-safe view of a campaign for the buyer dashboard.
 function publicView(campaign, verifiedList) {
-    const del = delivered(campaign, verifiedList);
+    // Cap the shown count at what was ordered: two campaigns for the same server
+    // can share an invite (one ad-key), so each sees all the joins and the raw
+    // count can run past the purchased amount. A campaign never delivers more
+    // than it bought — clamp the display so it can't read e.g. "308 / 200".
+    const del = Math.min(delivered(campaign, verifiedList), campaign.purchased);
     return {
         id: campaign.id,
         invite: campaign.invite,

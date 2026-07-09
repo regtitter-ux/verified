@@ -40,6 +40,19 @@ function addCard(rec) {
 function removeCard(messageId) { saveCards(loadCards().filter((c) => c.messageId !== messageId)); }
 function getCard(messageId) { return loadCards().find((c) => c.messageId === messageId) || null; }
 
+// Every role id this card's stats live under — the current role plus any role
+// it previously used (a "Сбросить роль" recreates the role with a new id, but
+// the old verifications/clicks are keyed by the old id). Lets stats survive a
+// role reset. Values may be null (a legacy card with no explicit role).
+function cardRoleIds(card) {
+    const ids = [(card && card.roleId) ? card.roleId : null];
+    for (const r of (Array.isArray(card && card.roleHistory) ? card.roleHistory : [])) {
+        const v = r || null;
+        if (!ids.includes(v)) ids.push(v);
+    }
+    return ids;
+}
+
 // Mark a card deleted (kept in the registry so its stats survive) rather than
 // dropping it. deletedBy = who removed it, when known.
 function markDeleted(messageId, deletedBy = null) {
@@ -266,8 +279,12 @@ async function resetRole(clients, messageId) {
     await newRole.setPosition(oldRole.position).catch(() => null);
     await oldRole.delete('Verification reset — old role removed').catch(() => null);
 
-    // 4) Repoint the card at the new role and rebuild its message.
-    const rec = addCard({ ...card, roleId: newRole.id });
+    // 4) Repoint the card at the new role and rebuild its message. Keep the old
+    //    role id in roleHistory so the card's stats (keyed by role) survive the
+    //    reset instead of dropping to zero.
+    const history = [...(Array.isArray(card.roleHistory) ? card.roleHistory : []), (card.roleId || null)]
+        .filter((v, i, a) => a.indexOf(v) === i);
+    const rec = addCard({ ...card, roleId: newRole.id, roleHistory: history });
     await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(guild, card.creatorId, newRole.id, card.description ?? null) }).catch(() => null);
 
     return { ok: true, card: rec, oldRoleId: oldRole.id, newRoleId: newRole.id, roleName: newRole.name };
@@ -361,6 +378,27 @@ function clickWindows(guildId, roleId, creatorId, now = Date.now()) {
     const h = new Set(), d = new Set(), w = new Set();
     for (const e of Array.isArray(list) ? list : []) {
         if (e.k !== k) continue;
+        if (e.t > now - 3600000) h.add(e.u);
+        if (e.t > now - 86400000) d.add(e.u);
+        if (e.t > now - 604800000) w.add(e.u);
+    }
+    return { hour: h.size, day: d.size, week: w.size };
+}
+
+// Same as the two above, but aggregating across SEVERAL role ids — so a card
+// whose role was reset (new id) still counts clicks recorded under its old
+// role(s). `roleIds` = cardRoleIds(card).
+function clicksForKeyMulti(guildId, roleIds, creatorId) {
+    const keys = new Set((Array.isArray(roleIds) ? roleIds : [roleIds]).map((r) => clickKey(guildId, r, creatorId)));
+    const list = loadJSON('cardclicks.json', []);
+    return (Array.isArray(list) ? list : []).filter((e) => keys.has(e.k)).map((e) => ({ u: e.u, t: e.t }));
+}
+function clickWindowsMulti(guildId, roleIds, creatorId, now = Date.now()) {
+    const keys = new Set((Array.isArray(roleIds) ? roleIds : [roleIds]).map((r) => clickKey(guildId, r, creatorId)));
+    const list = loadJSON('cardclicks.json', []);
+    const h = new Set(), d = new Set(), w = new Set();
+    for (const e of Array.isArray(list) ? list : []) {
+        if (!keys.has(e.k)) continue;
         if (e.t > now - 3600000) h.add(e.u);
         if (e.t > now - 86400000) d.add(e.u);
         if (e.t > now - 604800000) w.add(e.u);
@@ -492,6 +530,6 @@ module.exports = {
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate, DEFAULT_DESCRIPTION,
     register, fix, edit, remove, republish, restore, restoreInfo, resetRole,
-    trackClick, clickWindows, clicksForKey, scanAll, getScanState,
+    trackClick, clickWindows, clicksForKey, clickWindowsMulti, clicksForKeyMulti, cardRoleIds, scanAll, getScanState,
     markDeleted, removeCard, sweepDeleted, startCardSweep, handleMessageDelete
 };

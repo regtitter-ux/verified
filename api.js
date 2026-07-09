@@ -209,10 +209,13 @@ function enrichCards(clients, records) {
     const globalDeltas = []; // ms from first click → successful verification
     const list = (Array.isArray(records) ? records : []).map((c) => {
         const rid = c.roleId || null;
+        // All role ids this card's stats live under (current + any pre-reset
+        // role) so "Сбросить роль" doesn't zero the funnel.
+        const roleIds = cards.cardRoleIds(c);
         // Verified-and-still-standing for this card (stage 3), and clawed
         // leavers (verified then left) — together they make "join checked".
-        const vmatch = vArr.filter((u) => u.creatorId === c.creatorId && u.guildId === c.guildId && (u.roleId || null) === rid);
-        const leftMatch = jArr.filter((r) => r.status === 'left' && r.creatorId === c.creatorId && r.cardGuildId === c.guildId && (r.roleId || null) === rid);
+        const vmatch = vArr.filter((u) => u.creatorId === c.creatorId && u.guildId === c.guildId && roleIds.includes(u.roleId || null));
+        const leftMatch = jArr.filter((r) => r.status === 'left' && r.creatorId === c.creatorId && r.cardGuildId === c.guildId && roleIds.includes(r.roleId || null));
         const stayed = winOf(vmatch, 'timestamp', 'id');
         const leftW = winOf(leftMatch, 'ts', 'userId');
         const checked = { hour: stayed.hour + leftW.hour, day: stayed.day + leftW.day, week: stayed.week + leftW.week };
@@ -220,7 +223,7 @@ function enrichCards(clients, records) {
         // Average delay: for each successful verification, match the user's
         // latest first-click at or before it (clicks are pruned to a week).
         const byUser = {};
-        for (const e of cards.clicksForKey(c.guildId, c.roleId, c.creatorId)) (byUser[e.u] ||= []).push(e.t);
+        for (const e of cards.clicksForKeyMulti(c.guildId, roleIds, c.creatorId)) (byUser[e.u] ||= []).push(e.t);
         for (const u of Object.keys(byUser)) byUser[u].sort((a, b) => a - b);
         const verifyEvents = [
             ...vmatch.map((u) => ({ u: u.id, t: Number(u.timestamp) || 0 })),
@@ -258,7 +261,7 @@ function enrichCards(clients, records) {
             canRestore: rinfo ? rinfo.can : false,
             restoreReason: rinfo ? rinfo.reason : null,
             // Funnel: started (first click) → join checked (2nd click) → stayed.
-            stats: { clicks: cards.clickWindows(c.guildId, c.roleId, c.creatorId, now), checked, stayed }
+            stats: { clicks: cards.clickWindowsMulti(c.guildId, roleIds, c.creatorId, now), checked, stayed }
         };
     });
     const avgVerifySeconds = globalDeltas.length
