@@ -42,19 +42,74 @@ function campaignAdKeys(campaign) {
     return set;
 }
 
-// Unique verified joins delivered since the campaign went active — counted
+// Unique verified joins delivered to a campaign since it went active — counted
 // across every invite the campaign has used (deduped by user), so changing the
-// link never resets progress or lets the campaign over-deliver.
-function delivered(campaign, verifiedList) {
+// link never resets progress.
+//
+// When SEVERAL live campaigns share the same invite (same ad-key), a join can't
+// be told apart between them from the data. To avoid double-counting (each
+// seeing all the joins → "308 / 200"), the shared joins are ALLOCATED — every
+// join goes to exactly one campaign, so the totals across the cohort add up to
+// the real number of joins. Each join is given to the eligible campaign that is
+// most "behind" proportionally (delivered ÷ purchased), which spreads joins
+// across concurrent orders in proportion to their size — the same way the ad is
+// shown (weighted by remaining). Deterministic; ties break by earliest paidAt.
+function delivered(campaign, verifiedList, allCampaigns) {
     if (!campaign || !campaign.paidAt) return 0;
     const list = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
-    const keys = campaignAdKeys(campaign);
-    if (!keys.size) return 0;
-    const seen = new Set();
+    const myKeys = campaignAdKeys(campaign);
+    if (!myKeys.size) return 0;
+
+    // Simple own-count (used for the fast path and dead campaigns).
+    const ownCount = () => {
+        const seen = new Set();
+        for (const u of list) if (u && myKeys.has(u.adKey) && Number(u.timestamp) > campaign.paidAt) seen.add(u.id);
+        return seen.size;
+    };
+    // Only running/finished orders share allocation; a cancelled/invalid one
+    // keeps its own frozen count and doesn't claim new joins.
+    if (campaign.status !== 'active' && campaign.status !== 'complete') return ownCount();
+
+    const pool = allCampaigns ? (Array.isArray(allCampaigns) ? allCampaigns : Object.values(allCampaigns)) : Object.values(loadCampaigns());
+    const cohort = pool.filter((c) => {
+        if (!c || !c.paidAt || (c.status !== 'active' && c.status !== 'complete')) return false;
+        const ks = campaignAdKeys(c);
+        for (const k of myKeys) if (ks.has(k)) return true;
+        return false;
+    });
+    if (cohort.length <= 1) return ownCount();   // unique invite → no sharing
+
+    cohort.sort((a, b) => (a.paidAt || 0) - (b.paidAt || 0) || String(a.id).localeCompare(String(b.id)));
+    const keySets = new Map(cohort.map((c) => [c.id, campaignAdKeys(c)]));
+    const cohortKeys = new Set();
+    for (const ks of keySets.values()) for (const k of ks) cohortKeys.add(k);
+
+    // Earliest verification per user (with the invite it came in on).
+    const firstByUser = new Map();
     for (const u of list) {
-        if (u && keys.has(u.adKey) && Number(u.timestamp) > campaign.paidAt) seen.add(u.id);
+        if (!u || !cohortKeys.has(u.adKey)) continue;
+        const t = Number(u.timestamp) || 0;
+        const cur = firstByUser.get(u.id);
+        if (!cur || t < cur.t) firstByUser.set(u.id, { t, k: u.adKey });
     }
-    return seen.size;
+    const joins = [...firstByUser.entries()]
+        .map(([u, o]) => ({ u, t: o.t, k: o.k }))
+        .sort((a, b) => a.t - b.t || (a.u < b.u ? -1 : 1));
+
+    const counts = new Map(cohort.map((c) => [c.id, 0]));
+    for (const j of joins) {
+        let best = null;
+        for (const c of cohort) {
+            if ((c.paidAt || 0) >= j.t) continue;             // not yet paid when this join happened
+            if (!keySets.get(c.id).has(j.k)) continue;        // this campaign didn't use that invite
+            const cnt = counts.get(c.id), cap = Number(c.purchased) || 0;
+            if (cnt >= cap) continue;                          // already full
+            const ratio = cap > 0 ? cnt / cap : 1;
+            if (!best || ratio < best.ratio) best = { c, ratio };
+        }
+        if (best) counts.set(best.c.id, counts.get(best.c.id) + 1);
+    }
+    return counts.get(campaign.id) || 0;
 }
 
 // A public-safe view of a campaign for the buyer dashboard.
@@ -114,7 +169,7 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds) {
         if (c.sponsorGuildId === displayGuildId) continue;                 // never on itself
         if (Array.isArray(c.disabledGuilds) && c.disabledGuilds.includes(displayGuildId)) continue;
         if (botGuildIds && !botGuildIds.has(c.sponsorGuildId)) continue;   // no bot on buyer's server
-        const remaining = c.purchased - delivered(c, list);
+        const remaining = c.purchased - delivered(c, list, camps);
         if (remaining <= 0) continue;                                      // already done
         eligible.push({ id: c.id, invite: c.invite, sponsorGuildId: c.sponsorGuildId, remaining });
     }
@@ -214,7 +269,7 @@ async function reconcile(clients) {
                     continue;
                 }
             }
-            if (delivered(c, verified) >= c.purchased) {
+            if (delivered(c, verified, camps) >= c.purchased) {
                 c.status = 'complete'; c.completedAt = now; changed = true;
                 notifyBuyer(clients, c, 'complete').catch(() => null);
             }
