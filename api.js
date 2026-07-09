@@ -2022,7 +2022,7 @@ async function handleInvestor(req, res, path, clients, config) {
             userId,
             account: acc,
             topups: investors.recentTopups(userId),
-            pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY, minDays: investors.MIN_DAYS },
+            pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY, minDays: investors.MIN_DAYS, minDaily: investors.MIN_DAILY },
             minTopup: investors.MIN_TOPUP,
             cryptoEnabled: cryptopay.enabled()
         }, cors);
@@ -2031,14 +2031,14 @@ async function handleInvestor(req, res, path, clients, config) {
     // Servers with sold-invite throughput + this investor's position on each.
     if (path === '/investor/servers' && req.method === 'GET') {
         const list = investors.serversFor(userId, verified())
-            .filter((s) => s.enabled || s.mine)
+            .filter((s) => s.investable || s.mine)
             .slice(0, 60)
             .map((s) => ({
                 ...s,
                 name: guildNameOf(clients, s.serverId),
                 icon: guildIconOf(clients, s.serverId)
             }));
-        return send(res, 200, { servers: list, pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY, minDays: investors.MIN_DAYS } }, cors);
+        return send(res, 200, { servers: list, pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY, minDays: investors.MIN_DAYS, minDaily: investors.MIN_DAILY } }, cors);
     }
 
     // Top up the investment account via a CryptoBot invoice. Body: { amount }.
@@ -2060,7 +2060,7 @@ async function handleInvestor(req, res, path, clients, config) {
     if (path === '/investor/buy' && req.method === 'POST') {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
-        if (!investors.isServerEnabled(String(body?.serverId || ''))) return send(res, 400, { error: 'server-disabled' }, cors);
+        if (!investors.isServerInvestable(String(body?.serverId || ''), verified())) return send(res, 400, { error: 'server-disabled' }, cors);
         await investors.reconcileTopups(userId, campaigns.isInvoicePaid).catch(() => null);
         const r = investors.buy(userId, String(body?.serverId || ''), body?.qty, verified());
         if (!r.ok) return send(res, r.error === 'insufficient' ? 402 : 400, r, cors);

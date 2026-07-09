@@ -29,15 +29,27 @@ const MIN_BUY = Number(process.env.INVEST_MIN_INVITES) || 100;
 // A buy-in must cover at least this many days of the server's sales, so an
 // investor can't buy a tiny slice of a fast server. Set INVEST_MIN_DAYS in Railway.
 const MIN_DAYS = Number(process.env.INVEST_MIN_DAYS) || 30;
+// A server auto-appears in the investor list once it sells at least this many
+// verified invites per day; it drops off (for everyone but existing holders)
+// when it falls below. Set INVEST_MIN_DAILY in Railway.
+const MIN_DAILY = Number(process.env.INVEST_MIN_DAILY) || 10;
 
-// The minimum invites you must buy on a server = its daily sales rate (7-day
-// average) × MIN_DAYS, with MIN_BUY as an absolute floor.
-function serverMinInvites(serverId, verified, now = Date.now()) {
+// A server's sales rate — verified invites per day, averaged over the last 7 days.
+function serverDailyRate(serverId, verified, now = Date.now()) {
     let week = 0;
     for (const u of (Array.isArray(verified) ? verified : [])) {
         if (u && u.adKey && String(u.guildId) === String(serverId) && (Number(u.timestamp) || 0) > now - 604800000) week++;
     }
-    return Math.max(MIN_BUY, Math.ceil((week / 7) * MIN_DAYS));
+    return week / 7;
+}
+// Minimum invites to buy on a server = daily rate × MIN_DAYS (floor MIN_BUY).
+function serverMinInvites(serverId, verified) {
+    return Math.max(MIN_BUY, Math.ceil(serverDailyRate(serverId, verified) * MIN_DAYS));
+}
+// Is a server open for buy-in right now? Auto: daily rate ≥ MIN_DAILY. The owner
+// whitelist can also force a below-threshold server open.
+function isServerInvestable(serverId, verified) {
+    return serverDailyRate(serverId, verified) >= MIN_DAILY || isServerEnabled(serverId);
 }
 
 function load() { const r = loadJSON('investors.json', {}); return (r && typeof r === 'object' && !Array.isArray(r)) ? r : {}; }
@@ -194,11 +206,11 @@ function serversFor(userId, verified, now = Date.now()) {
     const enabled = new Set(loadEnabledServers());
 
     const out = [];
-    // Owner-enabled servers + any the investor already holds (so their positions
-    // stay visible even if the owner later removes a server).
-    const serverIds = new Set([...enabled, ...Object.keys(myPos)]);
+    // Any server with activity, plus owner-enabled and any the investor holds.
+    const serverIds = new Set([...Object.keys(byServer), ...enabled, ...Object.keys(myPos)]);
     for (const serverId of serverIds) {
         const flow = win(byServer[serverId] || []);
+        const investable = (flow.week / 7) >= MIN_DAILY || enabled.has(serverId);
         let mine = null;
         if (myPos[serverId]) {
             const fills = allocateServer(serverId, all, verified);
@@ -212,14 +224,17 @@ function serversFor(userId, verified, now = Date.now()) {
                 earnedWin: { hour: round2(ew.hour * RET_PER_INVITE), day: round2(ew.day * RET_PER_INVITE), week: round2(ew.week * RET_PER_INVITE) }
             };
         }
-        out.push({ serverId, flow, mine, enabled: enabled.has(serverId), minInvites: Math.max(MIN_BUY, Math.ceil((flow.week / 7) * MIN_DAYS)) });
+        // Show it if it's investable right now, or the investor holds a position.
+        if (!investable && !mine) continue;
+        out.push({ serverId, flow, mine, enabled: enabled.has(serverId), investable, minInvites: Math.max(MIN_BUY, Math.ceil((flow.week / 7) * MIN_DAYS)) });
     }
     out.sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0) || b.flow.week - a.flow.week || b.flow.total - a.flow.total);
     return out;
 }
 
 module.exports = {
-    BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY, MIN_DAYS, serverMinInvites,
+    BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY, MIN_DAYS, MIN_DAILY,
+    serverMinInvites, serverDailyRate, isServerInvestable,
     accountOf, addTopup, reconcileTopups, recentTopups, buy, withdraw, serversFor,
     loadEnabledServers, saveEnabledServers, isServerEnabled, addEnabledServer, removeEnabledServer, manualTopup
 };
