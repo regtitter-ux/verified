@@ -18,6 +18,7 @@ const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
+const refundMigration = require('./refundmigration.js');
 const { logFunds } = require('./fundslog.js');
 
 // A "Join" link button for the sponsor invite shown in an ad. Verification
@@ -1395,6 +1396,11 @@ cards.startCardSweep(clients);
 
 // Data backups: rolling local snapshots + off-site copies to a Discord channel.
 backup.startBackupSweep(clients);
+
+// One-time: refund clawbacks that fired while the sponsor's ad was off (the
+// old opt-out was keyed by the wrong guild). Guarded by a marker; delayed so
+// the bots are logged in when it posts the summary.
+setTimeout(() => refundMigration.runOnce(clients).catch((e) => console.error('[REFUND]', e.message)), 45 * 1000);
 
 // Uptime monitoring: alert to ALERT_CHANNEL when a bot goes offline / recovers.
 const ALERT_CHANNEL = (process.env.ALERT_CHANNEL || '').trim();
