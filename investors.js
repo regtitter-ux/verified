@@ -26,6 +26,19 @@ const RET_PER_INVITE = round4(BUY_PER_INVITE * (1 + RETURN_RATE));   // $0.099
 // MIN_TOPUP, then $5. Set INVEST_MIN_TOPUP in Railway to change it.
 const MIN_TOPUP = Number(process.env.INVEST_MIN_TOPUP) || Number(process.env.MIN_TOPUP) || 5;
 const MIN_BUY = Number(process.env.INVEST_MIN_INVITES) || 100;
+// A buy-in must cover at least this many days of the server's sales, so an
+// investor can't buy a tiny slice of a fast server. Set INVEST_MIN_DAYS in Railway.
+const MIN_DAYS = Number(process.env.INVEST_MIN_DAYS) || 30;
+
+// The minimum invites you must buy on a server = its daily sales rate (7-day
+// average) × MIN_DAYS, with MIN_BUY as an absolute floor.
+function serverMinInvites(serverId, verified, now = Date.now()) {
+    let week = 0;
+    for (const u of (Array.isArray(verified) ? verified : [])) {
+        if (u && u.adKey && String(u.guildId) === String(serverId) && (Number(u.timestamp) || 0) > now - 604800000) week++;
+    }
+    return Math.max(MIN_BUY, Math.ceil((week / 7) * MIN_DAYS));
+}
 
 function load() { const r = loadJSON('investors.json', {}); return (r && typeof r === 'object' && !Array.isArray(r)) ? r : {}; }
 function save(o) { saveJSON('investors.json', o); }
@@ -137,7 +150,8 @@ function recentTopups(userId, limit = 10) {
 function buy(userId, serverId, qty, verified) {
     qty = Math.floor(Number(qty) || 0);
     if (!/^\d{17,20}$/.test(String(serverId))) return { ok: false, error: 'bad-server' };
-    if (qty < MIN_BUY) return { ok: false, error: 'min-qty' };
+    const minQty = serverMinInvites(serverId, verified);
+    if (qty < minQty) return { ok: false, error: 'min-qty', min: minQty };
     const cost = round2(qty * BUY_PER_INVITE);
     const acc = accountOf(userId, verified);
     if (acc.available < cost) return { ok: false, error: 'insufficient', need: cost, have: acc.available };
@@ -198,14 +212,14 @@ function serversFor(userId, verified, now = Date.now()) {
                 earnedWin: { hour: round2(ew.hour * RET_PER_INVITE), day: round2(ew.day * RET_PER_INVITE), week: round2(ew.week * RET_PER_INVITE) }
             };
         }
-        out.push({ serverId, flow, mine, enabled: enabled.has(serverId) });
+        out.push({ serverId, flow, mine, enabled: enabled.has(serverId), minInvites: Math.max(MIN_BUY, Math.ceil((flow.week / 7) * MIN_DAYS)) });
     }
     out.sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0) || b.flow.week - a.flow.week || b.flow.total - a.flow.total);
     return out;
 }
 
 module.exports = {
-    BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY,
+    BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY, MIN_DAYS, serverMinInvites,
     accountOf, addTopup, reconcileTopups, recentTopups, buy, withdraw, serversFor,
     loadEnabledServers, saveEnabledServers, isServerEnabled, addEnabledServer, removeEnabledServer, manualTopup
 };

@@ -2022,7 +2022,7 @@ async function handleInvestor(req, res, path, clients, config) {
             userId,
             account: acc,
             topups: investors.recentTopups(userId),
-            pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY },
+            pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY, minDays: investors.MIN_DAYS },
             minTopup: investors.MIN_TOPUP,
             cryptoEnabled: cryptopay.enabled()
         }, cors);
@@ -2038,7 +2038,7 @@ async function handleInvestor(req, res, path, clients, config) {
                 name: guildNameOf(clients, s.serverId),
                 icon: guildIconOf(clients, s.serverId)
             }));
-        return send(res, 200, { servers: list, pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY } }, cors);
+        return send(res, 200, { servers: list, pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY, minDays: investors.MIN_DAYS } }, cors);
     }
 
     // Top up the investment account via a CryptoBot invoice. Body: { amount }.
