@@ -1170,14 +1170,32 @@ const startBot = (token) => {
 
             let latest = candidates.reduce((best, cur) => (!best || cur.ts > best.ts ? cur : best), null);
 
-            // Paid buyer campaigns take priority over house ads: round-robin a
-            // campaign eligible for this guild (respects the buyer's per-server
-            // opt-outs, the self-ad rule and the purchased-join cap). Falls
-            // back to the house ad above when there's no eligible campaign.
+            // Paid buyer campaigns take priority over house ads. With several
+            // active at once, prefer one whose sponsor the user is NOT already a
+            // member of — advertising a server they're already in can't produce
+            // a real join (and would let them farm the buyer's joins). Try the
+            // eligible campaigns in weighted-random order (weight = remaining
+            // joins) and pick the first the user isn't on. If the membership
+            // can't be determined, fall back to the weighted pick; if the user
+            // is confirmed to be on ALL of them, show no campaign (fall to the
+            // house ad / ad-free) rather than a pointless one.
             if (!adsOff) {
                 try {
-                    const pick = campaigns.pickForGuild(guild.id, verified, campaigns.fleetGuildIds(clients));
-                    if (pick) latest = { text: applyTemplate(guild.id, pick.invite), ts: Date.now(), raw: pick.invite, campaignId: pick.campaignId };
+                    const fleet = campaigns.fleetGuildIds(clients);
+                    const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(guild.id, verified, fleet));
+                    let chosen = null, tentative = null, checks = 0;
+                    for (const cand of ordered) {
+                        const spBot = clients.find((c) => c.guilds.cache.has(cand.sponsorGuildId));
+                        if (!spBot) continue;                              // no bot on sponsor → can't verify
+                        if (checks >= 6) { tentative = tentative || cand; break; } // bound the membership fetches
+                        checks++;
+                        const m = await isMember(spBot, cand.sponsorGuildId, user.id).catch(() => null);
+                        if (m === false) { chosen = cand; break; }         // not a member → ideal
+                        if (m === null && !tentative) tentative = cand;    // uncertain → fallback candidate
+                        // m === true → already a member → skip this campaign
+                    }
+                    const use = chosen || tentative;                       // never a known-member sponsor
+                    if (use) latest = { text: applyTemplate(guild.id, use.invite), ts: Date.now(), raw: use.invite, campaignId: use.id };
                 } catch (e) { /* never let campaign selection break verification */ }
             }
 

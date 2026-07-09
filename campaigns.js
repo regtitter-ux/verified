@@ -95,17 +95,16 @@ function botPresent(campaign, botGuildIds) {
     return Boolean(botGuildIds && campaign && botGuildIds.has(campaign.sponsorGuildId));
 }
 
-// Pick a campaign to show on a display guild, WEIGHTED BY REMAINING JOINS so
-// bigger unmet orders get more exposure while smaller ones still finish —
-// no single order hogs, no congestion. Skips campaigns that are paused,
-// self-targeted, opted-out of this guild, already delivered, or whose own
-// server has no network bot (can't be verified). Returns
-// { invite, campaignId, sponsorGuildId } or null.
-function pickForGuild(displayGuildId, verifiedList, botGuildIds) {
+// Every campaign showable on a display guild: active, not paused, not
+// self-targeted, not opted-out of this guild, not yet delivered, and whose own
+// server has a network bot (so the join can be verified). Each carries its
+// `remaining` (unmet joins) as the selection weight. Callers pick from this —
+// weighted-random for a single ad, or in weighted order to skip sponsors the
+// verifying user is already a member of.
+function eligibleForGuild(displayGuildId, verifiedList, botGuildIds) {
     const camps = loadCampaigns();
     const list = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
     const eligible = [];
-    let total = 0;
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active' || c.paused) continue;
         if (c.sponsorGuildId === displayGuildId) continue;                 // never on itself
@@ -113,14 +112,34 @@ function pickForGuild(displayGuildId, verifiedList, botGuildIds) {
         if (botGuildIds && !botGuildIds.has(c.sponsorGuildId)) continue;   // no bot on buyer's server
         const remaining = c.purchased - delivered(c, list);
         if (remaining <= 0) continue;                                      // already done
-        eligible.push({ c, remaining });
-        total += remaining;
+        eligible.push({ id: c.id, invite: c.invite, sponsorGuildId: c.sponsorGuildId, remaining });
     }
+    return eligible;
+}
+
+// A weighted-random ORDER of eligible campaigns (Efraimidis–Spirakis reservoir:
+// key = random^(1/weight), sort desc). Lets a caller try candidates in a fair,
+// remaining-weighted order — e.g. to pick the first sponsor the user isn't on.
+function weightedOrder(eligible) {
+    return (Array.isArray(eligible) ? eligible : [])
+        .map((e) => ({ e, key: Math.pow(Math.random() || 1e-12, 1 / Math.max(1e-9, e.remaining)) }))
+        .sort((a, b) => b.key - a.key)
+        .map((x) => x.e);
+}
+
+// Pick a campaign to show on a display guild, WEIGHTED BY REMAINING JOINS so
+// bigger unmet orders get more exposure while smaller ones still finish — no
+// single order hogs, no congestion. Returns { invite, campaignId,
+// sponsorGuildId } or null. (User-membership-aware selection lives in the
+// verification handler, which uses eligibleForGuild + weightedOrder.)
+function pickForGuild(displayGuildId, verifiedList, botGuildIds) {
+    const eligible = eligibleForGuild(displayGuildId, verifiedList, botGuildIds);
+    const total = eligible.reduce((s, e) => s + e.remaining, 0);
     if (!eligible.length || total <= 0) return null;
     let r = Math.random() * total;
-    for (const e of eligible) { r -= e.remaining; if (r <= 0) return { invite: e.c.invite, campaignId: e.c.id, sponsorGuildId: e.c.sponsorGuildId }; }
+    for (const e of eligible) { r -= e.remaining; if (r <= 0) return { invite: e.invite, campaignId: e.id, sponsorGuildId: e.sponsorGuildId }; }
     const e = eligible[eligible.length - 1];
-    return { invite: e.c.invite, campaignId: e.c.id, sponsorGuildId: e.c.sponsorGuildId };
+    return { invite: e.invite, campaignId: e.id, sponsorGuildId: e.sponsorGuildId };
 }
 
 // Is a CryptoBot invoice paid? Best-effort; false on any error.
@@ -250,6 +269,6 @@ function retention(campaign, verifiedList, joinlinks, now = Date.now()) {
 
 module.exports = {
     PRICE_PER_100, MIN_JOINS, priceFor, round2, newId,
-    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, publicView, pickForGuild, botPresent, fleetGuildIds,
+    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, publicView, pickForGuild, eligibleForGuild, weightedOrder, botPresent, fleetGuildIds,
     isInvoicePaid, reconcile, startCampaignSweep, retention
 };
