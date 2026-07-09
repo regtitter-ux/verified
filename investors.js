@@ -22,7 +22,9 @@ const SELL_PER_100 = Number(process.env.JOIN_SALE_PRICE) || 10;      // $ servic
 const RETURN_RATE = Number.isFinite(Number(process.env.INVEST_RETURN_RATE)) ? Number(process.env.INVEST_RETURN_RATE) : 0.10;
 const BUY_PER_INVITE = round4(BUY_PER_100 / 100);                    // $0.09
 const RET_PER_INVITE = round4(BUY_PER_INVITE * (1 + RETURN_RATE));   // $0.099
-const MIN_TOPUP = Number(process.env.MIN_TOPUP) || 5;
+// Dedicated minimum for the investment account; falls back to the shared
+// MIN_TOPUP, then $5. Set INVEST_MIN_TOPUP in Railway to change it.
+const MIN_TOPUP = Number(process.env.INVEST_MIN_TOPUP) || Number(process.env.MIN_TOPUP) || 5;
 const MIN_BUY = Number(process.env.INVEST_MIN_INVITES) || 100;
 
 function load() { const r = loadJSON('investors.json', {}); return (r && typeof r === 'object' && !Array.isArray(r)) ? r : {}; }
