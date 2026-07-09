@@ -2063,7 +2063,7 @@ async function handleInvestor(req, res, path, clients, config) {
         if (!investors.isServerInvestable(String(body?.serverId || ''), verified())) return send(res, 400, { error: 'server-disabled' }, cors);
         await investors.reconcileTopups(userId, campaigns.isInvoicePaid).catch(() => null);
         const r = investors.buy(userId, String(body?.serverId || ''), body?.qty, verified());
-        if (!r.ok) return send(res, r.error === 'insufficient' ? 402 : 400, r, cors);
+        if (!r.ok) return send(res, r.error === 'insufficient' ? 402 : r.error === 'occupied' ? 409 : 400, r, cors);
         return send(res, 200, { ok: true, cost: r.cost, qty: r.qty, account: investors.accountOf(userId, verified()) }, cors);
     }
 

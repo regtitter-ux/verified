@@ -115,6 +115,25 @@ function allocateServer(serverId, all, verified) {
     return fills;
 }
 
+// A server is "occupied" while any investor still has unsold invites there —
+// only one investor at a time. Returns who occupies it and an ETA (seconds) to
+// free = total outstanding invites ÷ the server's daily sales rate.
+function occupancyOf(serverId, verified, all = load()) {
+    const positions = [];
+    for (const uid of Object.keys(all)) for (const p of (all[uid].positions || [])) if (String(p.serverId) === String(serverId)) positions.push({ p, uid });
+    if (!positions.length) return { occupants: new Set(), totalOutstanding: 0, etaSec: null };
+    const fills = allocateServer(serverId, all, verified);
+    const occupants = new Set(); let totalOutstanding = 0;
+    for (const { p, uid } of positions) {
+        const sold = (fills.get(p.id) || []).length;
+        const out = Math.max(0, (Number(p.qty) || 0) - sold);
+        if (out > 0) { occupants.add(uid); totalOutstanding += out; }
+    }
+    const daily = serverDailyRate(serverId, verified);
+    const etaSec = (daily > 0 && totalOutstanding > 0) ? Math.ceil((totalOutstanding / daily) * 86400) : null;
+    return { occupants, totalOutstanding, etaSec };
+}
+
 // The investor's live account: liquid balance + lifetime figures.
 function accountOf(userId, verified) {
     const all = load();
@@ -164,6 +183,8 @@ function buy(userId, serverId, qty, verified) {
     if (!/^\d{17,20}$/.test(String(serverId))) return { ok: false, error: 'bad-server' };
     const minQty = serverMinInvites(serverId, verified);
     if (qty < minQty) return { ok: false, error: 'min-qty', min: minQty };
+    const occ = occupancyOf(serverId, verified);
+    if (occ.totalOutstanding > 0 && !occ.occupants.has(String(userId))) return { ok: false, error: 'occupied', etaSec: occ.etaSec };
     const cost = round2(qty * BUY_PER_INVITE);
     const acc = accountOf(userId, verified);
     if (acc.available < cost) return { ok: false, error: 'insufficient', need: cost, have: acc.available };
@@ -224,9 +245,19 @@ function serversFor(userId, verified, now = Date.now()) {
                 earnedWin: { hour: round2(ew.hour * RET_PER_INVITE), day: round2(ew.day * RET_PER_INVITE), week: round2(ew.week * RET_PER_INVITE) }
             };
         }
+        // One investor per server: locked for you if someone else still holds
+        // unsold invites here.
+        const occ = occupancyOf(serverId, verified, all);
+        const occupiedByYou = occ.occupants.has(String(userId));
+        const lockedForYou = occ.totalOutstanding > 0 && !occupiedByYou;
+
         // Show it if it's investable right now, or the investor holds a position.
         if (!investable && !mine) continue;
-        out.push({ serverId, flow, mine, enabled: enabled.has(serverId), investable, minInvites: Math.max(MIN_BUY, Math.ceil((flow.week / 7) * MIN_DAYS)) });
+        out.push({
+            serverId, flow, mine, enabled: enabled.has(serverId), investable,
+            minInvites: Math.max(MIN_BUY, Math.ceil((flow.week / 7) * MIN_DAYS)),
+            occupied: lockedForYou, occupiedByYou, occupiedEtaSec: lockedForYou ? occ.etaSec : null
+        });
     }
     out.sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0) || b.flow.week - a.flow.week || b.flow.total - a.flow.total);
     return out;
@@ -234,7 +265,7 @@ function serversFor(userId, verified, now = Date.now()) {
 
 module.exports = {
     BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY, MIN_DAYS, MIN_DAILY,
-    serverMinInvites, serverDailyRate, isServerInvestable,
+    serverMinInvites, serverDailyRate, isServerInvestable, occupancyOf,
     accountOf, addTopup, reconcileTopups, recentTopups, buy, withdraw, serversFor,
     loadEnabledServers, saveEnabledServers, isServerEnabled, addEnabledServer, removeEnabledServer, manualTopup
 };
