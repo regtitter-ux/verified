@@ -144,13 +144,20 @@ async function finalizeLeavers(clients, leaverIds) {
     if (!Array.isArray(verified)) verified = [];
     let changed = false, verifiedChanged = false;
 
-    // Owner opt-out (per sponsor server): while that server's ad is NOT being
-    // shown on the network, a member leaving does NOT claw back the payout —
-    // the join is treated as final (money, granted role and verification all
-    // stay). Members who leave during a showing period are still clawed back
-    // as usual, and if the ad resumes, clawbacks resume — but the ones settled
-    // while the ad was off are never revisited. Controlled from the admin
-    // Statistics panel.
+    // A member leaving only claws back the payout while the SPONSOR's ad is
+    // actively being shown on the network. Once that ad has been off for a
+    // while (campaign delivered, house-ad limit hit, kran closed, removed, or
+    // opted out on every partner server), a later leave no longer reverses the
+    // partner's earnings — the join is finalized as 'settled' and never
+    // revisited, even if the ad resumes. Both the automatic ad-off check and
+    // the manual owner opt-out are keyed by the sponsor server (rec.guildId),
+    // the same key sponsorshow.json is stamped under.
+    //
+    // (Previously the automatic skip was gated behind the owner flag, but the
+    // admin toggle stores that flag under the PARTNER server id — a different
+    // guild dimension than rec.guildId — so it never matched and clawbacks kept
+    // firing days after a sponsor's ad had stopped. The ad-off skip is now
+    // automatic, correctly keyed by the sponsor.)
     const cfg = loadJSON('siteconfig.json', {});
     const clawOff = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
     const shows = loadJSON('sponsorshow.json', {});
@@ -158,14 +165,14 @@ async function finalizeLeavers(clients, leaverIds) {
     for (const rec of Array.isArray(list) ? list : []) {
         if (rec.status !== 'joined' || !idSet.has(rec.id)) continue;
 
-        // Clawback opt-out while the sponsor's ad is off: keep the payout, role
-        // and verification, and finalize the record as 'settled' so no sweep
-        // ever retries it (even after the ad resumes).
-        if (clawOff[rec.guildId] && !sponsorAdShowing(rec.guildId, shows)) {
+        // Skip the clawback when the sponsor's ad isn't showing (automatic), or
+        // when the owner force-disabled it for this sponsor: keep the payout,
+        // role and verification, and finalize as 'settled' so no sweep retries.
+        if (!sponsorAdShowing(rec.guildId, shows) || clawOff[rec.guildId]) {
             rec.status = 'settled';
             rec.settledAt = Date.now();
             changed = true;
-            console.log(`[LEAVE] clawback skipped (ad not showing, owner opt-out): sponsor=${rec.guildId} user=${rec.userId}`);
+            console.log(`[LEAVE] clawback skipped (sponsor ad not showing): sponsor=${rec.guildId} user=${rec.userId}`);
             continue;
         }
 
