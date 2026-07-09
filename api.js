@@ -1829,7 +1829,7 @@ async function handlePartner(req, res, path, clients, config) {
             withdrawals: wds
                 .map((w) => ({ id: w.id, amount: money(w.amount), status: w.status, createdAt: w.createdAt || 0, completedAt: w.completedAt || 0 }))
                 .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-                .slice(0, 50),
+                .slice(0, 300),
             minWithdraw: 10
         }, cors);
     }
