@@ -1,0 +1,186 @@
+// Investor cabinet.
+//
+// An investor tops up an investment account (USDT, same top-up flow as the buyer
+// wallet) and "buys" future invites of a server at a discount to retail: $9 per
+// 100 ($0.09/invite) vs the $10/100 the service sells them for. As that server
+// delivers paid joins (its invites get sold), the investor's invites fill up in
+// FIFO order across ALL investors on that server, and each sold invite returns
+// $0.09 + 10% = $0.099 to their account. There is no deadline — the return is
+// realized purely as the invites actually sell.
+//
+// Everything money-facing is derived on read from the position ledger + the paid
+// join log (verified.json), so balances are always exact and there is no sweep:
+//   available = topups(paid) − Σ bought(qty·$0.09) + Σ sold·$0.099 − withdrawn
+const crypto = require('crypto');
+const { loadJSON, saveJSON } = require('./database.js');
+
+const round2 = (n) => +((Number(n) || 0).toFixed(2));
+const round4 = (n) => +((Number(n) || 0).toFixed(4));
+
+const BUY_PER_100 = Number(process.env.INVEST_BUY_PER_100) || 9;     // $ investor pays per 100
+const SELL_PER_100 = Number(process.env.JOIN_SALE_PRICE) || 10;      // $ service resells per 100
+const RETURN_RATE = Number.isFinite(Number(process.env.INVEST_RETURN_RATE)) ? Number(process.env.INVEST_RETURN_RATE) : 0.10;
+const BUY_PER_INVITE = round4(BUY_PER_100 / 100);                    // $0.09
+const RET_PER_INVITE = round4(BUY_PER_INVITE * (1 + RETURN_RATE));   // $0.099
+const MIN_TOPUP = Number(process.env.MIN_TOPUP) || 5;
+const MIN_BUY = Number(process.env.INVEST_MIN_INVITES) || 100;
+
+function load() { const r = loadJSON('investors.json', {}); return (r && typeof r === 'object' && !Array.isArray(r)) ? r : {}; }
+function save(o) { saveJSON('investors.json', o); }
+function ensure(o, id) {
+    if (!o[id]) o[id] = { topups: [], positions: [], withdrawn: 0 };
+    const u = o[id];
+    if (!Array.isArray(u.topups)) u.topups = [];
+    if (!Array.isArray(u.positions)) u.positions = [];
+    if (!Number.isFinite(Number(u.withdrawn))) u.withdrawn = 0;
+    return u;
+}
+
+// Timestamps of paid joins (sold invites) delivered by a server — grouped by the
+// card's own server (verified.json guildId), so several cards on one server
+// aggregate into ONE server total, never double-counted.
+function serverJoinTimes(serverId, verified) {
+    const out = [];
+    for (const u of (Array.isArray(verified) ? verified : [])) {
+        if (u && u.adKey && String(u.guildId) === String(serverId)) out.push(Number(u.timestamp) || 0);
+    }
+    out.sort((a, b) => a - b);
+    return out;
+}
+
+// Allocate a server's sold invites to positions, FIFO across ALL investors:
+// each sold invite goes to the earliest-bought position that (a) was bought
+// before the join and (b) isn't full yet. Returns Map<positionId, fillTimes[]>.
+function allocateServer(serverId, all, verified) {
+    const positions = [];
+    for (const uid of Object.keys(all)) {
+        for (const p of (all[uid].positions || [])) if (String(p.serverId) === String(serverId)) positions.push(p);
+    }
+    positions.sort((a, b) => (a.boughtAt || 0) - (b.boughtAt || 0) || String(a.id).localeCompare(String(b.id)));
+    const fills = new Map(positions.map((p) => [p.id, []]));
+    if (!positions.length) return fills;
+    for (const t of serverJoinTimes(serverId, verified)) {
+        for (const p of positions) {
+            if ((p.boughtAt || 0) >= t) continue;
+            const arr = fills.get(p.id);
+            if (arr.length >= (Number(p.qty) || 0)) continue;
+            arr.push(t); break;
+        }
+    }
+    return fills;
+}
+
+// The investor's live account: liquid balance + lifetime figures.
+function accountOf(userId, verified) {
+    const all = load();
+    const u = all[userId] || { topups: [], positions: [], withdrawn: 0 };
+    const topupsPaid = (u.topups || []).filter((t) => t.status === 'paid').reduce((a, t) => a + (Number(t.amount) || 0), 0);
+    const invested = (u.positions || []).reduce((a, p) => a + (Number(p.qty) || 0) * BUY_PER_INVITE, 0);
+
+    let owned = 0, sold = 0, returns = 0;
+    const byServer = {};
+    for (const p of (u.positions || [])) { (byServer[p.serverId] ||= []).push(p); owned += Number(p.qty) || 0; }
+    for (const serverId of Object.keys(byServer)) {
+        const fills = allocateServer(serverId, all, verified);
+        for (const p of byServer[serverId]) { const n = (fills.get(p.id) || []).length; sold += n; returns += n * RET_PER_INVITE; }
+    }
+    const withdrawn = Number(u.withdrawn) || 0;
+    const available = round2(topupsPaid - invested + returns - withdrawn);
+    return {
+        available: Math.max(0, available),
+        invested: round2(invested), returned: round2(returns), withdrawn: round2(withdrawn),
+        profit: round2(returns - sold * BUY_PER_INVITE),
+        owned, sold, outstanding: owned - sold
+    };
+}
+
+function addTopup(userId, rec) { const all = load(); const u = ensure(all, userId); u.topups.push(rec); save(all); }
+async function reconcileTopups(userId, isPaidFn) {
+    const all = load(); const u = all[userId];
+    if (!u || !Array.isArray(u.topups)) return 0;
+    let credited = 0;
+    for (const t of u.topups) {
+        if (t.status === 'pending' && t.invoiceId && await isPaidFn(t.invoiceId).catch(() => false)) {
+            t.status = 'paid'; t.paidAt = Date.now(); credited += Number(t.amount) || 0;
+        }
+    }
+    if (credited > 0) save(all);
+    return round2(credited);
+}
+function recentTopups(userId, limit = 10) {
+    const u = load()[userId];
+    return (u?.topups || []).slice(-limit).reverse()
+        .map((t) => ({ amount: round2(t.amount), status: t.status, createdAt: t.createdAt || 0 }));
+}
+
+// Buy `qty` future invites of a server, paid from the investment account.
+function buy(userId, serverId, qty, verified) {
+    qty = Math.floor(Number(qty) || 0);
+    if (!/^\d{17,20}$/.test(String(serverId))) return { ok: false, error: 'bad-server' };
+    if (qty < MIN_BUY) return { ok: false, error: 'min-qty' };
+    const cost = round2(qty * BUY_PER_INVITE);
+    const acc = accountOf(userId, verified);
+    if (acc.available < cost) return { ok: false, error: 'insufficient', need: cost, have: acc.available };
+    const all = load(); const u = ensure(all, userId);
+    u.positions.push({ id: crypto.randomBytes(8).toString('hex'), serverId: String(serverId), qty, price: BUY_PER_INVITE, boughtAt: Date.now() });
+    save(all);
+    return { ok: true, cost, qty };
+}
+
+// Move liquid balance to the partner's main balance (settings.json).
+function withdraw(userId, amount, verified) {
+    const acc = accountOf(userId, verified);
+    const amt = (amount === undefined || amount === null || amount === '') ? acc.available : round2(amount);
+    if (!(amt > 0)) return { ok: false, error: 'nothing' };
+    if (amt > acc.available + 1e-6) return { ok: false, error: 'insufficient', have: acc.available };
+    const all = load(); const u = ensure(all, userId);
+    u.withdrawn = round2((Number(u.withdrawn) || 0) + amt);
+    save(all);
+    const settings = loadJSON('settings.json', {});
+    if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
+    settings[userId].balance = round2((Number(settings[userId].balance) || 0) + amt);
+    saveJSON('settings.json', settings);
+    return { ok: true, amount: amt, partnerBalance: settings[userId].balance };
+}
+
+// Server list with per-server sold-invite throughput + this investor's position.
+function serversFor(userId, verified, now = Date.now()) {
+    const all = load();
+    const byServer = {};
+    for (const u of (Array.isArray(verified) ? verified : [])) {
+        if (u && u.adKey && u.guildId) (byServer[u.guildId] ||= []).push(Number(u.timestamp) || 0);
+    }
+    const win = (times) => {
+        let h = 0, d = 0, w = 0;
+        for (const t of times) { if (t > now - 3600000) h++; if (t > now - 86400000) d++; if (t > now - 604800000) w++; }
+        return { hour: h, day: d, week: w, total: times.length };
+    };
+    const myPos = {};
+    for (const p of (all[userId]?.positions || [])) (myPos[p.serverId] ||= []).push(p);
+
+    const out = [];
+    for (const serverId of Object.keys(byServer)) {
+        const flow = win(byServer[serverId]);
+        let mine = null;
+        if (myPos[serverId]) {
+            const fills = allocateServer(serverId, all, verified);
+            let owned = 0, sold = 0; const soldTimes = [];
+            for (const p of myPos[serverId]) { owned += Number(p.qty) || 0; const ft = fills.get(p.id) || []; sold += ft.length; for (const t of ft) soldTimes.push(t); }
+            const ew = win(soldTimes);
+            mine = {
+                owned, sold, outstanding: owned - sold,
+                invested: round2(owned * BUY_PER_INVITE),
+                earned: round2(sold * RET_PER_INVITE),
+                earnedWin: { hour: round2(ew.hour * RET_PER_INVITE), day: round2(ew.day * RET_PER_INVITE), week: round2(ew.week * RET_PER_INVITE) }
+            };
+        }
+        out.push({ serverId, flow, mine });
+    }
+    out.sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0) || b.flow.week - a.flow.week || b.flow.total - a.flow.total);
+    return out;
+}
+
+module.exports = {
+    BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY,
+    accountOf, addTopup, reconcileTopups, recentTopups, buy, withdraw, serversFor
+};

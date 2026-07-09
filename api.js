@@ -24,6 +24,7 @@ const cards = require('./cards.js');
 const audit = require('./auditlog.js');
 const backup = require('./backup.js');
 const wallet = require('./wallet.js');
+const investors = require('./investors.js');
 const sales = require('./sales.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
@@ -390,8 +391,8 @@ async function handleAdmin(req, res, path, clients, config) {
         const url = new URL(req.url, 'http://x');
         const code = url.searchParams.get('code');
         const state = url.searchParams.get('state');
-        const kind = adminAuth.verifyState(state); // 'admin' | 'buyer' | 'partner' | null
-        const dest = kind === 'buyer' ? '/order/' : kind === 'partner' ? '/partner/' : '/admin/';
+        const kind = adminAuth.verifyState(state); // 'admin' | 'buyer' | 'partner' | 'investor' | null
+        const dest = kind === 'buyer' ? '/order/' : kind === 'partner' ? '/partner/' : kind === 'investor' ? '/investor/' : '/admin/';
         const back = adminAuth.adminOrigin() + dest;
         if (!code || !kind) {
             res.writeHead(302, { Location: back + '?login=denied' });
@@ -401,9 +402,9 @@ async function handleAdmin(req, res, path, clients, config) {
         try { uid = await adminAuth.resolveOauthUser(code); } catch { uid = null; }
         if (!uid) { res.writeHead(302, { Location: back + '?login=denied' }); return res.end(); }
 
-        // Buyers and partners: any Discord user may log in (same user session
-        // cookie); only the destination page differs.
-        if (kind === 'buyer' || kind === 'partner') {
+        // Buyers, partners and investors: any Discord user may log in (same user
+        // session cookie); only the destination page differs.
+        if (kind === 'buyer' || kind === 'partner' || kind === 'investor') {
             const token = adminAuth.issueBuyerSession(uid);
             res.writeHead(302, { Location: back, 'Set-Cookie': adminAuth.buyerCookieHeader(token) });
             return res.end();
@@ -1942,6 +1943,94 @@ async function handlePartner(req, res, path, clients, config) {
     return send(res, 404, { error: 'unknown endpoint' }, cors);
 }
 
+// ---------- Investor cabinet ----------
+// Discord-login dashboard where an investor tops up an investment account and
+// buys future invites of a server at $9/100; as those invites are sold by the
+// service at $10/100 they return $0.09 + 10%. Same user session cookie.
+async function handleInvestor(req, res, path, clients, config) {
+    const cors = corsHeaders(req);
+    if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
+    if (!adminAuth.enabled()) return send(res, 503, { error: 'auth not configured' }, cors);
+
+    if (path === '/investor/oauth/login' && req.method === 'GET') {
+        res.writeHead(302, { Location: adminAuth.oauthAuthorizeUrl(adminAuth.issueState('investor')) });
+        return res.end();
+    }
+    if (path === '/investor/logout' && req.method === 'POST') {
+        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': adminAuth.buyerCookieHeader('', { clear: true }) });
+    }
+    if (path === '/investor/whoami' && req.method === 'GET') {
+        const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+        return send(res, 200, sess ? { authed: true, userId: sess.userId } : { authed: false }, cors);
+    }
+
+    const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+    if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
+    const userId = sess.userId;
+    const verified = () => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; };
+
+    if (path === '/investor/me' && req.method === 'GET') {
+        await investors.reconcileTopups(userId, campaigns.isInvoicePaid).catch(() => null);
+        const acc = investors.accountOf(userId, verified());
+        return send(res, 200, {
+            userId,
+            account: acc,
+            topups: investors.recentTopups(userId),
+            pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY },
+            minTopup: investors.MIN_TOPUP,
+            cryptoEnabled: cryptopay.enabled()
+        }, cors);
+    }
+
+    // Servers with sold-invite throughput + this investor's position on each.
+    if (path === '/investor/servers' && req.method === 'GET') {
+        const list = investors.serversFor(userId, verified())
+            .filter((s) => s.mine || s.flow.total > 0)
+            .slice(0, 60)
+            .map((s) => ({
+                ...s,
+                name: guildNameOf(clients, s.serverId),
+                icon: guildIconOf(clients, s.serverId)
+            }));
+        return send(res, 200, { servers: list, pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY } }, cors);
+    }
+
+    // Top up the investment account via a CryptoBot invoice. Body: { amount }.
+    if (path === '/investor/topup' && req.method === 'POST') {
+        if (!cryptopay.enabled()) return send(res, 503, { error: 'Оплата временно недоступна' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const amount = +(Number(body?.amount) || 0).toFixed(2);
+        if (!(amount >= investors.MIN_TOPUP)) return send(res, 400, { error: 'min-topup' }, cors);
+        let invoice = null;
+        try { invoice = await cryptopay.createUsdtInvoice(amount.toFixed(2), { description: `Пополнение инвест-счёта Vemoni на $${amount.toFixed(2)}`.slice(0, 1024) }); }
+        catch (e) { return send(res, 502, { error: 'invoice-failed' }, cors); }
+        const invoiceUrl = invoice.bot_invoice_url || invoice.mini_app_invoice_url || invoice.web_app_invoice_url || invoice.pay_url;
+        investors.addTopup(userId, { invoiceId: invoice.invoice_id, amount, status: 'pending', createdAt: Date.now() });
+        return send(res, 200, { ok: true, invoiceUrl, amount }, cors);
+    }
+
+    // Buy N future invites of a server. Body: { serverId, qty }.
+    if (path === '/investor/buy' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        await investors.reconcileTopups(userId, campaigns.isInvoicePaid).catch(() => null);
+        const r = investors.buy(userId, String(body?.serverId || ''), body?.qty, verified());
+        if (!r.ok) return send(res, r.error === 'insufficient' ? 402 : 400, r, cors);
+        return send(res, 200, { ok: true, cost: r.cost, qty: r.qty, account: investors.accountOf(userId, verified()) }, cors);
+    }
+
+    // Withdraw liquid balance to the partner's main balance. Body: { amount? }.
+    if (path === '/investor/withdraw' && req.method === 'POST') {
+        const body = await readBody(req);
+        const r = investors.withdraw(userId, body?.amount, verified());
+        if (!r.ok) return send(res, r.error === 'insufficient' ? 402 : 400, r, cors);
+        return send(res, 200, { ok: true, amount: r.amount, account: investors.accountOf(userId, verified()) }, cors);
+    }
+
+    return send(res, 404, { error: 'unknown endpoint' }, cors);
+}
+
 function startApiServer(clients, config) {
     const port = Number(process.env.API_PORT || process.env.PORT || 8080);
 
@@ -1973,6 +2062,11 @@ function startApiServer(clients, config) {
             // Partner cabinet (same user session as the order panel).
             if (p.startsWith('/partner/')) {
                 return await handlePartner(req, res, p, clients, config);
+            }
+
+            // Investor cabinet (same user session).
+            if (p.startsWith('/investor/')) {
+                return await handleInvestor(req, res, p, clients, config);
             }
 
             if (!p.startsWith('/api/')) return send(res, 404, { error: 'Not found' });
