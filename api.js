@@ -14,7 +14,7 @@ const { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount } = require('
 const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes } = require('./joincheck.js');
 const { syncHubMember } = require('./hubrole.js');
 const { logFunds } = require('./fundslog.js');
-const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares } = require('./shares.js');
+const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares, distributeProfit } = require('./shares.js');
 const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
 const campaigns = require('./campaigns.js');
@@ -2064,8 +2064,21 @@ async function handleInvestor(req, res, path, clients, config) {
         if (!investors.isServerInvestable(String(body?.serverId || ''), verified())) return send(res, 400, { error: 'server-disabled' }, cors);
         if (investors.serverBroken(String(body?.serverId || ''), clients)) return send(res, 400, { error: 'server-broken' }, cors);
         await investors.reconcileTopups(userId, campaigns.isInvoicePaid).catch(() => null);
-        const r = investors.buy(userId, String(body?.serverId || ''), body?.qty, verified());
+        const gid = String(body?.serverId || '');
+        const r = investors.buy(userId, gid, body?.qty, verified());
         if (!r.ok) return send(res, r.error === 'insufficient' ? 402 : r.error === 'occupied' ? 409 : 400, r, cors);
+        // Recognize the buy-in as revenue now: distribute the service's per-invite
+        // net profit to shareholders (early) and record it in sales stats. The
+        // matching future join deliveries skip the normal per-join share split
+        // (index.js), so there's no double-count. Time/retention stats stay tied
+        // to real sponsor joins and are untouched here.
+        try {
+            const ownerCard = cards.loadCards().find((c) => !c.deletedAt && String(c.guildId) === gid);
+            const bid = ownerCard ? (Number((loadJSON('settings.json', {})[ownerCard.creatorId] || {}).joinBid) || 5) : 5;
+            const perInvite = investors.buyinProfitPerInvite(bid, ACQUIRING_RATE);
+            await distributeProfit(clients, r.qty * perInvite).catch(() => null);
+            sales.recordSale({ campaignId: `invest_${userId}_${Date.now()}`, buyerId: userId, amount: r.cost, joins: r.qty, sponsorGuildId: gid, via: 'invest' });
+        } catch (e) { console.error('[INVEST] buy-in distribution error:', e.message); }
         return send(res, 200, { ok: true, cost: r.cost, qty: r.qty, account: investors.accountOf(userId, verified()) }, cors);
     }
 

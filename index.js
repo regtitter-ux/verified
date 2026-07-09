@@ -1293,6 +1293,13 @@ const startBot = (token) => {
 
             const updated = verified.filter(u => !(u.id === user.id && u.guildId === guild.id && (u.roleId || null) === roleId));
 
+            // If this server still has outstanding investor invites, this paid
+            // join fills one — its share split already happened at the investor
+            // buy-in, so we skip payShares below (checked before the new join is
+            // added, so "outstanding" is the count BEFORE this join).
+            let investorOwnedJoin = false;
+            try { investorOwnedJoin = investors.serverOutstanding(guild.id, updated) > 0; } catch { /* never block verification */ }
+
             // One real invite = one join: if this user already has a live
             // ('joined') join record for THIS sponsor (they verified elsewhere
             // in the network), don't pay or count them again — just verify.
@@ -1354,8 +1361,10 @@ const startBot = (token) => {
                 });
                 // Split this join's service profit (revenue − partner payout −
                 // acquiring) across shareholders — manager sales just use the
-                // lower revenue.
-                await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
+                // lower revenue. Skip for investor-owned joins: their revenue
+                // funds the investor's return and the share split was already
+                // done at buy-in (no double-counting).
+                if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
                 await maybeAutoWithdraw(clients, creatorId);
             }
         } catch (e) {

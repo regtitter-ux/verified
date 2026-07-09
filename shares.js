@@ -56,9 +56,16 @@ async function payShares(clients, partnerAmount, opts = {}) {
     // (and the share split) is naturally lower — no separate commission.
     const amt = Number(partnerAmount) || 0;
     const revenue = Number.isFinite(Number(opts.revenuePerJoin)) ? Number(opts.revenuePerJoin) : REVENUE_PER_JOIN;
-    const profit = revenue - amt - amt * ACQUIRING_RATE;
+    return distributeProfit(clients, revenue - amt - amt * ACQUIRING_RATE, opts.nowMs);
+}
+
+// Split a lump of service profit across shareholders by percentage (the core of
+// payShares, reusable for one-off distributions — e.g. an investor buy-in whose
+// revenue is recognized up-front rather than per delivered join).
+async function distributeProfit(clients, profit, nowMs) {
+    profit = Number(profit) || 0;
     if (!(profit > 0)) return; // costs ≥ what we charge → no profit to split
-    const now = Number(opts.nowMs) || Date.now();
+    const now = Number(nowMs) || Date.now();
     const today = dayNumberOf(now);
 
     const shares = loadShares();
@@ -97,4 +104,4 @@ async function payShares(clients, partnerAmount, opts = {}) {
     for (const uid of toWithdraw) await maybeAutoWithdraw(clients, uid).catch(() => null);
 }
 
-module.exports = { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, DEFAULT_HOLDER, loadShares, payShares, dayNumberOf };
+module.exports = { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, DEFAULT_HOLDER, loadShares, payShares, distributeProfit, dayNumberOf };

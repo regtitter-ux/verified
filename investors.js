@@ -140,6 +140,28 @@ function occupancyOf(serverId, verified, all = load()) {
     return { occupants, totalOutstanding, etaSec };
 }
 
+// Total unsold (outstanding) invites across all investors on a server. Used at
+// join-delivery time: while this is > 0, the next paid join fills an investor
+// invite, so its revenue funds the investor's return (the shareholder split for
+// it already happened at buy-in) and the normal per-join payShares is skipped.
+function serverOutstanding(serverId, verified) {
+    const all = load();
+    const fills = allocateServer(serverId, all, verified);
+    let out = 0;
+    for (const uid of Object.keys(all)) for (const p of (all[uid].positions || [])) if (String(p.serverId) === String(serverId)) out += Math.max(0, (Number(p.qty) || 0) - (fills.get(p.id) || []).length);
+    return out;
+}
+
+// The service's per-invite net profit distributed to shares at buy-in, given
+// the server's actual partner payout rate ($/100). Over the full lifecycle:
+// resale revenue − partner payout − acquiring − the investor's profit.
+function buyinProfitPerInvite(partnerPer100 = 5, acquiringRate = 0.03) {
+    const sell = SELL_PER_100 / 100;
+    const partner = (Number(partnerPer100) || 5) / 100;
+    const investorProfit = BUY_PER_INVITE * RETURN_RATE;
+    return Math.max(0, sell - partner - partner * acquiringRate - investorProfit);
+}
+
 // The investor's live account: liquid balance + lifetime figures.
 function accountOf(userId, verified) {
     const all = load();
@@ -341,7 +363,7 @@ function serversFor(userId, verified, now = Date.now()) {
 
 module.exports = {
     BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY, MIN_DAYS, MIN_DAILY,
-    serverMinInvites, serverDailyRate, isServerInvestable, occupancyOf,
+    serverMinInvites, serverDailyRate, isServerInvestable, occupancyOf, serverOutstanding, buyinProfitPerInvite,
     serverBroken, refundServer, sweepBrokenServers, startInvestSweep,
     accountOf, addTopup, reconcileTopups, recentTopups, buy, withdraw, serversFor,
     loadEnabledServers, saveEnabledServers, isServerEnabled, addEnabledServer, removeEnabledServer, manualTopup
