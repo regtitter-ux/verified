@@ -43,6 +43,23 @@ const JOIN_CHECK_GUILDS = new Set((process.env.JOIN_CHECK_GUILDS || '').split(',
 // null means "no ad, verify without one" (kran closed, no ad set, or the
 // join limit is reached). sponsor is set only in join-check mode (the ad's
 // invite leads to a server a network bot is on).
+// Mark a sponsor as "being advertised right now" — the same stamp the
+// in-Discord flow writes when it shows an ad (index.js). This gates the
+// leave-clawback: a member leaving a sponsor whose ad hasn't shown recently is
+// NOT clawed back (joincheck.js). Without stamping here, sponsors advertised
+// only through API partners would look permanently "off" and their delivered
+// joins could never be clawed back. Throttled to one write/minute per sponsor.
+function stampSponsorShow(gid) {
+    if (!/^\d{17,20}$/.test(String(gid || ''))) return;
+    try {
+        const shows = loadJSON('sponsorshow.json', {});
+        const now = Date.now();
+        if (now - (Number(shows[gid]) || 0) < 60000) return; // already fresh → skip the write
+        shows[gid] = now;
+        saveJSON('sponsorshow.json', shows);
+    } catch { /* stamping must never break the ad path */ }
+}
+
 async function adForServer(clients, ownerId, serverId) {
     const cfg = loadJSON('siteconfig.json', {});
     const gidOk = /^\d{17,20}$/.test(String(serverId || ''));
@@ -58,6 +75,7 @@ async function adForServer(clients, ownerId, serverId) {
                 const sponsor = await resolveSponsorPresence(clients, pick.invite).catch(() => null);
                 // Only serve the ad if the join can be verified right now.
                 if (sponsor) {
+                    stampSponsorShow(sponsor.guildId);
                     const codes = extractInviteCodes(pick.invite);
                     return { adText: applyTemplate(serverId, pick.invite), raw: pick.invite, sponsor, campaignId: pick.campaignId, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
                 }
@@ -99,6 +117,7 @@ async function adForServer(clients, ownerId, serverId) {
     if (!sponsor || (gidOk && sponsor.guildId === String(serverId))) {
         return { adText: null, sponsor: null, invite: null };
     }
+    stampSponsorShow(sponsor.guildId);
     const codes = extractInviteCodes(raw);
     return { adText: rendered, raw, sponsor, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
 }
@@ -253,7 +272,7 @@ const DOCS = {
     auth: 'Send your API key as `Authorization: Bearer <key>` or `X-API-Key: <key>`.',
     note: 'Your bot behaves exactly like a network verification bot. You only run verifications; ad text, rate and campaigns are controlled by the owner — you cannot set them. Payouts are earned only through verified joins.',
     endpoints: {
-        'GET /api/ad': 'The ad to show on your server: ?serverId=<your guild>. Returns { adText, sponsor:{guildId,name,invite}|null }. It is the owner\'s per-server ad if set for your server, else the global ad — same rule as every network bot. adText null → no ad, just verify.',
+        'GET /api/ad': 'The ad to show on your server: ?serverId=<your guild>. Returns { adText, fallbackText, sponsor:{guildId,name,invite}|null }. It is the owner\'s per-server ad if set for your server, else a paid buyer campaign, else the global ad — same rule and priority as every network bot. adText null → no ad; show fallbackText (the network\'s no-ad message) if set, then just verify.',
         'POST /api/join-check': 'Complete a verification, mirroring the in-Discord bots. Body: { userId, serverId }. We pick the ad for your server (per-server override or global) and: if it is a join-check ad, we verify membership on its sponsor via Discord — 200 { joined:true, credited:true } on success (let them through), 403 { joined:false } if not a member (ask them to join first). If there is no ad (kran closed / none set / limit reached), 200 { joined:true, ad:false } → verify them without an ad (no-ad stat recorded, no payout). The sponsor is derived from OUR ad config, never partner input. 503 to retry. Each member is paid once per sponsor; leaving reverses it.',
         'GET /api/balance': 'Your balance and payment details.',
         'GET /api/stats': 'Your verification stats (per server + time windows).',
@@ -1974,8 +1993,12 @@ function startApiServer(clients, config) {
             if (p === '/api/ad' && req.method === 'GET') {
                 const serverId = (new URL(req.url, 'http://x')).searchParams.get('serverId') || '';
                 const ad = await adForServer(clients, config.ownerId, serverId);
+                // Same "заглушка" the in-Discord bots show when there is no ad,
+                // so an API bot can render an identical no-ad message.
+                const cfg = loadJSON('siteconfig.json', {});
                 return send(res, 200, {
                     adText: ad.adText,
+                    fallbackText: (cfg.fallbackText && String(cfg.fallbackText).trim()) || null,
                     sponsor: ad.sponsor ? { guildId: ad.sponsor.guildId, name: guildNameOf(clients, ad.sponsor.guildId), invite: ad.invite } : null
                 });
             }
