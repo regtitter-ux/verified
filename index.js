@@ -9,7 +9,7 @@ const {
     buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone
 } = require('./payouts.js');
 const { startApiServer, createApiKey } = require('./api.js');
-const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave } = require('./joincheck.js');
+const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave, extractInviteCodes } = require('./joincheck.js');
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
@@ -19,6 +19,24 @@ const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
 const { logFunds } = require('./fundslog.js');
+
+// A "Join" link button for the sponsor invite shown in an ad. Verification
+// replies are ephemeral, and Discord never unfurls invite links on ephemeral
+// messages (no native server card / join button) — so we surface a real Join
+// button instead. Returns a component row, or null when the ad carries no
+// Discord invite (plain-text ad / fallback). Takes the raw invite first, then
+// the rendered text, and rebuilds a canonical https URL the button accepts.
+function joinButtonRow(...sources) {
+    for (const src of sources) {
+        const code = extractInviteCodes(src)[0];
+        if (code) {
+            return new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setLabel('Join').setStyle(ButtonStyle.Link).setURL(`https://discord.gg/${code}`)
+            );
+        }
+    }
+    return null;
+}
 
 // Global safety net: a stray rejection or throw (background sweeps, Discord
 // REST hiccups, a bad interaction path) must NOT kill the whole fleet — on
@@ -1222,7 +1240,8 @@ const startBot = (token) => {
             // Funnel metric #1: first click ("started verification") for this card.
             try { cards.trackClick(guild.id, roleId, creatorId, user.id); } catch (e) { /* stats must never break verification */ }
 
-            return interaction.editReply({ content: responseText }).catch(() => null);
+            const firstJoinRow = joinButtonRow(latest?.raw, responseText);
+            return interaction.editReply({ content: responseText, components: firstJoinRow ? [firstJoinRow] : [] }).catch(() => null);
         }
 
         const pending = pendingVerification.get(pendingKey);
@@ -1236,8 +1255,10 @@ const startBot = (token) => {
         if (sponsor) {
             const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
             if (joined !== true) {
+                const retryJoinRow = joinButtonRow(pending.adRaw, pending.adText);
                 return interaction.editReply({
-                    content: pending.adText || 'Please join the server first, then click again.'
+                    content: pending.adText || 'Please join the server first, then click again.',
+                    components: retryJoinRow ? [retryJoinRow] : []
                 }).catch(() => null);
             }
         }
