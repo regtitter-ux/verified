@@ -1816,6 +1816,7 @@ async function handlePartner(req, res, path, clients, config) {
             referralsCount: Array.isArray(s.referrals) ? s.referrals.length : 0,
             refBonusAccrued: money(s.refBonusAccrued),
             autoPayout: Boolean(s.autoPayout),
+            autoTransfer: Boolean(s.autoTransfer),
             standingJoins: standing.length,
             standingPaid: sumAmt(standing),
             clawedJoins: clawed.length,
