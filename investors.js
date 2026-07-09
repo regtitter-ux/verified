@@ -13,6 +13,12 @@
 //   available = topups(paid) − Σ bought(qty·$0.09) + Σ sold·$0.099 − withdrawn
 const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
+const cards = require('./cards.js');
+
+// If a server loses the bot or its last active verification card, its undelivered
+// invites are refunded to investors at the $9/100 buy price — but only after this
+// grace period, in case the server comes back. Set INVEST_REFUND_GRACE_HOURS.
+const GRACE_MS = (Number(process.env.INVEST_REFUND_GRACE_HOURS) || 24) * 3600000;
 
 const round2 = (n) => +((Number(n) || 0).toFixed(2));
 const round4 = (n) => +((Number(n) || 0).toFixed(4));
@@ -210,6 +216,73 @@ function withdraw(userId, amount, verified) {
     return { ok: true, amount: amt, partnerBalance: settings[userId].balance };
 }
 
+// ---- Broken-server refund (bot removed / last active card deleted) ----
+function loadBroken() { const r = loadJSON('investbroken.json', {}); return (r && typeof r === 'object' && !Array.isArray(r)) ? r : {}; }
+function saveBroken(o) { saveJSON('investbroken.json', o); }
+
+// A server is broken for investment if no fleet bot is on it, or it has no
+// active (non-deleted) verification card.
+function serverBroken(serverId, clients) {
+    const botPresent = (Array.isArray(clients) ? clients : []).some((c) => c.guilds?.cache?.has(String(serverId)));
+    const hasActiveCard = cards.loadCards().some((c) => !c.deletedAt && String(c.guildId) === String(serverId));
+    return !botPresent || !hasActiveCard;
+}
+
+// Refund every investor's UNDELIVERED invites on a server: freeze each position
+// at what actually sold, so the outstanding principal ($0.09/invite) is released
+// back to their investment account (available balance is derived from qty).
+function refundServer(serverId, verified) {
+    const all = load();
+    const fills = allocateServer(serverId, all, verified);
+    let changed = false, refundedInvites = 0; const hit = new Set();
+    for (const uid of Object.keys(all)) {
+        for (const p of (all[uid].positions || [])) {
+            if (String(p.serverId) !== String(serverId)) continue;
+            const sold = (fills.get(p.id) || []).length;
+            const out = Math.max(0, (Number(p.qty) || 0) - sold);
+            if (out > 0) { p.qty = sold; p.refundedAt = Date.now(); p.refundReason = 'server-broken'; refundedInvites += out; hit.add(uid); changed = true; }
+        }
+    }
+    if (changed) save(all);
+    return { refundedInvites, investors: hit.size };
+}
+
+// Periodic: track broken servers that still have outstanding invites; refund
+// once a server has been broken for the whole grace period; clear the mark if
+// it recovers or its invites are all sold.
+function sweepBrokenServers(clients, verifiedList) {
+    const verified = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
+    const all = load();
+    const serverIds = new Set();
+    for (const uid of Object.keys(all)) for (const p of (all[uid].positions || [])) serverIds.add(String(p.serverId));
+    const broken = loadBroken();
+    const now = Date.now(); let changed = false;
+    for (const serverId of serverIds) {
+        const fills = allocateServer(serverId, all, verified);
+        let out = 0;
+        for (const uid of Object.keys(all)) for (const p of (all[uid].positions || [])) if (String(p.serverId) === String(serverId)) out += Math.max(0, (Number(p.qty) || 0) - (fills.get(p.id) || []).length);
+        if (out <= 0) { if (broken[serverId]) { delete broken[serverId]; changed = true; } continue; }
+        if (serverBroken(serverId, clients)) {
+            if (!broken[serverId]) { broken[serverId] = now; changed = true; }
+            else if (now - broken[serverId] >= GRACE_MS) {
+                const r = refundServer(serverId, verified);
+                console.log(`[INVEST] refunded ${r.refundedInvites} undelivered invites on broken server ${serverId} to ${r.investors} investor(s)`);
+                delete broken[serverId]; changed = true;
+            }
+        } else if (broken[serverId]) { delete broken[serverId]; changed = true; }
+    }
+    for (const sid of Object.keys(broken)) if (!serverIds.has(sid)) { delete broken[sid]; changed = true; }
+    if (changed) saveBroken(broken);
+}
+
+function startInvestSweep(clients) {
+    const every = Number(process.env.INVEST_SWEEP_MS) || 60 * 60 * 1000; // hourly
+    const tick = () => { try { sweepBrokenServers(clients); } catch (e) { console.error('[INVEST] sweep error:', e.message); } };
+    setInterval(tick, every);
+    setTimeout(tick, 120 * 1000);
+    console.log(`[INVEST] broken-server refund sweep every ${Math.round(every / 60000)}m (grace ${Math.round(GRACE_MS / 3600000)}h)`);
+}
+
 // Server list with per-server sold-invite throughput + this investor's position.
 function serversFor(userId, verified, now = Date.now()) {
     const all = load();
@@ -225,6 +298,7 @@ function serversFor(userId, verified, now = Date.now()) {
     const myPos = {};
     for (const p of (all[userId]?.positions || [])) (myPos[p.serverId] ||= []).push(p);
     const enabled = new Set(loadEnabledServers());
+    const broken = loadBroken();
 
     const out = [];
     // Any server with activity, plus owner-enabled and any the investor holds.
@@ -253,10 +327,12 @@ function serversFor(userId, verified, now = Date.now()) {
 
         // Show it if it's investable right now, or the investor holds a position.
         if (!investable && !mine) continue;
+        const brokenSince = broken[serverId] || 0;
         out.push({
             serverId, flow, mine, enabled: enabled.has(serverId), investable,
             minInvites: Math.max(MIN_BUY, Math.ceil((flow.week / 7) * MIN_DAYS)),
-            occupied: lockedForYou, occupiedByYou, occupiedEtaSec: lockedForYou ? occ.etaSec : null
+            occupied: lockedForYou, occupiedByYou, occupiedEtaSec: lockedForYou ? occ.etaSec : null,
+            brokenSince, refundEtaSec: brokenSince ? Math.max(0, Math.ceil((GRACE_MS - (now - brokenSince)) / 1000)) : null
         });
     }
     out.sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0) || b.flow.week - a.flow.week || b.flow.total - a.flow.total);
@@ -266,6 +342,7 @@ function serversFor(userId, verified, now = Date.now()) {
 module.exports = {
     BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY, MIN_DAYS, MIN_DAILY,
     serverMinInvites, serverDailyRate, isServerInvestable, occupancyOf,
+    serverBroken, refundServer, sweepBrokenServers, startInvestSweep,
     accountOf, addTopup, reconcileTopups, recentTopups, buy, withdraw, serversFor,
     loadEnabledServers, saveEnabledServers, isServerEnabled, addEnabledServer, removeEnabledServer, manualTopup
 };

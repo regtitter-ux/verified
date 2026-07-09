@@ -18,6 +18,7 @@ const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
+const investors = require('./investors.js');
 const refundMigration = require('./refundmigration.js');
 const { logFunds } = require('./fundslog.js');
 
@@ -1411,6 +1412,9 @@ campaigns.startCampaignSweep(clients);
 // Verification cards: detect ones deleted from their channel and move them to
 // the "deleted" list (keeping their stats).
 cards.startCardSweep(clients);
+
+// Investors: refund undelivered invites when a server loses its bot / last card.
+investors.startInvestSweep(clients);
 
 // Data backups: rolling local snapshots + off-site copies to a Discord channel.
 backup.startBackupSweep(clients);
