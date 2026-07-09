@@ -72,12 +72,14 @@ async function distributeProfit(clients, profit, nowMs) {
     const settings = loadJSON('settings.json');
     const earnings = loadJSON('shareearnings.json', {});
     const toWithdraw = [];
+    const credited = {}; // uid -> exact profit share this holder received
 
     for (const [uid, cfg] of Object.entries(shares)) {
         const pct = Number(cfg.pct) || 0;
         if (pct <= 0) continue;
         const exact = profit * (pct / 100);
         if (exact <= 0) continue;
+        credited[uid] = round4(exact);
 
         // Exact ledger — all-time cumulative + per-day bucket (dashboard).
         cfg.earned = round4((Number(cfg.earned) || 0) + exact);
@@ -102,6 +104,33 @@ async function distributeProfit(clients, profit, nowMs) {
     saveJSON('settings.json', settings);
 
     for (const uid of toWithdraw) await maybeAutoWithdraw(clients, uid).catch(() => null);
+    return credited;
 }
 
-module.exports = { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, DEFAULT_HOLDER, loadShares, payShares, distributeProfit, dayNumberOf };
+// Reverse a previously-distributed profit, fairly: `perUid` maps shareholder →
+// amount to claw back (already computed pro-rata by the caller). Debits the
+// holder's balance (may go negative, like a sponsor-leave clawback) and reduces
+// their earned ledger. Used when an investor's undelivered invites are refunded
+// on a broken server — the buy-in profit for those invites is taken back.
+function clawbackProfit(perUid, nowMs) {
+    const entries = Object.entries(perUid || {}).filter(([, a]) => Number(a) > 0);
+    if (!entries.length) return 0;
+    const today = dayNumberOf(Number(nowMs) || Date.now());
+    const shares = loadShares();
+    const settings = loadJSON('settings.json');
+    const earnings = loadJSON('shareearnings.json', {});
+    let total = 0;
+    for (const [uid, amtRaw] of entries) {
+        const amt = round4(amtRaw);
+        if (settings[uid]) settings[uid].balance = round2((Number(settings[uid].balance) || 0) - round2(amt));
+        if (shares[uid]) shares[uid].earned = round4(Math.max(0, (Number(shares[uid].earned) || 0) - amt));
+        if (earnings[uid]) earnings[uid][today] = round4((Number(earnings[uid][today]) || 0) - amt);
+        total = round4(total + amt);
+    }
+    saveJSON('shares.json', shares);
+    saveJSON('shareearnings.json', earnings);
+    saveJSON('settings.json', settings);
+    return total;
+}
+
+module.exports = { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, DEFAULT_HOLDER, loadShares, payShares, distributeProfit, clawbackProfit, dayNumberOf };

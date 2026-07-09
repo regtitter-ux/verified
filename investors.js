@@ -14,6 +14,7 @@
 const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
 const cards = require('./cards.js');
+const shares = require('./shares.js');
 
 // If a server loses the bot or its last active verification card, its undelivered
 // invites are refunded to investors at the $9/100 buy price — but only after this
@@ -217,9 +218,20 @@ function buy(userId, serverId, qty, verified) {
     const acc = accountOf(userId, verified);
     if (acc.available < cost) return { ok: false, error: 'insufficient', need: cost, have: acc.available };
     const all = load(); const u = ensure(all, userId);
-    u.positions.push({ id: crypto.randomBytes(8).toString('hex'), serverId: String(serverId), qty, price: BUY_PER_INVITE, boughtAt: Date.now() });
+    const posId = crypto.randomBytes(8).toString('hex');
+    u.positions.push({ id: posId, serverId: String(serverId), qty, price: BUY_PER_INVITE, boughtAt: Date.now() });
     save(all);
-    return { ok: true, cost, qty };
+    return { ok: true, cost, qty, positionId: posId };
+}
+
+// Store the shareholder breakdown that the buy-in profit was distributed to, so
+// a later broken-server refund can claw back exactly the pro-rata share for the
+// undelivered invites.
+function recordBuyinCredits(userId, positionId, credits) {
+    const all = load(); const u = all[userId]; if (!u) return;
+    const p = (u.positions || []).find((x) => x.id === positionId); if (!p) return;
+    p.buyinCredits = credits || {};
+    save(all);
 }
 
 // Move liquid balance to the partner's main balance (settings.json).
@@ -257,16 +269,27 @@ function refundServer(serverId, verified) {
     const all = load();
     const fills = allocateServer(serverId, all, verified);
     let changed = false, refundedInvites = 0; const hit = new Set();
+    const clawback = {}; // shareholder uid -> profit to reverse for undelivered invites
     for (const uid of Object.keys(all)) {
         for (const p of (all[uid].positions || [])) {
             if (String(p.serverId) !== String(serverId)) continue;
+            const origQty = Number(p.qty) || 0;
             const sold = (fills.get(p.id) || []).length;
-            const out = Math.max(0, (Number(p.qty) || 0) - sold);
-            if (out > 0) { p.qty = sold; p.refundedAt = Date.now(); p.refundReason = 'server-broken'; refundedInvites += out; hit.add(uid); changed = true; }
+            const out = Math.max(0, origQty - sold);
+            if (out <= 0) continue;
+            // Claw back each shareholder's buy-in profit for the undelivered
+            // fraction of this position, proportional to what they received.
+            const frac = origQty > 0 ? out / origQty : 0;
+            for (const [suid, amt] of Object.entries(p.buyinCredits || {})) clawback[suid] = (clawback[suid] || 0) + (Number(amt) || 0) * frac;
+            p.qty = sold; p.refundedAt = Date.now(); p.refundReason = 'server-broken';
+            refundedInvites += out; hit.add(uid); changed = true;
         }
     }
-    if (changed) save(all);
-    return { refundedInvites, investors: hit.size };
+    if (changed) {
+        save(all);
+        try { shares.clawbackProfit(clawback); } catch (e) { console.error('[INVEST] share clawback error:', e.message); }
+    }
+    return { refundedInvites, investors: hit.size, clawedBack: Object.values(clawback).reduce((a, b) => a + b, 0) };
 }
 
 // Periodic: track broken servers that still have outstanding invites; refund
@@ -365,6 +388,6 @@ module.exports = {
     BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY, MIN_DAYS, MIN_DAILY,
     serverMinInvites, serverDailyRate, isServerInvestable, occupancyOf, serverOutstanding, buyinProfitPerInvite,
     serverBroken, refundServer, sweepBrokenServers, startInvestSweep,
-    accountOf, addTopup, reconcileTopups, recentTopups, buy, withdraw, serversFor,
+    accountOf, addTopup, reconcileTopups, recentTopups, buy, recordBuyinCredits, withdraw, serversFor,
     loadEnabledServers, saveEnabledServers, isServerEnabled, addEnabledServer, removeEnabledServer, manualTopup
 };
