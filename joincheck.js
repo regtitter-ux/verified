@@ -32,7 +32,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
 // discord.gg/CODE · discord.com/invite/CODE · discordapp.com/invite/CODE · .gg/CODE
-const INVITE_RE = /(?:discord(?:app)?\.com\/invite\/|discord\.gg\/|(?:^|\s)\.gg\/)([a-z0-9-]+)/gi;
+// The bare ".gg/" shorthand must be preceded by a non-alphanumeric (or start),
+// so a template with no space before the link (e.g. "Join:{link}") still
+// extracts the code — but "discord.gg/" is still handled by its own branch.
+const INVITE_RE = /(?:discord(?:app)?\.com\/invite\/|discord\.gg\/|(?:^|[^a-z0-9])\.gg\/)([a-z0-9-]+)/gi;
 function extractInviteCodes(text) {
     const codes = new Set();
     if (!text) return [];
@@ -57,7 +60,9 @@ async function inviteGuildId(client, code) {
     try {
         const inv = await client.fetchInvite(code);
         const guildId = inv?.guild?.id || null;
-        inviteCache.set(code, { guildId, ts: Date.now(), ttl: INVITE_TTL });
+        // A successful fetch that yields no guild id (group-DM invite / odd
+        // Discord response) is treated as a short negative, not cached 6h.
+        inviteCache.set(code, { guildId, ts: Date.now(), ttl: guildId ? INVITE_TTL : INVITE_NEG_TTL });
         return guildId;
     } catch (e) {
         if (e?.code === 10006) inviteCache.set(code, { guildId: null, ts: Date.now(), ttl: INVITE_NEG_TTL }); // Unknown Invite

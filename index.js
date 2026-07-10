@@ -1222,7 +1222,10 @@ const startBot = (token) => {
                     }
                     const pick = chosen || tentative;
                     if (pick) {
-                        latest = { text: pick.ad.text, ts: Date.now(), raw: pick.ad.raw, campaignId: pick.cand.id };
+                        // Carry the resolved sponsor guild so click 2 can re-find
+                        // the bot WITHOUT re-resolving the invite (which could fail
+                        // transiently and wrongly log the join as ad-free).
+                        latest = { text: pick.ad.text, ts: Date.now(), raw: pick.ad.raw, campaignId: pick.cand.id, sponsorGuildId: pick.ad.sp.guildId };
                         campaignPicked = true;
                         // Stamp "ad live" for the leave-clawback opt-out (joincheck.js).
                         try { const shows = loadJSON('sponsorshow.json', {}); shows[pick.ad.sp.guildId] = Date.now(); saveJSON('sponsorshow.json', shows); } catch { /* stamping must never break verification */ }
@@ -1231,14 +1234,20 @@ const startBot = (token) => {
             }
 
             // House ads (owner/partner advText) weren't validated above — apply
-            // the same cap + resolvable-sponsor / not-self checks to them. A
-            // picked campaign is already fully validated, so skip it here.
+            // the same cap + resolvable-sponsor / not-self / not-already-member
+            // checks to them. A picked campaign is already fully validated here.
             if (latest && !campaignPicked && capReached(latest.raw)) latest = null;
             if (latest && !campaignPicked) {
                 const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
                 if (!sp || sp.guildId === guild.id) {
                     latest = null;
+                } else if (await isMember(sp.bot, sp.guildId, user.id).catch(() => null) === true) {
+                    // User is already a member of the house ad's sponsor — showing
+                    // it can't drive a real join and would pay the partner for a
+                    // pre-existing member. Same rule campaigns already follow.
+                    latest = null;
                 } else {
+                    latest.sponsorGuildId = sp.guildId;
                     try {
                         const shows = loadJSON('sponsorshow.json', {});
                         shows[sp.guildId] = Date.now();
@@ -1253,8 +1262,12 @@ const startBot = (token) => {
                 || ((cfg.fallbackText && String(cfg.fallbackText).trim()) || 'Great, now click again to open access to the server!');
 
             // Only clicks that actually display an ad qualify for balance accrual.
-            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '' });
-            setTimeout(() => pendingVerification.delete(pendingKey), 300000);
+            // Keep the resolved sponsor guild so the second click doesn't re-resolve.
+            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '' });
+            // 30-min window: a user who reads the ad and takes a while to join the
+            // sponsor still completes on the SAME pending entry (with adShown), so
+            // the join isn't re-selected into an ad-free verification.
+            setTimeout(() => pendingVerification.delete(pendingKey), 30 * 60 * 1000);
 
             // Funnel metric #1: first click ("started verification") for this card.
             try { cards.trackClick(guild.id, roleId, creatorId, user.id); } catch (e) { /* stats must never break verification */ }
@@ -1268,17 +1281,30 @@ const startBot = (token) => {
         // Join-check mode: if the ad points to a server one of our bots is on, the
         // user must actually be a member before we verify them. Until they join, every
         // repeat click just re-shows the ad — no role, no payout. ($5/100, see joincheck.js.)
-        const sponsor = (roleId && pending?.adShown)
-            ? await resolveSponsorPresence(clients, pending.adText).catch(() => null)
-            : null;
+        // Use the sponsor resolved on click 1 (find the bot by the stored guild
+        // id) instead of re-resolving the invite — a transient re-resolution
+        // failure here would drop the payout and mislabel the join as ad-free.
+        // Fall back to a fresh resolve only if the stored guild is unavailable.
+        let sponsor = null;
+        if (roleId && pending?.adShown) {
+            if (pending.sponsorGuildId) {
+                const bot = clients.find((c) => c.guilds.cache.has(pending.sponsorGuildId));
+                sponsor = bot ? { guildId: pending.sponsorGuildId, bot } : null;
+            }
+            if (!sponsor) sponsor = await resolveSponsorPresence(clients, pending.adText).catch(() => null);
+        }
         if (sponsor) {
             const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
             if (joined !== true) {
                 const retryJoinRow = joinButtonRow(pending.adRaw, pending.adText);
-                return interaction.editReply({
-                    content: pending.adText || 'Please join the server first, then click again.',
-                    components: retryJoinRow ? [retryJoinRow] : []
-                }).catch(() => null);
+                // Distinguish "not a member yet" (false) from "couldn't check right
+                // now" (null): the transient case must NOT read as "join first" (it
+                // misleads a user who already joined). We still don't grant access
+                // without a confirmed join, but the message tells them to retry.
+                const content = joined === null
+                    ? '⏳ Не удалось проверить, что ты на сервере — попробуй ещё раз через минуту.'
+                    : (pending.adText || 'Please join the server first, then click again.');
+                return interaction.editReply({ content, components: retryJoinRow ? [retryJoinRow] : [] }).catch(() => null);
             }
         }
 
