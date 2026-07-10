@@ -1195,11 +1195,12 @@ const startBot = (token) => {
             let campaignPicked = false;
             if (!adsOff) {
                 try {
-                    // Fully validate a campaign for this guild+user → resolved
-                    // { text, raw, sp } or null (capped / self-target / unresolvable).
-                    const showable = async (cand) => {
+                    // Resolve a candidate's sponsor (network) → { text, raw, sp }
+                    // or null (self-target / unresolvable). The cheap cap check is
+                    // done in the loop BEFORE this, so capped campaigns are skipped
+                    // without a network call.
+                    const resolveCand = async (cand) => {
                         const raw = cand.invite;
-                        if (capReached(raw)) return null;
                         const text = applyTemplate(guild.id, raw);
                         const sp = await resolveSponsorPresence(clients, text).catch(() => null);
                         if (!sp || sp.guildId === guild.id) return null;
@@ -1209,10 +1210,11 @@ const startBot = (token) => {
                     const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(guild.id, verified, fleet));
                     let chosen = null, tentative = null, checks = 0;
                     for (const cand of ordered) {
+                        if (capReached(cand.invite)) continue;             // cheap, no network → unbounded
                         if (checks >= 8) break;                            // bound the network calls
-                        const ad = await showable(cand);
-                        if (!ad) continue;                                 // capped / unresolvable → try next
                         checks++;
+                        const ad = await resolveCand(cand);
+                        if (!ad) continue;                                 // unresolvable / self → try next
                         const m = await isMember(ad.sp.bot, ad.sp.guildId, user.id).catch(() => null);
                         if (m === true) continue;                          // already a member → try next
                         if (m === false) { chosen = { cand, ad }; break; } // not a member → ideal
