@@ -2108,6 +2108,22 @@ function startApiServer(clients, config) {
         try {
             const p = (new URL(req.url, 'http://x').pathname).replace(/\/+$/, '') || '/';
 
+            // CSRF defense for the cookie-authenticated cabinets. The session
+            // cookie is SameSite=None (cross-origin admin panel), so a malicious
+            // page could otherwise forge a state-changing POST that rides the
+            // victim's cookie. Any browser cross-origin request — including the
+            // text/plain "simple request" that skips preflight — still carries an
+            // Origin header, so rejecting a mismatched Origin on mutating cabinet
+            // requests blocks CSRF without touching the frontend (legit calls
+            // come from ADMIN_ORIGIN and are unaffected). API-key routes (/api/*)
+            // aren't cookie-authed, so they're exempt.
+            const isCabinet = p === '/admin' || p.startsWith('/admin/') || p.startsWith('/order/') || p.startsWith('/partner/') || p.startsWith('/investor/');
+            const mutating = req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE' || req.method === 'PATCH';
+            if (isCabinet && mutating) {
+                const origin = req.headers.origin || '';
+                if (origin && origin !== ADMIN_ORIGIN) return send(res, 403, { error: 'bad origin' });
+            }
+
             // Public: docs + health
             if (req.method === 'GET' && (p === '/' || p === '/api')) return send(res, 200, DOCS);
             if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
