@@ -277,6 +277,12 @@ const startBot = (token) => {
         }
 
         const components = [];
+        // Partner portal — a link button, always FIRST under the embed, opening
+        // the partner cabinet (Discord-OAuth logs the user in automatically).
+        const PORTAL_URL = (process.env.PARTNER_PORTAL_URL || process.env.ADMIN_API_ORIGIN || 'https://vemoni.info').replace(/\/+$/, '') + '/partner/';
+        components.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setLabel('Partner portal').setStyle(ButtonStyle.Link).setURL(PORTAL_URL).setEmoji('🔗')
+        ));
         // Self-service buttons only on your own balance
         if (isSelf) {
             const row = new ActionRowBuilder().addComponents(
