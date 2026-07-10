@@ -27,7 +27,7 @@ const DEFAULT_ADMINS = ['604834976994689024'];
 if (!process.env.ADMIN_OWNER_ID) console.warn('[SECURITY] ADMIN_OWNER_ID is not set — falling back to a hardcoded owner id. Set ADMIN_OWNER_ID to your own Discord id.');
 if (process.env.OWNER_ID && process.env.ADMIN_OWNER_ID && process.env.OWNER_ID.trim() !== OWNER_ID) console.warn('[SECURITY] OWNER_ID (bot) and ADMIN_OWNER_ID (panel) differ — the bot and admin panel recognize different owners.');
 
-const SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_MS) || 30 * 24 * 3600 * 1000; // 30 days
+const SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_MS) || 7 * 24 * 3600 * 1000; // 7 days (Discord re-auth is silent, so a shorter window limits stolen-cookie reuse)
 const STATE_TTL_MS = 10 * 60 * 1000; // OAuth state good for 10 minutes
 const SESSION_COOKIE = 'vemoni_admin';
 
