@@ -42,20 +42,28 @@ function extractInviteCodes(text) {
     return [...codes];
 }
 
-// code -> { guildId|null, ts }; resolved invites are cached to avoid re-fetching.
+// code -> { guildId|null, ts, ttl }; resolved invites are cached to avoid
+// re-fetching. A POSITIVE resolution is cached long; a "genuinely dead invite"
+// (Unknown Invite) only briefly so a fixed link recovers fast; a TRANSIENT
+// failure (rate-limit, network, any other error) is NOT cached at all — one
+// blip must never suppress a valid ad for hours.
 const inviteCache = new Map();
-const INVITE_TTL = 6 * 3600 * 1000;
+const INVITE_TTL = 6 * 3600 * 1000;      // positive result
+const INVITE_NEG_TTL = 5 * 60 * 1000;    // confirmed-dead invite
 
 async function inviteGuildId(client, code) {
     const hit = inviteCache.get(code);
-    if (hit && Date.now() - hit.ts < INVITE_TTL) return hit.guildId;
-    let guildId = null;
+    if (hit && Date.now() - hit.ts < hit.ttl) return hit.guildId;
     try {
         const inv = await client.fetchInvite(code);
-        guildId = inv?.guild?.id || null;
-    } catch { guildId = null; }
-    inviteCache.set(code, { guildId, ts: Date.now() });
-    return guildId;
+        const guildId = inv?.guild?.id || null;
+        inviteCache.set(code, { guildId, ts: Date.now(), ttl: INVITE_TTL });
+        return guildId;
+    } catch (e) {
+        if (e?.code === 10006) inviteCache.set(code, { guildId: null, ts: Date.now(), ttl: INVITE_NEG_TTL }); // Unknown Invite
+        // else: transient — do NOT cache; retry on the next call.
+        return null;
+    }
 }
 
 // Resolve the sponsor server referenced in an ad and check whether any network
@@ -63,9 +71,12 @@ async function inviteGuildId(client, code) {
 async function resolveSponsorPresence(clients, adText) {
     const codes = extractInviteCodes(adText);
     if (!codes.length || !clients.length) return null;
-    const resolver = clients[0];
     for (const code of codes) {
-        const guildId = await inviteGuildId(resolver, code);
+        // Try each bot as the resolver until one succeeds — so a single bot being
+        // rate-limited / unable to fetch this invite doesn't suppress the ad. The
+        // per-code cache short-circuits once any bot resolves it.
+        let guildId = null;
+        for (const c of clients) { guildId = await inviteGuildId(c, code); if (guildId) break; }
         if (!guildId) continue;
         const bot = clients.find((c) => c.guilds.cache.has(guildId));
         if (bot) return { guildId, bot };
