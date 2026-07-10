@@ -135,6 +135,47 @@ async function adForServer(clients, ownerId, serverId) {
     return { adText: rendered, raw, sponsor, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
 }
 
+// For /api/join-check: /api/ad is stateless and may have shown ANY eligible
+// campaign (or the house ad), so re-rolling a single random pick here would
+// often check the WRONG sponsor and 403 a user who correctly joined the shown
+// one. Instead, scan the SAME candidate pool and return the ad whose sponsor
+// the user is actually a member of — deterministic and correctly attributed.
+// Returns one of: { ad } | { uncertain:true } (→503) | { none:true } (→ad-free)
+// | { notMember:true } (→403). The credit dedup still guards double-pay.
+async function matchJoinedSponsor(clients, ownerId, serverId, memberId) {
+    const cfg = loadJSON('siteconfig.json', {});
+    if (cfg.adsOff || (cfg.serverAdsOff && cfg.serverAdsOff[serverId])) return { none: true };
+    const verified = loadJSON('verified.json', []);
+    const limits = loadJSON('adlimits.json', {});
+    const capReached = (raw) => { const rec = limits[adKeyOf(raw)]; const cap = Number(rec?.limit) || 0; return cap > 0 && joinerCount(verified, adKeyOf(raw), Number(rec?.resetAt) || 0) >= cap; };
+    const approvedSponsor = (gid) => !JOIN_CHECK_GUILDS.size || JOIN_CHECK_GUILDS.has(gid);
+
+    // Same candidate order /api/ad uses: eligible campaigns (weighted), then house ad.
+    const cands = campaigns.weightedOrder(campaigns.eligibleForGuild(serverId, verified, campaigns.fleetGuildIds(clients)))
+        .map((c) => ({ raw: c.invite, campaignId: c.id }));
+    const s = loadJSON('settings.json')[ownerId] || {};
+    const houseRaw = (s.serverAds && s.serverAds[serverId] && String(s.serverAds[serverId]).trim()) ? s.serverAds[serverId]
+        : ((s.advText || '').trim() ? s.advText : null);
+    if (houseRaw) cands.push({ raw: houseRaw, campaignId: null });
+
+    let sawAny = false, uncertain = false, checks = 0;
+    for (const cand of cands) {
+        if (capReached(cand.raw)) continue;
+        if (checks >= 8) break;
+        checks++;
+        const text = applyTemplate(serverId, cand.raw);
+        const sp = await resolveSponsorPresence(clients, text).catch(() => null);
+        if (!sp || sp.guildId === String(serverId) || !approvedSponsor(sp.guildId)) continue;
+        sawAny = true;
+        const m = await isMember(sp.bot, sp.guildId, memberId).catch(() => null);
+        if (m === true) { stampSponsorShow(sp.guildId); return { ad: { adText: text, raw: cand.raw, sponsor: sp, campaignId: cand.campaignId } }; }
+        if (m === null) uncertain = true;
+    }
+    if (uncertain) return { uncertain: true };  // don't 403 on a transient check
+    if (sawAny) return { notMember: true };      // ads exist, user joined none yet
+    return { none: true };                        // no join-check ad for this server
+}
+
 // Cache the Crypto Pay USDT app balance briefly — /admin/state is polled
 // every few seconds and we don't want to hammer the Crypto Pay API.
 let _cpBalCache = { at: 0, val: null };
@@ -1764,6 +1805,9 @@ async function handleBuyer(req, res, path, clients, config) {
         const camps = campaigns.loadCampaigns();
         const c = camps[id];
         if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
+        // Only a running campaign can be paused/resumed — pausing a complete or
+        // invalid one would show a misleading "active, not paused" state.
+        if (c.status !== 'active') return send(res, 400, { error: 'not-active' }, cors);
         const body = await readBody(req);
         c.paused = Boolean(body?.paused);
         campaigns.saveCampaigns(camps);
@@ -1796,7 +1840,10 @@ async function handleBuyer(req, res, path, clients, config) {
         const camps = campaigns.loadCampaigns();
         const c = camps[id];
         if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
-        if (c.status !== 'active') return send(res, 400, { error: 'not-active' }, cors);
+        // Allow the swap for 'active' AND 'invalid' — swapping to a working invite
+        // is exactly how a buyer self-recovers a campaign the sweep killed on a
+        // dead/temporarily-revoked invite. (complete/pending stay closed.)
+        if (c.status !== 'active' && c.status !== 'invalid') return send(res, 400, { error: 'not-active' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const rawInvite = String(body?.invite || '').trim();
@@ -1813,6 +1860,7 @@ async function handleBuyer(req, res, path, clients, config) {
         const fleet = campaigns.fleetGuildIds(clients);
         if (!fleet.has(newGuildId)) return send(res, 400, { error: 'no-bot' }, cors);
 
+        let dirty = false;
         const newInvite = `https://discord.gg/${inviteCode}`;
         if (newInvite !== c.invite) {
             const oldKey = campaigns.campaignAdKey(c);
@@ -1822,8 +1870,13 @@ async function handleBuyer(req, res, path, clients, config) {
             c.sponsorGuildId = newGuildId;
             c.serverName = inv.guild?.name || c.serverName || null;
             c.inviteChangedAt = Date.now();
-            campaigns.saveCampaigns(camps);
+            dirty = true;
         }
+        // The invite is confirmed working + join-checkable above, so revive an
+        // invalidated campaign back to active (works even if the invite string is
+        // unchanged — the previously-dead link now resolves). Force a re-check.
+        if (c.status === 'invalid') { c.status = 'active'; c.invalidAt = 0; c.inviteCheckedAt = Date.now(); dirty = true; }
+        if (dirty) campaigns.saveCampaigns(camps);
         const verified = loadJSON('verified.json', []);
         return send(res, 200, { ok: true, campaign: campaigns.publicView(camps[id], verified) }, cors);
     }
@@ -2294,23 +2347,24 @@ function startApiServer(clients, config) {
                 const serverId = /^\d{17,20}$/.test(String(body.serverId || '')) ? String(body.serverId)
                     : (/^\d{17,20}$/.test(String(body.cardGuildId || '')) ? String(body.cardGuildId) : null);
 
-                const ad = await adForServer(clients, config.ownerId, serverId);
-                const sponsor = ad.sponsor;
-                const approved = sponsor && (!JOIN_CHECK_GUILDS.size || JOIN_CHECK_GUILDS.has(sponsor.guildId));
+                // Find which advertised sponsor the user actually joined (scans the
+                // same candidate pool /api/ad shows from — NOT a fresh random pick,
+                // which could check the wrong sponsor and 403 a valid join).
+                const match = await matchJoinedSponsor(clients, config.ownerId, serverId, memberId);
+                if (match.uncertain) return send(res, 503, { joined: null, error: 'membership check temporarily unavailable, retry' });
 
                 // No join-check sponsor for this server → verify without an ad,
                 // exactly like a network bot: no-ad stat, hub role, no payout.
-                if (!approved) {
+                if (match.none) {
                     recordApiVerified({ creatorId: userId, memberId, serverId, noAd: true });
                     try { partnerlog.logEvent(userId, { type: 'grant', reason: 'no_ad', userId: memberId, guildId: serverId, roleId: 'api', srcId: `v:${memberId}:${serverId}:api` }); } catch { /* never block */ }
                     syncHubMember(clients, memberId).catch(() => null);
                     return send(res, 200, { joined: true, credited: false, ad: false });
                 }
+                if (match.notMember) return send(res, 403, { joined: false });
 
-                // Membership check against the sponsor of THIS server's ad.
-                const present = await isMember(sponsor.bot, sponsor.guildId, memberId).catch(() => null);
-                if (present === null) return send(res, 503, { joined: null, error: 'membership check temporarily unavailable, retry' });
-                if (present !== true) return send(res, 403, { joined: false });
+                const ad = match.ad;
+                const sponsor = ad.sponsor;
 
                 // Dedup by (sponsor, user) — one real invite is paid once, no
                 // matter which network server / partner delivered the join.
