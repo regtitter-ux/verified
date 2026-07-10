@@ -39,11 +39,22 @@ function addTopup(buyerId, rec) {
 // Credit any pending top-ups whose invoice is now paid. isPaidFn(invoiceId) →
 // Promise<boolean>.
 async function reconcileTopups(buyerId, isPaidFn) {
-    const w = loadWallets(); const wa = w[buyerId];
-    if (!wa || !Array.isArray(wa.topups)) return 0;
+    const wa0 = loadWallets()[buyerId];
+    if (!wa0 || !Array.isArray(wa0.topups)) return 0;
+    // Phase 1 (async): find which pending invoices are now paid. The isPaidFn
+    // await yields the event loop, so we must NOT hold a wallets snapshot across
+    // it — a concurrent debit/credit would be clobbered by our later save.
+    const paid = new Set();
+    for (const t of wa0.topups) {
+        if (t.status === 'pending' && t.invoiceId && await isPaidFn(t.invoiceId).catch(() => false)) paid.add(t.invoiceId);
+    }
+    if (!paid.size) return 0;
+    // Phase 2 (synchronous, atomic): re-load fresh and apply, so nothing written
+    // during the await above is lost.
+    const w = loadWallets(); const wa = ensure(w, buyerId);
     let credited = 0;
     for (const t of wa.topups) {
-        if (t.status === 'pending' && t.invoiceId && await isPaidFn(t.invoiceId).catch(() => false)) {
+        if (t.status === 'pending' && t.invoiceId && paid.has(t.invoiceId)) {
             t.status = 'paid'; t.paidAt = Date.now();
             wa.balance = round2((wa.balance || 0) + (Number(t.amount) || 0));
             credited += Number(t.amount) || 0;
