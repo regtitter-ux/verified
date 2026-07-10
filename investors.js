@@ -103,7 +103,7 @@ function serverJoinTimes(serverId, verified) {
 // Allocate a server's sold invites to positions, FIFO across ALL investors:
 // each sold invite goes to the earliest-bought position that (a) was bought
 // before the join and (b) isn't full yet. Returns Map<positionId, fillTimes[]>.
-function allocateServer(serverId, all, verified) {
+function allocateServer(serverId, all, verified, times) {
     const positions = [];
     for (const uid of Object.keys(all)) {
         for (const p of (all[uid].positions || [])) if (String(p.serverId) === String(serverId)) positions.push(p);
@@ -111,7 +111,10 @@ function allocateServer(serverId, all, verified) {
     positions.sort((a, b) => (a.boughtAt || 0) - (b.boughtAt || 0) || String(a.id).localeCompare(String(b.id)));
     const fills = new Map(positions.map((p) => [p.id, []]));
     if (!positions.length) return fills;
-    for (const t of serverJoinTimes(serverId, verified)) {
+    // Reuse a precomputed join-time list when the caller already scanned
+    // verified.json (avoids an O(n) rescan per server); else scan on demand.
+    const jt = times ? times.slice().sort((a, b) => a - b) : serverJoinTimes(serverId, verified);
+    for (const t of jt) {
         for (const p of positions) {
             if ((p.boughtAt || 0) >= t) continue;
             const arr = fills.get(p.id);
@@ -125,18 +128,20 @@ function allocateServer(serverId, all, verified) {
 // A server is "occupied" while any investor still has unsold invites there —
 // only one investor at a time. Returns who occupies it and an ETA (seconds) to
 // free = total outstanding invites ÷ the server's daily sales rate.
-function occupancyOf(serverId, verified, all = load()) {
+function occupancyOf(serverId, verified, all = load(), opts = {}) {
     const positions = [];
     for (const uid of Object.keys(all)) for (const p of (all[uid].positions || [])) if (String(p.serverId) === String(serverId)) positions.push({ p, uid });
     if (!positions.length) return { occupants: new Set(), totalOutstanding: 0, etaSec: null };
-    const fills = allocateServer(serverId, all, verified);
+    // Reuse precomputed fills / daily rate when the caller has them (serversFor),
+    // to avoid rescanning verified.json per server.
+    const fills = opts.fills || allocateServer(serverId, all, verified, opts.times);
     const occupants = new Set(); let totalOutstanding = 0;
     for (const { p, uid } of positions) {
         const sold = (fills.get(p.id) || []).length;
         const out = Math.max(0, (Number(p.qty) || 0) - sold);
         if (out > 0) { occupants.add(uid); totalOutstanding += out; }
     }
-    const daily = serverDailyRate(serverId, verified);
+    const daily = (opts.daily !== undefined) ? opts.daily : serverDailyRate(serverId, verified);
     const etaSec = (daily > 0 && totalOutstanding > 0) ? Math.ceil((totalOutstanding / daily) * 86400) : null;
     return { occupants, totalOutstanding, etaSec };
 }
@@ -300,10 +305,16 @@ function sweepBrokenServers(clients, verifiedList) {
     const all = load();
     const serverIds = new Set();
     for (const uid of Object.keys(all)) for (const p of (all[uid].positions || [])) serverIds.add(String(p.serverId));
+    // One pass over verified.json to bucket join times per invested server,
+    // reused by allocateServer below (no per-server rescans).
+    const timesByServer = {};
+    for (const u of (Array.isArray(verified) ? verified : [])) {
+        if (u && u.adKey && u.guildId && serverIds.has(String(u.guildId))) (timesByServer[u.guildId] ||= []).push(Number(u.timestamp) || 0);
+    }
     const broken = loadBroken();
     const now = Date.now(); let changed = false;
     for (const serverId of serverIds) {
-        const fills = allocateServer(serverId, all, verified);
+        const fills = allocateServer(serverId, all, verified, timesByServer[serverId] || []);
         let out = 0;
         for (const uid of Object.keys(all)) for (const p of (all[uid].positions || [])) if (String(p.serverId) === String(serverId)) out += Math.max(0, (Number(p.qty) || 0) - (fills.get(p.id) || []).length);
         if (out <= 0) { if (broken[serverId]) { delete broken[serverId]; changed = true; } continue; }
@@ -349,11 +360,15 @@ function serversFor(userId, verified, now = Date.now()) {
     // Any server with activity, plus owner-enabled and any the investor holds.
     const serverIds = new Set([...Object.keys(byServer), ...enabled, ...Object.keys(myPos)]);
     for (const serverId of serverIds) {
-        const flow = win(byServer[serverId] || []);
+        const times = byServer[serverId] || [];
+        const flow = win(times);
         const investable = (flow.week / 7) >= MIN_DAILY || enabled.has(serverId);
+        // Allocate once per server (reusing the already-scanned join times) and
+        // share the result with the occupancy check below — no verified.json
+        // rescans inside this loop.
+        const fills = allocateServer(serverId, all, verified, times);
         let mine = null;
         if (myPos[serverId]) {
-            const fills = allocateServer(serverId, all, verified);
             let owned = 0, sold = 0; const soldTimes = [];
             for (const p of myPos[serverId]) { owned += Number(p.qty) || 0; const ft = fills.get(p.id) || []; sold += ft.length; for (const t of ft) soldTimes.push(t); }
             const ew = win(soldTimes);
@@ -366,7 +381,7 @@ function serversFor(userId, verified, now = Date.now()) {
         }
         // One investor per server: locked for you if someone else still holds
         // unsold invites here.
-        const occ = occupancyOf(serverId, verified, all);
+        const occ = occupancyOf(serverId, verified, all, { fills, daily: flow.week / 7 });
         const occupiedByYou = occ.occupants.has(String(userId));
         const lockedForYou = occ.totalOutstanding > 0 && !occupiedByYou;
 
