@@ -1570,7 +1570,7 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
         return send(res, 200, sess
-            ? { authed: true, userId: sess.userId, isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId) }
+            ? { authed: true, userId: sess.userId, isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }
             : { authed: false }, cors);
     }
 
@@ -1805,7 +1805,7 @@ async function handlePartner(req, res, path, clients, config) {
     }
     if (path === '/partner/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
-        return send(res, 200, sess ? { authed: true, userId: sess.userId } : { authed: false }, cors);
+        return send(res, 200, sess ? { authed: true, userId: sess.userId, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
 
     const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
@@ -2007,7 +2007,7 @@ async function handleInvestor(req, res, path, clients, config) {
     }
     if (path === '/investor/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
-        return send(res, 200, sess ? { authed: true, userId: sess.userId } : { authed: false }, cors);
+        return send(res, 200, sess ? { authed: true, userId: sess.userId, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
 
     const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
