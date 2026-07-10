@@ -1962,10 +1962,10 @@ async function handlePartner(req, res, path, clients, config) {
         if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
         if (!ownCard(mid)) return send(res, 403, { error: 'not-your-card' }, cors);
         const patch = {};
-        if (body.creatorId !== undefined) {
-            if (!/^\d{17,20}$/.test(String(body.creatorId))) return send(res, 400, { error: 'bad creator id' }, cors);
-            patch.creatorId = String(body.creatorId);
-        }
+        // creatorId (the payout recipient) is intentionally NOT editable here:
+        // a partner must not be able to redirect a card's future payouts to an
+        // arbitrary Discord user who never consented. Owner reassignment lives
+        // in the admin panel only.
         if (body.roleId !== undefined) {
             const rid = String(body.roleId || '');
             if (rid && !/^\d{17,20}$/.test(rid)) return send(res, 400, { error: 'bad role id' }, cors);
