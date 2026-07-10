@@ -122,7 +122,11 @@ function clawbackProfit(perUid, nowMs) {
     let total = 0;
     for (const [uid, amtRaw] of entries) {
         const amt = round4(amtRaw);
-        if (settings[uid]) settings[uid].balance = round2((Number(settings[uid].balance) || 0) - round2(amt));
+        // The balance was credited only in whole cents (floor + sub-cent carry in
+        // distributeProfit), so claw back in the same domain — floor, not round —
+        // to never deduct more cents than were actually added.
+        const debit = Math.floor(amt * 100) / 100;
+        if (settings[uid]) settings[uid].balance = round2((Number(settings[uid].balance) || 0) - debit);
         if (shares[uid]) shares[uid].earned = round4(Math.max(0, (Number(shares[uid].earned) || 0) - amt));
         if (earnings[uid]) earnings[uid][today] = round4((Number(earnings[uid][today]) || 0) - amt);
         total = round4(total + amt);
