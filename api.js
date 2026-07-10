@@ -26,6 +26,7 @@ const backup = require('./backup.js');
 const wallet = require('./wallet.js');
 const investors = require('./investors.js');
 const sales = require('./sales.js');
+const partnerlog = require('./partnerlog.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -444,6 +445,31 @@ async function handleAdmin(req, res, path, clients, config) {
         const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 300));
         const entries = audit.recent(limit).map((e) => ({ ...e, userName: userNameOf(clients, e.userId) }));
         return send(res, 200, { entries }, cors);
+    }
+
+    // Partner activity log across ALL partners, with filters (by partner, by
+    // verifying user, by server, by type/reason, by period). Any admin may read.
+    if (path === '/admin/activity' && req.method === 'GET') {
+        const q = new URL(req.url, 'http://x').searchParams;
+        const periodMap = { '24h': 86400000, '7d': 604800000, '30d': 2592000000 };
+        const pm = periodMap[q.get('period')];
+        const events = partnerlog.applyFilters(partnerlog.allEvents(), {
+            type: q.get('type') || null,
+            reason: q.get('reason') || null,
+            server: /^\d{17,20}$/.test(q.get('server') || '') ? q.get('server') : null,
+            user: /^\d{17,20}$/.test(q.get('user') || '') ? q.get('user') : null,
+            partner: /^\d{17,20}$/.test(q.get('partner') || '') ? q.get('partner') : null,
+            since: pm ? Date.now() - pm : 0,
+            sort: q.get('sort') || null,
+            limit: Math.min(1000, Number(q.get('limit')) || 400)
+        });
+        const servers = {}, users = {}, partners = {};
+        for (const e of events) {
+            if (e.guildId && !(e.guildId in servers)) servers[e.guildId] = guildNameOf(clients, e.guildId);
+            if (e.userId && !(e.userId in users)) users[e.userId] = userNameOf(clients, e.userId);
+            if (e.creatorId && !(e.creatorId in partners)) partners[e.creatorId] = userNameOf(clients, e.creatorId);
+        }
+        return send(res, 200, { events, servers, users, partners }, cors);
     }
 
     // Owner-only: fleet health (monitoring).
@@ -1820,6 +1846,26 @@ async function handlePartner(req, res, path, clients, config) {
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
     const userId = sess.userId;
 
+    // Partner activity log for this partner, with filters (by server, by
+    // verifying user, by type/reason, by period, sort order).
+    if (path === '/partner/activity' && req.method === 'GET') {
+        const q = new URL(req.url, 'http://x').searchParams;
+        const periodMap = { '24h': 86400000, '7d': 604800000, '30d': 2592000000 };
+        const pm = periodMap[q.get('period')];
+        const events = partnerlog.applyFilters(partnerlog.forPartner(userId), {
+            type: q.get('type') || null,
+            reason: q.get('reason') || null,
+            server: /^\d{17,20}$/.test(q.get('server') || '') ? q.get('server') : null,
+            user: /^\d{17,20}$/.test(q.get('user') || '') ? q.get('user') : null,
+            since: pm ? Date.now() - pm : 0,
+            sort: q.get('sort') || null,
+            limit: Math.min(500, Number(q.get('limit')) || 300)
+        });
+        const servers = {};
+        for (const e of events) if (e.guildId && !(e.guildId in servers)) servers[e.guildId] = guildNameOf(clients, e.guildId);
+        return send(res, 200, { events, servers }, cors);
+    }
+
     if (path === '/partner/me' && req.method === 'GET') {
         const settings = loadJSON('settings.json');
         const s = settings[userId] || {};
@@ -2245,6 +2291,7 @@ function startApiServer(clients, config) {
                 // exactly like a network bot: no-ad stat, hub role, no payout.
                 if (!approved) {
                     recordApiVerified({ creatorId: userId, memberId, serverId, noAd: true });
+                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'no_ad', userId: memberId, guildId: serverId, roleId: 'api' }); } catch { /* never block */ }
                     syncHubMember(clients, memberId).catch(() => null);
                     return send(res, 200, { joined: true, credited: false, ad: false });
                 }
@@ -2260,7 +2307,10 @@ function startApiServer(clients, config) {
                 const already = (Array.isArray(links) ? links : []).some(
                     (r) => r && (r.status === 'joined' || r.status === 'settled') && r.guildId === sponsor.guildId && r.userId === memberId
                 );
-                if (already) return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
+                if (already) {
+                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'dup_join', userId: memberId, guildId: serverId, roleId: 'api' }); } catch { /* never block */ }
+                    return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
+                }
 
                 // Full parity with the in-Discord flow: joinlinks (clawback-
                 // watched, roleId 'api' + serverId), share split, verified.json
@@ -2273,6 +2323,7 @@ function startApiServer(clients, config) {
                 const econ = managers.joinEconomics(camp, REVENUE_PER_JOIN);
                 const amount = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null,
                     { revenue: econ.revenue, managerId: econ.managerId });
+                try { partnerlog.logEvent(userId, { type: 'grant', reason: 'paid', amount, userId: memberId, guildId: serverId, roleId: 'api' }); } catch { /* never block */ }
                 // Parity with the in-Discord flow: if this server has outstanding
                 // investor invites, this paid join fills one — its share split
                 // already happened at the investor buy-in, so skip payShares.

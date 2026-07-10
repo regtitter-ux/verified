@@ -16,6 +16,7 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { logFunds } = require('./fundslog.js');
 const { boostedRate, REFERRAL_RATE } = require('./referral.js');
 const { syncHubMember } = require('./hubrole.js');
+const partnerlog = require('./partnerlog.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -189,7 +190,7 @@ async function finalizeLeavers(clients, leaverIds) {
         // across multiple records of the same creator); the actual debit is
         // applied to a fresh load in the commit block.
         const before = settings[rec.creatorId] ? (Number(settings[rec.creatorId].balance) || 0) : 0;
-        const outcome = { id: rec.id, kind: 'left', ts: Date.now() };
+        const outcome = { id: rec.id, kind: 'left', ts: Date.now(), userId: rec.userId, cardGuildId: rec.cardGuildId, roleId: rec.roleId, partnerId: rec.creatorId };
         if (settings[rec.creatorId]) {
             settings[rec.creatorId].balance = round2(before - rec.amount);
             outcome.creatorId = rec.creatorId;
@@ -242,6 +243,7 @@ async function finalizeLeavers(clients, leaverIds) {
             }
             verifiedRemovals.push({ userId: rec.userId, cardGuildId: rec.cardGuildId, roleId: rec.roleId });
             verifiedChanged = true;
+            outcome.unverified = true;
         }
     }
 
@@ -264,12 +266,16 @@ async function finalizeLeavers(clients, leaverIds) {
             if (o.creatorId && freshSettings[o.creatorId]) {
                 freshSettings[o.creatorId].balance = round2((Number(freshSettings[o.creatorId].balance) || 0) - o.amt);
                 settingsDirty = true;
+                // Partner activity log — the clawback debit we actually applied.
+                try { partnerlog.logEvent(o.partnerId, { type: 'debit', amount: o.amt, reason: 'left', userId: o.userId, guildId: o.cardGuildId, roleId: o.roleId }); } catch { /* never break the commit */ }
             }
             if (o.referrerId && freshSettings[o.referrerId]) {
                 freshSettings[o.referrerId].balance = round2((Number(freshSettings[o.referrerId].balance) || 0) - o.refClaw);
                 freshSettings[o.referrerId].refBonusAccrued = round2(Math.max(0, (Number(freshSettings[o.referrerId].refBonusAccrued) || 0) - o.refClaw));
                 settingsDirty = true;
             }
+            // Partner activity log — the verification removal (снятие верифки).
+            if (o.unverified) { try { partnerlog.logEvent(o.partnerId, { type: 'unverify', reason: 'left', userId: o.userId, guildId: o.cardGuildId, roleId: o.roleId }); } catch { /* never break the commit */ } }
         }
         if (settingsDirty) saveJSON('settings.json', freshSettings);
         if (listDirty) saveJSON('joinlinks.json', fl);

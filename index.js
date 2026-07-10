@@ -21,6 +21,7 @@ const backup = require('./backup.js');
 const investors = require('./investors.js');
 const refundMigration = require('./refundmigration.js');
 const { logFunds } = require('./fundslog.js');
+const partnerlog = require('./partnerlog.js');
 
 // A "Join" link button for the sponsor invite shown in an ad. Verification
 // replies are ephemeral, and Discord never unfurls invite links on ephemeral
@@ -1109,6 +1110,7 @@ const startBot = (token) => {
             if (unverifiedRole?.editable && member.roles.cache.has(unverifiedRole.id)) {
                 await member.roles.remove(unverifiedRole).catch(() => null);
             }
+            if (creatorId) try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'already_verified', userId: user.id, guildId: guild.id, roleId }); } catch { /* logging must never block */ }
             return interaction.reply({ content: "✅ You're already verified", flags: [64] }).catch(() => null);
         }
 
@@ -1326,6 +1328,13 @@ const startBot = (token) => {
             saveJSON('verified.json', updated);
             pendingVerification.delete(pendingKey);
 
+            // Partner activity log: record the verification grant. Paid grants are
+            // logged in the credit branch below (with the amount); ad-free and
+            // duplicate-join grants are logged here with their reason.
+            if (roleId && !adKey) {
+                try { partnerlog.logEvent(creatorId, { type: 'grant', reason: isDupJoin ? 'dup_join' : 'no_ad', userId: user.id, guildId: guild.id, roleId }); } catch { /* logging must never block verification */ }
+            }
+
             // If this verification just filled the creative's join-limit,
             // ping the ops channel with the ad text and the final counter.
             if (adKey) maybeNotifyAdComplete(clients, adKey, updated).catch(() => null);
@@ -1354,6 +1363,7 @@ const startBot = (token) => {
                 // reversible on leave (role + payout), see joincheck.js.
                 const amount = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId,
                     { revenue: econ.revenue, managerId: econ.managerId });
+                try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'paid', amount, userId: user.id, guildId: guild.id, roleId }); } catch { /* never block */ }
                 await logFunds(clients, {
                     type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
                     amount, sponsorGuildId: sponsor.guildId,
