@@ -402,22 +402,26 @@ async function handleAdmin(req, res, path, clients, config) {
         try { uid = await adminAuth.resolveOauthUser(code); } catch { uid = null; }
         if (!uid) { res.writeHead(302, { Location: back + '?login=denied' }); return res.end(); }
 
-        // Buyers, partners and investors: any Discord user may log in (same user
-        // session cookie); only the destination page differs.
-        if (kind === 'buyer' || kind === 'partner' || kind === 'investor') {
-            const token = adminAuth.issueBuyerSession(uid);
-            res.writeHead(302, { Location: back, 'Set-Cookie': adminAuth.buyerCookieHeader(token) });
+        // Single sign-on across every cabinet: one successful login unlocks all
+        // pages the user is entitled to. Always issue the shared user (buyer)
+        // session — that opens the order, partner and investor cabinets for any
+        // Discord user. If the user is also an owner/admin, additionally issue
+        // the admin session so the admin panel opens too, without a second login.
+        const role = adminAuth.roleOf(uid);
+        // An explicit admin-panel login by a non-admin is still a denial for that
+        // page — but they keep the buyer session so the other cabinets work.
+        if (kind === 'admin' && !role) {
+            res.writeHead(302, { Location: back + '?login=denied', 'Set-Cookie': adminAuth.buyerCookieHeader(adminAuth.issueBuyerSession(uid)) });
             return res.end();
         }
-        // Admins: must be owner or an assigned admin.
-        const role = adminAuth.roleOf(uid);
-        if (!role) { res.writeHead(302, { Location: back + '?login=denied' }); return res.end(); }
-        const token = adminAuth.issueSession(uid, role);
-        res.writeHead(302, { Location: back, 'Set-Cookie': adminAuth.sessionCookieHeader(token) });
+        const cookies = [adminAuth.buyerCookieHeader(adminAuth.issueBuyerSession(uid))];
+        if (role) cookies.push(adminAuth.sessionCookieHeader(adminAuth.issueSession(uid, role)));
+        res.writeHead(302, { Location: back, 'Set-Cookie': cookies });
         return res.end();
     }
     if (path === '/admin/logout' && req.method === 'POST') {
-        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': adminAuth.sessionCookieHeader('', { clear: true }) });
+        // Unified logout: clear BOTH sessions (see the cabinet logouts).
+        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': [adminAuth.sessionCookieHeader('', { clear: true }), adminAuth.buyerCookieHeader('', { clear: true })] });
     }
     if (path === '/admin/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
@@ -1565,7 +1569,9 @@ async function handleBuyer(req, res, path, clients, config) {
         return res.end();
     }
     if (path === '/order/logout' && req.method === 'POST') {
-        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': adminAuth.buyerCookieHeader('', { clear: true }) });
+        // Unified logout: clear BOTH sessions so leaving one cabinet signs the
+        // user out everywhere (mirrors the single sign-on on login).
+        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': [adminAuth.buyerCookieHeader('', { clear: true }), adminAuth.sessionCookieHeader('', { clear: true })] });
     }
     if (path === '/order/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
@@ -1801,7 +1807,9 @@ async function handlePartner(req, res, path, clients, config) {
         return res.end();
     }
     if (path === '/partner/logout' && req.method === 'POST') {
-        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': adminAuth.buyerCookieHeader('', { clear: true }) });
+        // Unified logout: clear BOTH sessions so leaving one cabinet signs the
+        // user out everywhere (mirrors the single sign-on on login).
+        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': [adminAuth.buyerCookieHeader('', { clear: true }), adminAuth.sessionCookieHeader('', { clear: true })] });
     }
     if (path === '/partner/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
@@ -2003,7 +2011,9 @@ async function handleInvestor(req, res, path, clients, config) {
         return res.end();
     }
     if (path === '/investor/logout' && req.method === 'POST') {
-        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': adminAuth.buyerCookieHeader('', { clear: true }) });
+        // Unified logout: clear BOTH sessions so leaving one cabinet signs the
+        // user out everywhere (mirrors the single sign-on on login).
+        return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': [adminAuth.buyerCookieHeader('', { clear: true }), adminAuth.sessionCookieHeader('', { clear: true })] });
     }
     if (path === '/investor/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
