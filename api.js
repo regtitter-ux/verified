@@ -2291,7 +2291,7 @@ function startApiServer(clients, config) {
                 // exactly like a network bot: no-ad stat, hub role, no payout.
                 if (!approved) {
                     recordApiVerified({ creatorId: userId, memberId, serverId, noAd: true });
-                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'no_ad', userId: memberId, guildId: serverId, roleId: 'api' }); } catch { /* never block */ }
+                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'no_ad', userId: memberId, guildId: serverId, roleId: 'api', srcId: `v:${memberId}:${serverId}:api` }); } catch { /* never block */ }
                     syncHubMember(clients, memberId).catch(() => null);
                     return send(res, 200, { joined: true, credited: false, ad: false });
                 }
@@ -2308,7 +2308,7 @@ function startApiServer(clients, config) {
                     (r) => r && (r.status === 'joined' || r.status === 'settled') && r.guildId === sponsor.guildId && r.userId === memberId
                 );
                 if (already) {
-                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'dup_join', userId: memberId, guildId: serverId, roleId: 'api' }); } catch { /* never block */ }
+                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'dup_join', userId: memberId, guildId: serverId, roleId: 'api', srcId: `dup:${memberId}:${sponsor.guildId}` }); } catch { /* never block */ }
                     return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
                 }
 
@@ -2321,9 +2321,16 @@ function startApiServer(clients, config) {
                 // for manager campaigns, no commission paid.
                 const camp = ad.campaignId ? campaigns.loadCampaigns()[ad.campaignId] : null;
                 const econ = managers.joinEconomics(camp, REVENUE_PER_JOIN);
-                const amount = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null,
+                const credit = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null,
                     { revenue: econ.revenue, managerId: econ.managerId });
-                try { partnerlog.logEvent(userId, { type: 'grant', reason: 'paid', amount, userId: memberId, guildId: serverId, roleId: 'api' }); } catch { /* never block */ }
+                // Race backstop: creditJoin's atomic guard caught a concurrent
+                // credit for the same (user, sponsor) — treat as already counted.
+                if (credit.duplicate) {
+                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'dup_join', userId: memberId, guildId: serverId, roleId: 'api' }); } catch { /* never block */ }
+                    return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
+                }
+                const amount = credit.amount;
+                try { partnerlog.logEvent(userId, { type: 'grant', reason: 'paid', amount, userId: memberId, guildId: serverId, roleId: 'api', srcId: credit.linkId }); } catch { /* never block */ }
                 // Parity with the in-Discord flow: if this server has outstanding
                 // investor invites, this paid join fills one — its share split
                 // already happened at the investor buy-in, so skip payShares.

@@ -3,9 +3,13 @@
 // verification removal. Persisted, queryable, and bounded per partner.
 //
 // Shape: partnerlog.json = { [creatorId]: [ event, … ] } where event =
-//   { ts, type, reason, amount, userId, guildId, roleId }
+//   { ts, type, reason, amount, userId, guildId, roleId, srcId }
 //   type   : 'grant' | 'debit' | 'unverify'
 //   reason : 'paid' | 'no_ad' | 'dup_join' | 'already_verified' | 'left'
+//   srcId  : stable identity of the underlying fact (joinlink id, verified-entry
+//            key, …). Every event that CAN be re-derived (live logging + startup
+//            backfill) carries one, so the two can never produce two log lines
+//            for the same fact. Timestamps are display-only, never an identity.
 const { loadJSON, saveJSON } = require('./database.js');
 
 const MAX_PER_PARTNER = Number(process.env.PARTNER_LOG_MAX) || 500;
@@ -16,22 +20,37 @@ function load() {
 }
 function save(o) { saveJSON('partnerlog.json', o); }
 
+// Identity of an event. srcId-bearing events dedup on (type, srcId) — robust to
+// timestamp drift between the live and backfill paths. Events with no srcId
+// (none today; all emitters pass one) fall back to a full-tuple key.
+function eventKey(e) {
+    return e && e.srcId ? `${e.type}|${e.srcId}` : `${e.ts}|${e.type}|${e.reason}|${e.userId}|${e.guildId}`;
+}
+
 // Append one event for a partner (synchronous load-mutate-save = atomic in the
-// single-threaded event loop). Bounded so the array can't grow without limit.
+// single-threaded event loop). Idempotent on srcId: the same underlying fact is
+// never logged twice — protects against gateway re-delivery, retries, and the
+// backfill overlapping already-live-logged events. Bounded per partner.
 function logEvent(creatorId, entry) {
     const cid = String(creatorId || '');
     if (!/^\d{17,20}$/.test(cid) || !entry || !entry.type) return;
     const all = load();
     if (!Array.isArray(all[cid])) all[cid] = [];
-    all[cid].push({
+    const ev = {
         ts: Date.now(),
         type: String(entry.type),
         reason: entry.reason ? String(entry.reason) : null,
         amount: Number(entry.amount) || 0,
         userId: entry.userId ? String(entry.userId) : null,
         guildId: entry.guildId ? String(entry.guildId) : null,
-        roleId: entry.roleId ? String(entry.roleId) : null
-    });
+        roleId: entry.roleId ? String(entry.roleId) : null,
+        srcId: entry.srcId ? String(entry.srcId) : null
+    };
+    if (ev.srcId) {
+        const key = eventKey(ev);
+        if (all[cid].some((x) => eventKey(x) === key)) return; // already recorded
+    }
+    all[cid].push(ev);
     if (all[cid].length > MAX_PER_PARTNER) all[cid] = all[cid].slice(-MAX_PER_PARTNER);
     save(all);
 }
@@ -72,50 +91,54 @@ function applyFilters(events, opts = {}) {
 // from joinlinks.json (the payment ledger); unpaid grants from verified.json's
 // noAd entries (never in joinlinks). Idempotent: guarded by a marker and
 // deduped by event key, so a re-run can't double up.
+// The reasons the source rebuild owns (derivable from the ledger). Everything
+// else in the log — dup_join, already_verified — is live-only and is preserved.
+const SOURCE_REASONS = new Set(['paid', 'no_ad', 'left']);
+
 function backfillIfNeeded() {
     try {
         const meta = loadJSON('partnerlogmeta.json', {});
-        if (meta && meta.backfilled) return;
+        if (meta && meta.rebuiltV2) return;
 
         const joinlinks = loadJSON('joinlinks.json', []);
         const verified = loadJSON('verified.json', []);
-        const byPartner = {};
-        const push = (cid, ev) => { if (/^\d{17,20}$/.test(String(cid || ''))) (byPartner[cid] ||= []).push(ev); };
+        const src = {};
+        const add = (cid, ev) => { if (/^\d{17,20}$/.test(String(cid || ''))) (src[cid] ||= []).push(ev); };
 
         for (const r of (Array.isArray(joinlinks) ? joinlinks : [])) {
-            if (!r || !r.creatorId) continue;
+            if (!r || !r.creatorId || !r.id) continue;
             const ts = Number(r.ts) || 0;
             const base = { userId: r.userId || null, guildId: r.cardGuildId || null, roleId: r.roleId || null };
-            // Every credited join was a paid grant when it happened.
-            push(r.creatorId, { ts, type: 'grant', reason: 'paid', amount: Number(r.amount) || 0, ...base });
-            // A clawed-back join later became a debit + a verification removal.
+            add(r.creatorId, { ts, type: 'grant', reason: 'paid', amount: Number(r.amount) || 0, srcId: String(r.id), ...base });
             if (r.status === 'left') {
                 const lt = Number(r.leftAt) || ts;
-                push(r.creatorId, { ts: lt, type: 'debit', reason: 'left', amount: Number(r.amount) || 0, ...base });
-                push(r.creatorId, { ts: lt, type: 'unverify', reason: 'left', amount: 0, ...base });
+                add(r.creatorId, { ts: lt, type: 'debit', reason: 'left', amount: Number(r.amount) || 0, srcId: String(r.id), ...base });
+                add(r.creatorId, { ts: lt, type: 'unverify', reason: 'left', amount: 0, srcId: String(r.id), ...base });
             }
         }
         for (const u of (Array.isArray(verified) ? verified : [])) {
-            // Only ad-free grants — paid ones already come from joinlinks above.
-            if (!u || !u.creatorId || !u.noAd) continue;
-            push(u.creatorId, { ts: Number(u.timestamp) || 0, type: 'grant', reason: 'no_ad', amount: 0, userId: u.id || null, guildId: u.guildId || null, roleId: u.roleId || null });
+            if (!u || !u.creatorId || !u.noAd) continue; // paid grants come from joinlinks
+            add(u.creatorId, { ts: Number(u.timestamp) || 0, type: 'grant', reason: 'no_ad', amount: 0, userId: u.id || null, guildId: u.guildId || null, roleId: u.roleId || null, srcId: `v:${u.id}:${u.guildId}:${u.roleId || ''}` });
         }
 
-        const keyOf = (e) => `${e.ts}|${e.type}|${e.reason}|${e.userId}|${e.guildId}`;
+        // Rebuild each partner's log: canonical source-derived events (srcId-keyed)
+        // + the live-only entries we don't own. Deduped by identity. This seeds
+        // history AND atomically removes any earlier timestamp-dup log lines.
         const all = load();
         let added = 0;
-        for (const cid of Object.keys(byPartner)) {
-            const seen = new Set((Array.isArray(all[cid]) ? all[cid] : []).map(keyOf));
-            const fresh = byPartner[cid].filter((e) => !seen.has(keyOf(e)));
-            added += fresh.length;
-            const merged = [...(Array.isArray(all[cid]) ? all[cid] : []), ...fresh].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-            all[cid] = merged.slice(-MAX_PER_PARTNER);
+        for (const cid of new Set([...Object.keys(all), ...Object.keys(src)])) {
+            const keptLive = (Array.isArray(all[cid]) ? all[cid] : []).filter((e) => e && !SOURCE_REASONS.has(e.reason));
+            const merged = [...keptLive, ...(src[cid] || [])].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+            const seen = new Set(); const out = [];
+            for (const e of merged) { const k = eventKey(e); if (seen.has(k)) continue; seen.add(k); out.push(e); }
+            all[cid] = out.slice(-MAX_PER_PARTNER);
+            added += (src[cid] || []).length;
         }
         save(all);
-        saveJSON('partnerlogmeta.json', { backfilled: true, at: Date.now(), added });
-        console.log(`[PARTNERLOG] backfilled ${added} historical event(s) across ${Object.keys(byPartner).length} partner(s)`);
+        saveJSON('partnerlogmeta.json', { ...(meta || {}), backfilled: true, rebuiltV2: true, at: Date.now(), added });
+        console.log(`[PARTNERLOG] rebuilt from source: ${added} derived event(s) across ${Object.keys(src).length} partner(s); duplicates removed`);
     } catch (e) {
-        console.error('[PARTNERLOG] backfill error:', e.message);
+        console.error('[PARTNERLOG] rebuild error:', e.message);
     }
 }
 

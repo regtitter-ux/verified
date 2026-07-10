@@ -1110,7 +1110,7 @@ const startBot = (token) => {
             if (unverifiedRole?.editable && member.roles.cache.has(unverifiedRole.id)) {
                 await member.roles.remove(unverifiedRole).catch(() => null);
             }
-            if (creatorId) try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'already_verified', userId: user.id, guildId: guild.id, roleId }); } catch { /* logging must never block */ }
+            if (creatorId) try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'already_verified', userId: user.id, guildId: guild.id, roleId, srcId: `av:${user.id}:${guild.id}:${roleId || ''}` }); } catch { /* logging must never block */ }
             return interaction.reply({ content: "✅ You're already verified", flags: [64] }).catch(() => null);
         }
 
@@ -1293,7 +1293,14 @@ const startBot = (token) => {
                 await member.roles.remove(unverifiedRole).catch(() => null);
             }
 
-            const updated = verified.filter(u => !(u.id === user.id && u.guildId === guild.id && (u.roleId || null) === roleId));
+            // Reload verified.json FRESH here: it was first read many awaits ago
+            // (role fetches, membership checks), during which a concurrent
+            // verification may have saved new entries. From this line to the
+            // saveJSON below there are NO awaits, so filter→push→save is atomic
+            // and can't clobber a concurrent verification's entry (which the
+            // stale snapshot would have silently dropped).
+            const verifiedFresh = loadJSON('verified.json', []);
+            const updated = (Array.isArray(verifiedFresh) ? verifiedFresh : []).filter(u => !(u.id === user.id && u.guildId === guild.id && (u.roleId || null) === roleId));
 
             // If this server still has outstanding investor invites, this paid
             // join fills one — its share split already happened at the investor
@@ -1332,7 +1339,14 @@ const startBot = (token) => {
             // logged in the credit branch below (with the amount); ad-free and
             // duplicate-join grants are logged here with their reason.
             if (roleId && !adKey) {
-                try { partnerlog.logEvent(creatorId, { type: 'grant', reason: isDupJoin ? 'dup_join' : 'no_ad', userId: user.id, guildId: guild.id, roleId }); } catch { /* logging must never block verification */ }
+                // no_ad has a stable source (the verified.json entry, keyed by
+                // user+guild+role) so backfill and live logging dedup to one;
+                // dup_join is live-only and carries no srcId.
+                const reason = isDupJoin ? 'dup_join' : 'no_ad';
+                const srcId = reason === 'no_ad'
+                    ? `v:${user.id}:${guild.id}:${roleId || ''}`
+                    : (sponsor ? `dup:${user.id}:${sponsor.guildId}` : undefined);
+                try { partnerlog.logEvent(creatorId, { type: 'grant', reason, userId: user.id, guildId: guild.id, roleId, srcId }); } catch { /* logging must never block verification */ }
             }
 
             // If this verification just filled the creative's join-limit,
@@ -1361,21 +1375,29 @@ const startBot = (token) => {
                 const econ = managers.joinEconomics(camp, REVENUE_PER_JOIN);
                 // Confirmed member of the sponsor server: pay the join-check rate,
                 // reversible on leave (role + payout), see joincheck.js.
-                const amount = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId,
+                const credit = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId,
                     { revenue: econ.revenue, managerId: econ.managerId });
-                try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'paid', amount, userId: user.id, guildId: guild.id, roleId }); } catch { /* never block */ }
-                await logFunds(clients, {
-                    type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
-                    amount, sponsorGuildId: sponsor.guildId,
-                    reason: 'Join verified — member joined the sponsor server'
-                });
-                // Split this join's service profit (revenue − partner payout −
-                // acquiring) across shareholders — manager sales just use the
-                // lower revenue. Skip for investor-owned joins: their revenue
-                // funds the investor's return and the share split was already
-                // done at buy-in (no double-counting).
-                if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
-                await maybeAutoWithdraw(clients, creatorId);
+                if (credit.duplicate) {
+                    // Lost a race to another concurrent verify of the same (user,
+                    // sponsor): it already credited. Nothing more to pay — log it
+                    // as a duplicate grant, not a paid one.
+                    try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'dup_join', userId: user.id, guildId: guild.id, roleId, srcId: sponsor ? `dup:${user.id}:${sponsor.guildId}` : undefined }); } catch { /* never block */ }
+                } else {
+                    const amount = credit.amount;
+                    try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'paid', amount, userId: user.id, guildId: guild.id, roleId, srcId: credit.linkId }); } catch { /* never block */ }
+                    await logFunds(clients, {
+                        type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
+                        amount, sponsorGuildId: sponsor.guildId,
+                        reason: 'Join verified — member joined the sponsor server'
+                    });
+                    // Split this join's service profit (revenue − partner payout −
+                    // acquiring) across shareholders — manager sales just use the
+                    // lower revenue. Skip for investor-owned joins: their revenue
+                    // funds the investor's return and the share split was already
+                    // done at buy-in (no double-counting).
+                    if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
+                    await maybeAutoWithdraw(clients, creatorId);
+                }
             }
         } catch (e) {
             console.error(e);

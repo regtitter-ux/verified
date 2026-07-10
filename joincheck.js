@@ -90,7 +90,21 @@ async function isMember(bot, guildId, userId) {
 // Credit the card owner for one confirmed join (at their join-check rate) and
 // remember the payout — plus the granted role — so both can be reversed if the
 // user later leaves the sponsor server.
+// Returns { amount, linkId, duplicate }. `duplicate:true` (amount 0) means this
+// (user, sponsor) already had a live join — nothing was credited or recorded.
 function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, extra = {}) {
+    // Atomic idempotency guard. One real invite pays once per (user, sponsor).
+    // The caller's isDupJoin pre-check has awaits between it and this call, so two
+    // concurrent verify clicks can both pass it — but THIS function is fully
+    // synchronous (no await), so the single-threaded event loop can't interleave
+    // two calls: the second sees the first's appended joinlink and bails. This is
+    // the race-proof point of truth for "one join = one credit".
+    const list = loadJSON('joinlinks.json', []);
+    const arr = Array.isArray(list) ? list : [];
+    if (arr.some((r) => r && (r.status === 'joined' || r.status === 'settled') && r.userId === userId && r.guildId === guildId)) {
+        return { amount: 0, linkId: null, duplicate: true };
+    }
+
     const settings = loadJSON('settings.json');
     if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
     const s = settings[creatorId];
@@ -99,10 +113,9 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
     s.balance = round2((Number(s.balance) || 0) + perJoin);
     saveJSON('settings.json', settings);
 
-    const list = loadJSON('joinlinks.json', []);
-    const arr = Array.isArray(list) ? list : [];
+    const id = newId();
     const rec = {
-        id: newId(), userId, guildId, creatorId, amount: perJoin,
+        id, userId, guildId, creatorId, amount: perJoin,
         cardGuildId: cardGuildId || null, roleId: roleId || null, channelId: channelId || null,
         ts: Date.now(), status: 'joined'
     };
@@ -115,7 +128,7 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
     }
     arr.push(rec);
     saveJSON('joinlinks.json', arr);
-    return perJoin;
+    return { amount: perJoin, linkId: id, duplicate: false };
 }
 
 // Is the sponsor server `gid` being advertised on the network right now?
@@ -267,7 +280,7 @@ async function finalizeLeavers(clients, leaverIds) {
                 freshSettings[o.creatorId].balance = round2((Number(freshSettings[o.creatorId].balance) || 0) - o.amt);
                 settingsDirty = true;
                 // Partner activity log — the clawback debit we actually applied.
-                try { partnerlog.logEvent(o.partnerId, { type: 'debit', amount: o.amt, reason: 'left', userId: o.userId, guildId: o.cardGuildId, roleId: o.roleId }); } catch { /* never break the commit */ }
+                try { partnerlog.logEvent(o.partnerId, { type: 'debit', amount: o.amt, reason: 'left', userId: o.userId, guildId: o.cardGuildId, roleId: o.roleId, srcId: o.id }); } catch { /* never break the commit */ }
             }
             if (o.referrerId && freshSettings[o.referrerId]) {
                 freshSettings[o.referrerId].balance = round2((Number(freshSettings[o.referrerId].balance) || 0) - o.refClaw);
@@ -275,7 +288,7 @@ async function finalizeLeavers(clients, leaverIds) {
                 settingsDirty = true;
             }
             // Partner activity log — the verification removal (снятие верифки).
-            if (o.unverified) { try { partnerlog.logEvent(o.partnerId, { type: 'unverify', reason: 'left', userId: o.userId, guildId: o.cardGuildId, roleId: o.roleId }); } catch { /* never break the commit */ } }
+            if (o.unverified) { try { partnerlog.logEvent(o.partnerId, { type: 'unverify', reason: 'left', userId: o.userId, guildId: o.cardGuildId, roleId: o.roleId, srcId: o.id }); } catch { /* never break the commit */ } }
         }
         if (settingsDirty) saveJSON('settings.json', freshSettings);
         if (listDirty) saveJSON('joinlinks.json', fl);
