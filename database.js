@@ -48,7 +48,11 @@ const saveJSON = (file, data) => {
     const target = persistPath(file);
     const tmp = `${target}.tmp`;
     try {
-        const json = JSON.stringify(data, null, 2);
+        // Compact (no indentation): the hot files (verified.json, joinlinks.json)
+        // are rewritten in full on every join and grow large — indentation roughly
+        // doubles both the serialize time and the bytes written on the event loop.
+        // These are machine data, still valid JSON, greppable via jq.
+        const json = JSON.stringify(data);
         const fd = fs.openSync(tmp, 'w');
         try { fs.writeSync(fd, json); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
         fs.renameSync(tmp, target);
