@@ -68,21 +68,32 @@ async function adForServer(clients, ownerId, serverId) {
     if (cfg.adsOff) return { adText: null, sponsor: null, invite: null };
     if (gidOk && cfg.serverAdsOff && cfg.serverAdsOff[serverId]) return { adText: null, sponsor: null, invite: null };
 
-    // Paid buyer campaigns take priority (round-robin, respecting opt-outs +
-    // the self-ad rule + the purchased cap). Falls through to house ads.
+    // Paid buyer campaigns take priority (respecting "Серверы показа" opt-outs,
+    // the self-ad rule, the purchased cap and the per-creative join limit). Try
+    // the eligible campaigns in weighted order and serve the FIRST that is
+    // showable — not capped, invite resolves to a join-checkable server that
+    // isn't this one. A campaign that fails a check is skipped so the next
+    // eligible one is tried; only when NONE is showable do we fall through to
+    // house ads. (No membership check here — /api/ad has no user yet; that
+    // happens later at /api/join-check.)
     if (gidOk) {
         try {
-            const pick = campaigns.pickForGuild(serverId, null, campaigns.fleetGuildIds(clients));
-            if (pick) {
-                const sponsor = await resolveSponsorPresence(clients, pick.invite).catch(() => null);
-                // Only serve the ad if the join can be verified right now.
-                if (sponsor) {
-                    stampSponsorShow(sponsor.guildId);
-                    const codes = extractInviteCodes(pick.invite);
-                    return { adText: applyTemplate(serverId, pick.invite), raw: pick.invite, sponsor, campaignId: pick.campaignId, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
-                }
-                // No resolvable sponsor bot → fall through to house ads.
+            const verified = loadJSON('verified.json', []);
+            const limits = loadJSON('adlimits.json', {});
+            const capReached = (raw) => { const rec = limits[adKeyOf(raw)]; const cap = Number(rec?.limit) || 0; return cap > 0 && joinerCount(verified, adKeyOf(raw), Number(rec?.resetAt) || 0) >= cap; };
+            const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(serverId, verified, campaigns.fleetGuildIds(clients)));
+            let checks = 0;
+            for (const cand of ordered) {
+                if (checks >= 8) break;                                  // bound the network calls
+                if (capReached(cand.invite)) continue;
+                checks++;
+                const sponsor = await resolveSponsorPresence(clients, cand.invite).catch(() => null);
+                if (!sponsor || sponsor.guildId === String(serverId)) continue; // unresolvable / self → try next
+                stampSponsorShow(sponsor.guildId);
+                const codes = extractInviteCodes(cand.invite);
+                return { adText: applyTemplate(serverId, cand.invite), raw: cand.invite, sponsor, campaignId: cand.id, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
             }
+            // No showable campaign → fall through to house ads.
         } catch (e) { /* fall through to house ads */ }
     }
 

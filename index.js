@@ -1173,75 +1173,70 @@ const startBot = (token) => {
 
             let latest = candidates.reduce((best, cur) => (!best || cur.ts > best.ts ? cur : best), null);
 
-            // Paid buyer campaigns take priority over house ads. With several
-            // active at once, prefer one whose sponsor the user is NOT already a
-            // member of — advertising a server they're already in can't produce
-            // a real join (and would let them farm the buyer's joins). Try the
-            // eligible campaigns in weighted-random order (weight = remaining
-            // joins) and pick the first the user isn't on. If the membership
-            // can't be determined, fall back to the weighted pick; if the user
-            // is confirmed to be on ALL of them, show no campaign (fall to the
-            // house ad / ad-free) rather than a pointless one.
+            // Per-creative join-limit cap: NET verifications (leavers removed by
+            // clawback don't count) against the raw ad's limit. Shared helper so
+            // both campaigns and house ads apply it identically.
+            const limits = loadJSON('adlimits.json', {});
+            const capReached = (raw) => {
+                const rec = limits[adKeyOf(raw)];
+                const cap = Number(rec?.limit) || 0;
+                return cap > 0 && joinerCount(verified, adKeyOf(raw), Number(rec?.resetAt) || 0) >= cap;
+            };
+
+            // Paid buyer campaigns take priority over house ads. Try the eligible
+            // campaigns (already filtered by "Серверы показа"/disabledGuilds,
+            // remaining>0, bot on sponsor) in weighted-random order and pick the
+            // first that is FULLY showable — not capped, invite resolves to a
+            // join-checkable server that isn't THIS guild — AND whose sponsor the
+            // user isn't already a member of. Every check that fails SKIPS to the
+            // next eligible campaign, so one campaign being capped / unresolvable /
+            // already-joined never suppresses another available one. Ad-free is
+            // only reached when NO eligible campaign is showable.
+            let campaignPicked = false;
             if (!adsOff) {
                 try {
+                    // Fully validate a campaign for this guild+user → resolved
+                    // { text, raw, sp } or null (capped / self-target / unresolvable).
+                    const showable = async (cand) => {
+                        const raw = cand.invite;
+                        if (capReached(raw)) return null;
+                        const text = applyTemplate(guild.id, raw);
+                        const sp = await resolveSponsorPresence(clients, text).catch(() => null);
+                        if (!sp || sp.guildId === guild.id) return null;
+                        return { text, raw, sp };
+                    };
                     const fleet = campaigns.fleetGuildIds(clients);
                     const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(guild.id, verified, fleet));
                     let chosen = null, tentative = null, checks = 0;
                     for (const cand of ordered) {
-                        const spBot = clients.find((c) => c.guilds.cache.has(cand.sponsorGuildId));
-                        if (!spBot) continue;                              // no bot on sponsor → can't verify
-                        if (checks >= 6) { tentative = tentative || cand; break; } // bound the membership fetches
+                        if (checks >= 8) break;                            // bound the network calls
+                        const ad = await showable(cand);
+                        if (!ad) continue;                                 // capped / unresolvable → try next
                         checks++;
-                        const m = await isMember(spBot, cand.sponsorGuildId, user.id).catch(() => null);
-                        if (m === false) { chosen = cand; break; }         // not a member → ideal
-                        if (m === null && !tentative) tentative = cand;    // uncertain → fallback candidate
-                        // m === true → already a member → skip this campaign
+                        const m = await isMember(ad.sp.bot, ad.sp.guildId, user.id).catch(() => null);
+                        if (m === true) continue;                          // already a member → try next
+                        if (m === false) { chosen = { cand, ad }; break; } // not a member → ideal
+                        if (!tentative) tentative = { cand, ad };          // uncertain → fallback
                     }
-                    const use = chosen || tentative;                       // never a known-member sponsor
-                    if (use) latest = { text: applyTemplate(guild.id, use.invite), ts: Date.now(), raw: use.invite, campaignId: use.id };
+                    const pick = chosen || tentative;
+                    if (pick) {
+                        latest = { text: pick.ad.text, ts: Date.now(), raw: pick.ad.raw, campaignId: pick.cand.id };
+                        campaignPicked = true;
+                        // Stamp "ad live" for the leave-clawback opt-out (joincheck.js).
+                        try { const shows = loadJSON('sponsorshow.json', {}); shows[pick.ad.sp.guildId] = Date.now(); saveJSON('sponsorshow.json', shows); } catch { /* stamping must never break verification */ }
+                    }
                 } catch (e) { /* never let campaign selection break verification */ }
             }
 
-            // Join-limit: if this creative has a cap and its NET count of
-            // verifications (leavers don't count — their verified.json
-            // entries are removed by the clawback) has reached it, stop
-            // showing the ad. Verification still works, just ad-free and
-            // without crediting anyone. A leaver frees a slot, so the ad
-            // resumes until the net count hits the cap again.
-            if (latest) {
-                // Campaign is keyed by the RAW ad, so per-server template
-                // variants share one limit counter.
-                const limits = loadJSON('adlimits.json', {});
-                const key = adKeyOf(latest.raw);
-                const rec = limits[key];
-                const cap = Number(rec?.limit) || 0;
-                if (cap > 0) {
-                    // Count only joins since the last counter reset — resetting
-                    // starts a fresh campaign toward the same limit.
-                    const since = Number(rec?.resetAt) || 0;
-                    const netCount = joinerCount(verified, key, since);
-                    if (netCount >= cap) latest = null;
-                }
-            }
-
-            // Don't advertise a server on itself: if the ad's invite points to
-            // THIS guild, everyone here is already a member — showing it is
-            // pointless and would let existing members farm the buyer's joins.
-            // The server just runs ad-free until a showable ad exists.
-            if (latest) {
+            // House ads (owner/partner advText) weren't validated above — apply
+            // the same cap + resolvable-sponsor / not-self checks to them. A
+            // picked campaign is already fully validated, so skip it here.
+            if (latest && !campaignPicked && capReached(latest.raw)) latest = null;
+            if (latest && !campaignPicked) {
                 const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
-                // Ads must be join-checkable. Only show an ad whose invite leads
-                // to a server a network bot is on, so the join can actually be
-                // verified. No sponsor bot (bot-less server, or no invite at
-                // all) = no join-check → don't show the ad; the verification
-                // just runs ad-free (no payout). Also never advertise a server
-                // on itself.
                 if (!sp || sp.guildId === guild.id) {
                     latest = null;
                 } else {
-                    // The sponsor's ad is being shown right now. Stamp it so the
-                    // leave-clawback opt-out can tell "ad live" from "ad off"
-                    // (see joincheck.js). Cheap, best-effort.
                     try {
                         const shows = loadJSON('sponsorshow.json', {});
                         shows[sp.guildId] = Date.now();
