@@ -2218,7 +2218,12 @@ function startApiServer(clients, config) {
                 const econ = managers.joinEconomics(camp, REVENUE_PER_JOIN);
                 const amount = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null,
                     { revenue: econ.revenue, managerId: econ.managerId });
-                await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
+                // Parity with the in-Discord flow: if this server has outstanding
+                // investor invites, this paid join fills one — its share split
+                // already happened at the investor buy-in, so skip payShares.
+                let investorOwnedJoin = false;
+                try { investorOwnedJoin = investors.serverOutstanding(serverId, loadJSON('verified.json', [])) > 0; } catch { /* never block verification */ }
+                if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
                 const fresh = recordApiVerified({ creatorId: userId, memberId, serverId, adKey });
                 syncHubMember(clients, memberId).catch(() => null);
                 await logFunds(clients, {
