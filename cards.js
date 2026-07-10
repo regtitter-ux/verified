@@ -98,6 +98,15 @@ const FAQ_TEXT = [
     'A: Нажмите на кнопку «Пройти верификацию»'
 ].join('\n');
 
+// The FAQ shown when "Прочитать FaQ" is pressed — a Components V2 container
+// (embed v2), rendered ephemerally. Combines the V2 + Ephemeral message flags.
+function buildFaqView() {
+    const container = new ContainerBuilder()
+        .setAccentColor(0x5865F2)
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(FAQ_TEXT));
+    return { components: [container], flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral };
+}
+
 // The bespoke Components V2 payload for PERSONALIZED_BOT_ID. creatorId is carried
 // in BOTH the verify button (3rd segment) and the FAQ button so the join can be
 // attributed even though there is no embed footer to read it from.
@@ -597,7 +606,7 @@ async function handleMessageDelete(clients, message) {
 module.exports = {
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate, DEFAULT_DESCRIPTION,
-    PERSONALIZED_BOT_ID, FAQ_TEXT,
+    PERSONALIZED_BOT_ID, FAQ_TEXT, buildFaqView,
     register, fix, edit, remove, republish, restore, restoreInfo, resetRole,
     trackClick, clickWindows, clicksForKey, clickWindowsMulti, clicksForKeyMulti, cardRoleIds, scanAll, getScanState,
     markDeleted, removeCard, sweepDeleted, startCardSweep, handleMessageDelete

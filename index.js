@@ -779,9 +779,9 @@ const startBot = (token) => {
         }
 
         // "Прочитать FaQ" button on the personalized verification card — show the
-        // FAQ privately (ephemeral), like in the reference screenshot.
+        // FAQ privately as a Components V2 card (embed v2), like the screenshot.
         if (interaction.isButton() && interaction.customId.startsWith('verif_faq')) {
-            return interaction.reply({ content: cards.FAQ_TEXT, flags: [64] }).catch(() => null);
+            return interaction.reply(cards.buildFaqView()).catch(() => null);
         }
 
         // "History" button — ephemeral withdrawal history (first page)
