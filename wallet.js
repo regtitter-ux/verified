@@ -31,9 +31,23 @@ function debit(buyerId, amount) {
     wa.balance = round2((wa.balance || 0) - amt);
     saveWallets(w); return wa.balance;
 }
+// Keep every pending top-up (needed for reconciliation) plus the most recent
+// settled ones (only shown as history); drop older settled receipts so the
+// array can't grow without bound.
+const KEEP_SETTLED_TOPUPS = 50;
+function pruneTopups(list) {
+    const arr = Array.isArray(list) ? list : [];
+    const pending = arr.filter((t) => t.status === 'pending');
+    const settled = arr.filter((t) => t.status !== 'pending');
+    return settled.length > KEEP_SETTLED_TOPUPS
+        ? [...pending, ...settled.slice(-KEEP_SETTLED_TOPUPS)]
+        : arr;
+}
 function addTopup(buyerId, rec) {
     const w = loadWallets(); const wa = ensure(w, buyerId);
-    wa.topups.push(rec); saveWallets(w);
+    wa.topups.push(rec);
+    wa.topups = pruneTopups(wa.topups);
+    saveWallets(w);
 }
 
 // Credit any pending top-ups whose invoice is now paid. isPaidFn(invoiceId) →

@@ -192,13 +192,32 @@ function accountOf(userId, verified) {
     };
 }
 
-function addTopup(userId, rec) { const all = load(); const u = ensure(all, userId); u.topups.push(rec); save(all); }
+// Keep pending top-ups (needed for reconciliation) + the most recent settled;
+// drop old settled receipts so topups[] can't grow without bound.
+const KEEP_SETTLED_TOPUPS = 50;
+function pruneTopups(list) {
+    const arr = Array.isArray(list) ? list : [];
+    const pending = arr.filter((t) => t.status === 'pending');
+    const settled = arr.filter((t) => t.status !== 'pending');
+    return settled.length > KEEP_SETTLED_TOPUPS ? [...pending, ...settled.slice(-KEEP_SETTLED_TOPUPS)] : arr;
+}
+function addTopup(userId, rec) { const all = load(); const u = ensure(all, userId); u.topups.push(rec); u.topups = pruneTopups(u.topups); save(all); }
 async function reconcileTopups(userId, isPaidFn) {
-    const all = load(); const u = all[userId];
-    if (!u || !Array.isArray(u.topups)) return 0;
+    const u0 = load()[userId];
+    if (!u0 || !Array.isArray(u0.topups)) return 0;
+    // Phase 1 (async): find which pending invoices are now paid — don't hold the
+    // investors snapshot across the await, or a concurrent buy()/manualTopup for
+    // this user (same investors.json object) would be clobbered by our save.
+    const paid = new Set();
+    for (const t of u0.topups) {
+        if (t.status === 'pending' && t.invoiceId && await isPaidFn(t.invoiceId).catch(() => false)) paid.add(t.invoiceId);
+    }
+    if (!paid.size) return 0;
+    // Phase 2 (synchronous, atomic): re-load fresh and flip the paid ones.
+    const all = load(); const u = ensure(all, userId);
     let credited = 0;
     for (const t of u.topups) {
-        if (t.status === 'pending' && t.invoiceId && await isPaidFn(t.invoiceId).catch(() => false)) {
+        if (t.status === 'pending' && t.invoiceId && paid.has(t.invoiceId)) {
             t.status = 'paid'; t.paidAt = Date.now(); credited += Number(t.amount) || 0;
         }
     }
