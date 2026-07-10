@@ -2101,11 +2101,33 @@ async function handleInvestor(req, res, path, clients, config) {
     return send(res, 404, { error: 'unknown endpoint' }, cors);
 }
 
+// Lenient per-IP fixed-window rate limit — defense-in-depth against floods
+// and credential brute-forcing. The cap is high so normal panel polling and
+// many bots behind one NAT stay well under it; only abusive bursts trip it.
+const RL_WINDOW_MS = 60 * 1000;
+const RL_MAX = Number(process.env.API_RATE_LIMIT) || 600;
+const rlHits = new Map(); // ip -> { count, windowStart }
+function rateLimited(req) {
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    const ip = fwd || (req.socket && req.socket.remoteAddress) || 'unknown';
+    const now = Date.now();
+    let e = rlHits.get(ip);
+    if (!e || now - e.windowStart > RL_WINDOW_MS) { e = { count: 0, windowStart: now }; rlHits.set(ip, e); }
+    e.count++;
+    return e.count > RL_MAX;
+}
+// Bounded cleanup so the Map can't grow without limit.
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, e] of rlHits) if (now - e.windowStart > RL_WINDOW_MS) rlHits.delete(ip);
+}, RL_WINDOW_MS).unref?.();
+
 function startApiServer(clients, config) {
     const port = Number(process.env.API_PORT || process.env.PORT || 8080);
 
     const server = http.createServer(async (req, res) => {
         try {
+            if (rateLimited(req)) return send(res, 429, { error: 'rate limited' });
             const p = (new URL(req.url, 'http://x').pathname).replace(/\/+$/, '') || '/';
 
             // CSRF defense for the cookie-authenticated cabinets. The session
