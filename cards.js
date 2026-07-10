@@ -5,7 +5,8 @@
 // delete it, or re-publish it — all without touching who created it unless
 // explicitly asked. Only the bot instance that AUTHORED a message can edit or
 // delete it, so each op locates that instance in the fleet.
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AuditLogEvent, PermissionsBitField } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AuditLogEvent, PermissionsBitField,
+    ContainerBuilder, SectionBuilder, TextDisplayBuilder, SeparatorBuilder, MessageFlags } = require('discord.js');
 const https = require('https');
 const { loadJSON, saveJSON } = require('./database.js');
 
@@ -71,9 +72,63 @@ function markDeleted(messageId, deletedBy = null) {
 
 const DEFAULT_DESCRIPTION = 'To gain full access to the server, you must complete verification\nClick the button';
 
+// One bot gets a bespoke Components V2 (“embed v2”) card: a Verification section
+// with a green button + an FAQ section with a button that opens the Q&A. The
+// verify button keeps the exact same customId, so /verify role and the whole
+// verification flow are unchanged — only the rendering differs.
+const PERSONALIZED_BOT_ID = '1525109611441553560';
+
+// FAQ shown ephemerally when the "Прочитать FaQ" button is pressed.
+const FAQ_TEXT = [
+    '## Часто задаваемые вопросы',
+    '',
+    '**Q: Почему мне нужна верификация?**',
+    'A: Без верификации Ваш доступ к серверу ограничен',
+    '',
+    '**Q: Что даёт мне верификация?**',
+    'A: При верификации Вы получите доступ к функционалу сервера',
+    '',
+    '**Q: Зачем вообще нужна верификация?**',
+    'A: Верификация нужна чтобы предотвратить попытки рейда нашего сервера через бот-аккаунты',
+    '',
+    '**Q: Как обрабатываются мои данные?**',
+    'A: Мы не собираем Ваши персональные данные в ходе верификации, за исключением необходимых для аналитики. Ваши персональные данные нам не нужны',
+    '',
+    '**Q: Как мне пройти верификацию?**',
+    'A: Нажмите на кнопку «Пройти верификацию»'
+].join('\n');
+
+// The bespoke Components V2 payload for PERSONALIZED_BOT_ID. creatorId is carried
+// in BOTH the verify button (3rd segment) and the FAQ button so the join can be
+// attributed even though there is no embed footer to read it from.
+function buildPersonalCard(guild, creatorId, roleId) {
+    const verifyBtn = new ButtonBuilder()
+        .setCustomId(`start_verif_guild:${roleId || ''}:${creatorId || ''}`)
+        .setLabel('Пройти верификацию').setStyle(ButtonStyle.Success);
+    const faqBtn = new ButtonBuilder()
+        .setCustomId(`verif_faq:${creatorId || ''}`)
+        .setLabel('Прочитать FaQ').setStyle(ButtonStyle.Primary);
+    const container = new ContainerBuilder()
+        .setAccentColor(0x5865F2)
+        .addSectionComponents(
+            new SectionBuilder()
+                .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+                    '## Верификация\nЗдесь Вы можете пройти верификацию чтобы получить доступ к серверу, чтобы пройти верификацию - нажмите на кнопку справа'))
+                .setButtonAccessory(verifyBtn))
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addSectionComponents(
+            new SectionBuilder()
+                .addTextDisplayComponents(new TextDisplayBuilder().setContent(
+                    '## Часто задаваемые вопросы\nЧтобы просмотреть часто задаваемые вопросы - нажмите на кнопку справа'))
+                .setButtonAccessory(faqBtn));
+    return { components: [container], flags: MessageFlags.IsComponentsV2 };
+}
+
 // The canonical verification-card message payload. `description` overrides the
-// embed body per card (empty → the default text).
-function buildCard(guild, creatorId, roleId, description) {
+// embed body per card (empty → the default text). `botId` selects the bespoke
+// Components V2 layout for the one personalized bot.
+function buildCard(guild, creatorId, roleId, description, botId) {
+    if (String(botId || '') === PERSONALIZED_BOT_ID) return buildPersonalCard(guild, creatorId, roleId);
     const icon = guild?.iconURL?.({ dynamic: true }) || null;
     const embed = new EmbedBuilder()
         .setAuthor({ name: guild?.name || 'Server', iconURL: icon })
@@ -101,15 +156,28 @@ function parseMsgRef(input) {
 // Recover a card's owner (footer), role (button customId) and embed body.
 function extractCard(msg) {
     const footer = msg?.embeds?.[0]?.footer?.text || '';
-    const creatorId = (footer.match(/Created by:\s*(\d{17,20})/) || [])[1] || null;
+    let creatorId = (footer.match(/Created by:\s*(\d{17,20})/) || [])[1] || null;
     const description = msg?.embeds?.[0]?.description || null;
-    let roleId = null;
-    for (const row of msg?.components || []) {
-        for (const comp of row.components || []) {
-            const cid = comp.customId || comp.custom_id || '';
-            if (cid.startsWith('start_verif_guild')) { roleId = cid.includes(':') ? cid.split(':')[1] : null; break; }
+    // Collect every button customId, recursing into Components V2 containers/
+    // sections so the bespoke card's ids are found too.
+    const ids = [];
+    const walk = (comps) => {
+        for (const comp of comps || []) {
+            if (comp.customId || comp.custom_id) ids.push(comp.customId || comp.custom_id);
+            if (comp.components) walk(comp.components);
+            if (comp.accessory) walk([comp.accessory]);
         }
-        if (roleId) break;
+    };
+    walk(msg?.components || []);
+    let roleId = null;
+    for (const cid of ids) {
+        if (cid.startsWith('start_verif_guild')) {
+            const parts = cid.split(':');
+            roleId = parts[1] || null;
+            if (!creatorId && parts[2]) creatorId = parts[2]; // V2 card carries the owner here
+        } else if (!creatorId && cid.startsWith('verif_faq:')) {
+            creatorId = cid.split(':')[1] || null;
+        }
     }
     return { creatorId, roleId, description };
 }
@@ -141,7 +209,7 @@ async function register(clients, ref) {
     const { creatorId, roleId, description } = extractCard(loc.msg);
     if (!creatorId) return { ok: false, error: 'not-a-card' };
     const desc = (description && description !== DEFAULT_DESCRIPTION) ? description : null;
-    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId, desc) }).catch(() => null);
+    await loc.msg.edit(buildCard(loc.channel.guild, creatorId, roleId, desc, loc.client.user.id)).catch(() => null);
     const rec = addCard({ messageId: r.messageId, channelId: r.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, description: desc, botId: loc.client.user.id });
     return { ok: true, card: rec };
 }
@@ -158,7 +226,7 @@ async function fix(clients, messageId) {
     const roleId = card.roleId ?? ex.roleId;
     const description = card.description ?? ((ex.description && ex.description !== DEFAULT_DESCRIPTION) ? ex.description : null);
     if (!creatorId) return { ok: false, error: 'no-owner' };
-    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId, description) });
+    await loc.msg.edit(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id));
     addCard({ ...card, creatorId, roleId, description });
     return { ok: true };
 }
@@ -178,7 +246,7 @@ async function edit(clients, messageId, patch = {}) {
         description = d ? patch.description : null; // empty → default text
     }
     if (!creatorId) return { ok: false, error: 'no-owner' };
-    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(loc.channel.guild, creatorId, roleId, description) });
+    await loc.msg.edit(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id));
     const rec = addCard({ ...card, creatorId, roleId, description });
     return { ok: true, card: rec };
 }
@@ -205,7 +273,7 @@ async function republish(clients, messageId) {
     const roleId = card.roleId ?? ex.roleId;
     const description = card.description ?? ((ex.description && ex.description !== DEFAULT_DESCRIPTION) ? ex.description : null);
     if (!creatorId) return { ok: false, error: 'no-owner' };
-    const sent = await loc.channel.send(buildCard(loc.channel.guild, creatorId, roleId, description)).catch(() => null);
+    const sent = await loc.channel.send(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id)).catch(() => null);
     if (!sent) return { ok: false, error: 'send-failed' };
     await loc.msg.delete().catch(() => null);
     removeCard(messageId);
@@ -285,7 +353,7 @@ async function resetRole(clients, messageId) {
     const history = [...(Array.isArray(card.roleHistory) ? card.roleHistory : []), (card.roleId || null)]
         .filter((v, i, a) => a.indexOf(v) === i);
     const rec = addCard({ ...card, roleId: newRole.id, roleHistory: history });
-    await loc.msg.edit({ content: loc.msg.content || '', ...buildCard(guild, card.creatorId, newRole.id, card.description ?? null) }).catch(() => null);
+    await loc.msg.edit(buildCard(guild, card.creatorId, newRole.id, card.description ?? null, card.botId)).catch(() => null);
 
     return { ok: true, card: rec, oldRoleId: oldRole.id, newRoleId: newRole.id, roleName: newRole.name };
 }
@@ -335,7 +403,7 @@ async function restore(clients, messageId) {
     const guild = client.guilds.cache.get(card.guildId);
     const channel = await client.channels.fetch(card.channelId).catch(() => null);
     if (!channel || typeof channel.send !== 'function') return { ok: false, error: 'no-channel' };
-    const sent = await channel.send(buildCard(guild, card.creatorId, card.roleId, card.description || null)).catch(() => null);
+    const sent = await channel.send(buildCard(guild, card.creatorId, card.roleId, card.description || null, info.botId)).catch(() => null);
     if (!sent) return { ok: false, error: 'send-failed' };
     removeCard(messageId); // fresh record (no deletedAt) under the new message id
     const rec = addCard({
@@ -529,6 +597,7 @@ async function handleMessageDelete(clients, message) {
 module.exports = {
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate, DEFAULT_DESCRIPTION,
+    PERSONALIZED_BOT_ID, FAQ_TEXT,
     register, fix, edit, remove, republish, restore, restoreInfo, resetRole,
     trackClick, clickWindows, clicksForKey, clickWindowsMulti, clicksForKeyMulti, cardRoleIds, scanAll, getScanState,
     markDeleted, removeCard, sweepDeleted, startCardSweep, handleMessageDelete

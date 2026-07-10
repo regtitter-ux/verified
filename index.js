@@ -754,30 +754,17 @@ const startBot = (token) => {
                 await interaction.deferReply({ flags: [64] }).catch(() => null);
             }
 
-            const icon = interaction.guild.iconURL({ dynamic: true });
-            const embed = new EmbedBuilder()
-                .setAuthor({ name: interaction.guild.name, iconURL: icon })
-                .setTitle('Get verified!')
-                .setDescription('To gain full access to the server, you must complete verification\nClick the button')
-                .setThumbnail(icon)
-                .setColor('#5865F2')
-                .setFooter({ text: `Created by: ${interaction.user.id}` });
-
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId(`start_verif_guild:${role.id}`)
-                    .setLabel('Start Verification')
-                    .setEmoji('🔐')
-                    .setStyle(ButtonStyle.Primary)
-            );
-
             // Remember which bot this user uses, so payout DMs come from it (and only it)
             const settings = loadJSON('settings.json');
             if (!settings[interaction.user.id]) settings[interaction.user.id] = { advText: '', serverAds: {}, partners: [] };
             settings[interaction.user.id].botId = interaction.client.user.id;
             saveJSON('settings.json', settings);
 
-            const sentCard = await interaction.channel.send({ embeds: [embed], components: [row] }).catch(() => null);
+            // buildCard renders the bespoke Components V2 layout for the one
+            // personalized bot and the classic embed for everyone else; the verify
+            // button customId (and the whole flow) is identical either way.
+            const cardPayload = cards.buildCard(interaction.guild, interaction.user.id, role.id, null, interaction.client.user.id);
+            const sentCard = await interaction.channel.send(cardPayload).catch(() => null);
             // Track the card so it can be listed / repaired / managed remotely
             // from the admin "Экстренно" tab.
             if (sentCard) {
@@ -789,6 +776,12 @@ const startBot = (token) => {
                 } catch (e) { console.error('[CARDS] track error:', e.message); }
             }
             return interaction.editReply({ content: `✅ Verification card created — grants <@&${role.id}>` }).catch(() => null);
+        }
+
+        // "Прочитать FaQ" button on the personalized verification card — show the
+        // FAQ privately (ephemeral), like in the reference screenshot.
+        if (interaction.isButton() && interaction.customId.startsWith('verif_faq')) {
+            return interaction.reply({ content: cards.FAQ_TEXT, flags: [64] }).catch(() => null);
         }
 
         // "History" button — ephemeral withdrawal history (first page)
@@ -1090,12 +1083,19 @@ const startBot = (token) => {
         const verified = loadJSON('verified.json', []);
         const { user, guild, member, message } = interaction;
 
-        const footerText = message.embeds[0]?.footer?.text || '';
-        const creatorId = footerText.replace('Created by: ', '').trim();
-
         // Card-specific role is encoded in the button id: "start_verif_guild:<roleId>"
         // Legacy cards without a role fall back to a role named "Verified".
-        const roleId = interaction.customId.includes(':') ? interaction.customId.split(':')[1] : null;
+        const idParts = interaction.customId.split(':');
+        const roleId = interaction.customId.includes(':') ? (idParts[1] || null) : null;
+
+        // Owner (payout recipient). Classic cards store it in the embed footer;
+        // the Components V2 card has no footer, so it's carried as a 3rd button
+        // segment, with the tracked card record as a final fallback.
+        const footerText = message.embeds[0]?.footer?.text || '';
+        const creatorId = footerText.replace('Created by: ', '').trim()
+            || idParts[2]
+            || cards.getCard(message.id)?.creatorId
+            || '';
         const verifiedRole = roleId
             ? guild.roles.cache.get(roleId)
             : guild.roles.cache.find(r => r.name === 'Verified');
