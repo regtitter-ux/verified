@@ -1435,6 +1435,10 @@ cards.startCardSweep(clients);
 // Investors: refund undelivered invites when a server loses its bot / last card.
 investors.startInvestSweep(clients);
 
+// One-time: seed the partner activity log from existing joinlinks/verified so
+// it isn't empty for history that predates the log (idempotent, marker-guarded).
+partnerlog.backfillIfNeeded();
+
 // Data backups: rolling local snapshots + off-site copies to a Discord channel.
 backup.startBackupSweep(clients);
 

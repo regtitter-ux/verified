@@ -67,4 +67,56 @@ function applyFilters(events, opts = {}) {
     return out.slice(0, limit);
 }
 
-module.exports = { logEvent, forPartner, allEvents, applyFilters, MAX_PER_PARTNER };
+// One-time backfill so the log isn't empty for history that happened before it
+// existed. Paid grants + clawback debits + verification removals are derived
+// from joinlinks.json (the payment ledger); unpaid grants from verified.json's
+// noAd entries (never in joinlinks). Idempotent: guarded by a marker and
+// deduped by event key, so a re-run can't double up.
+function backfillIfNeeded() {
+    try {
+        const meta = loadJSON('partnerlogmeta.json', {});
+        if (meta && meta.backfilled) return;
+
+        const joinlinks = loadJSON('joinlinks.json', []);
+        const verified = loadJSON('verified.json', []);
+        const byPartner = {};
+        const push = (cid, ev) => { if (/^\d{17,20}$/.test(String(cid || ''))) (byPartner[cid] ||= []).push(ev); };
+
+        for (const r of (Array.isArray(joinlinks) ? joinlinks : [])) {
+            if (!r || !r.creatorId) continue;
+            const ts = Number(r.ts) || 0;
+            const base = { userId: r.userId || null, guildId: r.cardGuildId || null, roleId: r.roleId || null };
+            // Every credited join was a paid grant when it happened.
+            push(r.creatorId, { ts, type: 'grant', reason: 'paid', amount: Number(r.amount) || 0, ...base });
+            // A clawed-back join later became a debit + a verification removal.
+            if (r.status === 'left') {
+                const lt = Number(r.leftAt) || ts;
+                push(r.creatorId, { ts: lt, type: 'debit', reason: 'left', amount: Number(r.amount) || 0, ...base });
+                push(r.creatorId, { ts: lt, type: 'unverify', reason: 'left', amount: 0, ...base });
+            }
+        }
+        for (const u of (Array.isArray(verified) ? verified : [])) {
+            // Only ad-free grants — paid ones already come from joinlinks above.
+            if (!u || !u.creatorId || !u.noAd) continue;
+            push(u.creatorId, { ts: Number(u.timestamp) || 0, type: 'grant', reason: 'no_ad', amount: 0, userId: u.id || null, guildId: u.guildId || null, roleId: u.roleId || null });
+        }
+
+        const keyOf = (e) => `${e.ts}|${e.type}|${e.reason}|${e.userId}|${e.guildId}`;
+        const all = load();
+        let added = 0;
+        for (const cid of Object.keys(byPartner)) {
+            const seen = new Set((Array.isArray(all[cid]) ? all[cid] : []).map(keyOf));
+            const fresh = byPartner[cid].filter((e) => !seen.has(keyOf(e)));
+            added += fresh.length;
+            const merged = [...(Array.isArray(all[cid]) ? all[cid] : []), ...fresh].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+            all[cid] = merged.slice(-MAX_PER_PARTNER);
+        }
+        save(all);
+        saveJSON('partnerlogmeta.json', { backfilled: true, at: Date.now(), added });
+        console.log(`[PARTNERLOG] backfilled ${added} historical event(s) across ${Object.keys(byPartner).length} partner(s)`);
+    } catch (e) {
+        console.error('[PARTNERLOG] backfill error:', e.message);
+    }
+}
+
+module.exports = { logEvent, forPartner, allEvents, applyFilters, backfillIfNeeded, MAX_PER_PARTNER };
