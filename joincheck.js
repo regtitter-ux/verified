@@ -137,12 +137,20 @@ async function finalizeLeavers(clients, leaverIds) {
     const idSet = leaverIds instanceof Set ? leaverIds : new Set(leaverIds || []);
     if (!idSet.size) return;
 
-    // Re-load fresh so records added during any concurrent sweep aren't clobbered.
+    // The loop below awaits Discord/audit calls between reading and writing the
+    // money files, so it must not save a snapshot loaded up-front — a concurrent
+    // creditJoin would be clobbered. Instead we read from `settings` (a snapshot,
+    // used only for consistent in-loop reads), accumulate the net changes, and
+    // apply them synchronously to a FRESH load at the end (see the apply block).
     const list = loadJSON('joinlinks.json', []);
     const settings = loadJSON('settings.json');
-    let verified = loadJSON('verified.json', []);
-    if (!Array.isArray(verified)) verified = [];
-    let changed = false, verifiedChanged = false;
+    let verifiedChanged = false;
+    // Per-record outcomes, committed atomically at the end. Each money change is
+    // gated on winning the joined->left transition on a FRESH load, so a
+    // concurrent finalizeLeavers for the same record can't double-claw, and a
+    // concurrent creditJoin isn't clobbered.
+    const outcomes = [];         // { id, kind, ts, creatorId?, amt?, referrerId?, refClaw? }
+    const verifiedRemovals = []; // { userId, cardGuildId, roleId }
 
     // A member leaving only claws back the payout while the SPONSOR's ad is
     // actively being shown on the network. Once that ad has been off for a
@@ -169,9 +177,7 @@ async function finalizeLeavers(clients, leaverIds) {
         // when the owner force-disabled it for this sponsor: keep the payout,
         // role and verification, and finalize as 'settled' so no sweep retries.
         if (!sponsorAdShowing(rec.guildId, shows) || clawOff[rec.guildId]) {
-            rec.status = 'settled';
-            rec.settledAt = Date.now();
-            changed = true;
+            outcomes.push({ id: rec.id, kind: 'settled', ts: Date.now() });
             console.log(`[LEAVE] clawback skipped (sponsor ad not showing): sponsor=${rec.guildId} user=${rec.userId}`);
             continue;
         }
@@ -179,13 +185,17 @@ async function finalizeLeavers(clients, leaverIds) {
         // Reverse the payout (balance may go negative, like manual edits).
         // The portion that pushes the balance below zero is money already paid out
         // via a withdrawal — that's the part the referrer earned a bonus on.
+        // `before` reads from the snapshot (mutated in-loop to stay consistent
+        // across multiple records of the same creator); the actual debit is
+        // applied to a fresh load in the commit block.
         const before = settings[rec.creatorId] ? (Number(settings[rec.creatorId].balance) || 0) : 0;
+        const outcome = { id: rec.id, kind: 'left', ts: Date.now() };
         if (settings[rec.creatorId]) {
             settings[rec.creatorId].balance = round2(before - rec.amount);
+            outcome.creatorId = rec.creatorId;
+            outcome.amt = rec.amount;
         }
-        rec.status = 'left';
-        rec.leftAt = Date.now();
-        changed = true;
+        outcomes.push(outcome);
 
         await logFunds(clients, {
             type: 'debit', creatorId: rec.creatorId, userId: rec.userId,
@@ -211,6 +221,8 @@ async function finalizeLeavers(clients, leaverIds) {
                 // where the referrer already withdrew and drained the pool.
                 const accrued = Number(settings[referrerId].refBonusAccrued) || 0;
                 settings[referrerId].refBonusAccrued = round2(Math.max(0, accrued - refClaw));
+                outcome.referrerId = referrerId;
+                outcome.refClaw = refClaw;
                 await logFunds(clients, {
                     type: 'debit', creatorId: referrerId, userId: rec.creatorId,
                     amount: refClaw, sponsorGuildId: rec.guildId,
@@ -228,17 +240,48 @@ async function finalizeLeavers(clients, leaverIds) {
                 const m = await g.members.fetch(rec.userId).catch(() => null);
                 if (m && m.roles.cache.has(rec.roleId)) await m.roles.remove(rec.roleId).catch(() => null);
             }
-            const beforeLen = verified.length;
-            verified = verified.filter((u) => !(u.id === rec.userId && u.guildId === rec.cardGuildId && (u.roleId || null) === rec.roleId));
-            if (verified.length !== beforeLen) verifiedChanged = true;
+            verifiedRemovals.push({ userId: rec.userId, cardGuildId: rec.cardGuildId, roleId: rec.roleId });
+            verifiedChanged = true;
         }
     }
 
-    if (changed) {
-        saveJSON('settings.json', settings);
-        saveJSON('joinlinks.json', list);
+    // Commit synchronously (no awaits) on FRESH loads, so writes that landed
+    // during the loop's awaits survive. Each outcome is applied only if the
+    // fresh joinlink is still 'joined' — winning that transition is the single
+    // commit point for both the status change and the money, so a concurrent
+    // finalizeLeavers for the same record can't double-claw.
+    if (outcomes.length) {
+        const freshList = loadJSON('joinlinks.json', []);
+        const fl = Array.isArray(freshList) ? freshList : [];
+        const byId = new Map(fl.map((r) => [r.id, r]));
+        const freshSettings = loadJSON('settings.json');
+        let listDirty = false, settingsDirty = false;
+        for (const o of outcomes) {
+            const r = byId.get(o.id);
+            if (!r || r.status !== 'joined') continue; // already finalized elsewhere
+            if (o.kind === 'settled') { r.status = 'settled'; r.settledAt = o.ts; listDirty = true; continue; }
+            r.status = 'left'; r.leftAt = o.ts; listDirty = true;
+            if (o.creatorId && freshSettings[o.creatorId]) {
+                freshSettings[o.creatorId].balance = round2((Number(freshSettings[o.creatorId].balance) || 0) - o.amt);
+                settingsDirty = true;
+            }
+            if (o.referrerId && freshSettings[o.referrerId]) {
+                freshSettings[o.referrerId].balance = round2((Number(freshSettings[o.referrerId].balance) || 0) - o.refClaw);
+                freshSettings[o.referrerId].refBonusAccrued = round2(Math.max(0, (Number(freshSettings[o.referrerId].refBonusAccrued) || 0) - o.refClaw));
+                settingsDirty = true;
+            }
+        }
+        if (settingsDirty) saveJSON('settings.json', freshSettings);
+        if (listDirty) saveJSON('joinlinks.json', fl);
     }
-    if (verifiedChanged) saveJSON('verified.json', verified);
+    if (verifiedChanged) {
+        const freshVer = loadJSON('verified.json', []);
+        let fv = Array.isArray(freshVer) ? freshVer : [];
+        for (const r of verifiedRemovals) {
+            fv = fv.filter((u) => !(u.id === r.userId && u.guildId === r.cardGuildId && (u.roleId || null) === r.roleId));
+        }
+        saveJSON('verified.json', fv);
+    }
 
     // Removed verified.json entries may have taken a user below "has any
     // active verification" — hub-role reconciliation runs after the save so
