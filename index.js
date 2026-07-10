@@ -82,7 +82,7 @@ const config = {
     // Dedupe: the same token pasted twice would connect ONE bot on two gateway
     // sessions → every event (interactions, sweeps) fires twice.
     tokens: process.env.TOKENS ? [...new Set(process.env.TOKENS.split(',').map((t) => t.trim()).filter(Boolean))] : [],
-    ownerId: process.env.OWNER_ID || '743913502997086219',
+    ownerId: (process.env.OWNER_ID || (console.warn('[SECURITY] OWNER_ID is not set — falling back to a hardcoded owner id. Set OWNER_ID.'), '743913502997086219')),
     adminBotId: process.env.ADMIN_BOT_ID || '1514533989434789998',
     prefix: process.env.PREFIX || '!'
 };

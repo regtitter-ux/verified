@@ -24,6 +24,8 @@ const OAUTH_REDIRECT = (process.env.ADMIN_OAUTH_REDIRECT || '').trim();
 const ADMIN_ORIGIN = (process.env.ADMIN_API_ORIGIN || 'https://vemoni.info').trim().replace(/\/+$/, '');
 const OWNER_ID = (process.env.ADMIN_OWNER_ID || '833442190427684914').trim();
 const DEFAULT_ADMINS = ['604834976994689024'];
+if (!process.env.ADMIN_OWNER_ID) console.warn('[SECURITY] ADMIN_OWNER_ID is not set — falling back to a hardcoded owner id. Set ADMIN_OWNER_ID to your own Discord id.');
+if (process.env.OWNER_ID && process.env.ADMIN_OWNER_ID && process.env.OWNER_ID.trim() !== OWNER_ID) console.warn('[SECURITY] OWNER_ID (bot) and ADMIN_OWNER_ID (panel) differ — the bot and admin panel recognize different owners.');
 
 const SESSION_TTL_MS = Number(process.env.ADMIN_SESSION_TTL_MS) || 30 * 24 * 3600 * 1000; // 30 days
 const STATE_TTL_MS = 10 * 60 * 1000; // OAuth state good for 10 minutes
