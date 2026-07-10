@@ -2076,7 +2076,14 @@ async function handleInvestor(req, res, path, clients, config) {
             const ownerCard = cards.loadCards().find((c) => !c.deletedAt && String(c.guildId) === gid);
             const bid = ownerCard ? (Number((loadJSON('settings.json', {})[ownerCard.creatorId] || {}).joinBid) || 5) : 5;
             const perInvite = investors.buyinProfitPerInvite(bid, ACQUIRING_RATE);
-            const breakdown = await distributeProfit(clients, r.qty * perInvite).catch(() => null);
+            const breakdown = await distributeProfit(clients, r.qty * perInvite).catch((e) => {
+                // Loud, actionable log: the position exists (investor charged) and
+                // its future joins skip per-join payShares, so a silent failure
+                // here means those shareholders are never paid. Operator must
+                // reconcile manually against this position id.
+                console.error(`[INVEST] CRITICAL: buy-in profit distribution failed for position ${r.positionId} (user ${userId}, server ${gid}): ${e && e.message}`);
+                return null;
+            });
             if (breakdown && r.positionId) investors.recordBuyinCredits(userId, r.positionId, breakdown);
             sales.recordSale({ campaignId: `invest_${userId}_${Date.now()}`, buyerId: userId, amount: r.cost, joins: r.qty, sponsorGuildId: gid, via: 'invest' });
         } catch (e) { console.error('[INVEST] buy-in distribution error:', e.message); }
