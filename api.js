@@ -27,6 +27,7 @@ const wallet = require('./wallet.js');
 const investors = require('./investors.js');
 const sales = require('./sales.js');
 const partnerlog = require('./partnerlog.js');
+const logincodes = require('./logincodes.js');
 
 // Admin panel served from a separate origin (the vemoni.info static site).
 // Only exact-match origins get CORS + credentialed cookies allowed.
@@ -1635,6 +1636,58 @@ function getKey(req) {
     return (req.headers['x-api-key'] || '').trim();
 }
 
+// ---------- Alternative login: one-time code via DM ----------
+// DM a login code from a fleet bot that shares a server with the user
+// (user.send only works with a mutual guild + open DMs — which is exactly the
+// "on a server with any of our bots" requirement). Prefers the user's own bot.
+async function dmLoginCode(clients, userId, code, botId) {
+    const list = Array.isArray(clients) ? clients : [];
+    const ordered = botId ? [...list.filter((c) => c.user?.id === botId), ...list.filter((c) => c.user?.id !== botId)] : list;
+    const msg = { content:
+        `🔐 **Код для входа на Vemoni:** \`${code}\`\n` +
+        `Действует 10 минут. Введите его на сайте, чтобы войти.\n` +
+        `Если вы это не запрашивали — просто проигнорируйте это сообщение.` };
+    for (const bot of ordered) {
+        try { const u = await bot.users.fetch(userId); await u.send(msg); return true; } catch { /* try the next bot */ }
+    }
+    return false;
+}
+
+// Shared code-login endpoints for every cabinet: <prefix>/code/request and
+// <prefix>/code/verify. Returns true once it handled the request. On verify it
+// issues the SAME cookies as OAuth (buyer session + admin session when the user
+// has a role), so the login is cached and carries freely across all pages.
+async function handleLoginCode(req, res, path, clients, cors) {
+    if (path.endsWith('/code/request') && req.method === 'POST') {
+        const body = await readBody(req);
+        const userId = String(body?.userId || '').trim();
+        if (!/^\d{17,20}$/.test(userId)) { send(res, 400, { error: 'bad-id' }, cors); return true; }
+        const rl = logincodes.canRequest(userId);
+        if (!rl.ok) { send(res, 429, { error: 'cooldown', retryAfterSec: Math.ceil(rl.retryAfterMs / 1000) }, cors); return true; }
+        const code = logincodes.newCode();
+        const botId = (loadJSON('settings.json')[userId] || {}).botId || null;
+        const delivered = await dmLoginCode(clients, userId, code, botId).catch(() => false);
+        if (!delivered) { send(res, 400, { error: 'no-dm' }, cors); return true; }
+        logincodes.save(userId, code);
+        send(res, 200, { ok: true, ttlSec: Math.floor(logincodes.CODE_TTL_MS / 1000) }, cors);
+        return true;
+    }
+    if (path.endsWith('/code/verify') && req.method === 'POST') {
+        const body = await readBody(req);
+        const userId = String(body?.userId || '').trim();
+        const code = String(body?.code || '').trim();
+        if (!/^\d{17,20}$/.test(userId)) { send(res, 400, { error: 'bad-id' }, cors); return true; }
+        const r = logincodes.verify(userId, code);
+        if (!r.ok) { send(res, 400, { error: r.reason, attemptsLeft: r.attemptsLeft }, cors); return true; }
+        const role = adminAuth.roleOf(userId);
+        const cookies = [adminAuth.buyerCookieHeader(adminAuth.issueBuyerSession(userId))];
+        if (role) cookies.push(adminAuth.sessionCookieHeader(adminAuth.issueSession(userId, role)));
+        send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': cookies });
+        return true;
+    }
+    return false;
+}
+
 // ---------- Buyer order panel ----------
 // Self-serve ad buying: Discord login, create an order, pay a CryptoBot
 // invoice, then a dashboard with live stats and per-server controls.
@@ -1659,6 +1712,7 @@ async function handleBuyer(req, res, path, clients, config) {
             ? { authed: true, userId: sess.userId, isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }
             : { authed: false }, cors);
     }
+    if (await handleLoginCode(req, res, path, clients, cors)) return;
 
     const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
@@ -1907,6 +1961,7 @@ async function handlePartner(req, res, path, clients, config) {
         const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
         return send(res, 200, sess ? { authed: true, userId: sess.userId, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
+    if (await handleLoginCode(req, res, path, clients, cors)) return;
 
     const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
@@ -2131,6 +2186,7 @@ async function handleInvestor(req, res, path, clients, config) {
         const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
         return send(res, 200, sess ? { authed: true, userId: sess.userId, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
+    if (await handleLoginCode(req, res, path, clients, cors)) return;
 
     const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
