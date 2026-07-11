@@ -1225,17 +1225,22 @@ const startBot = (token) => {
                         return { text, raw, sp };
                     };
                     const fleet = campaigns.fleetGuildIds(clients);
-                    const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(guild.id, verified, fleet));
-                    // Partner priority: the server owner (creatorId) may pin ONE
-                    // campaign in their cabinet to always show first on their
-                    // server(s). If that campaign is still eligible here, move it
-                    // to the front of the weighted order. It's only a preference —
-                    // the loop below still skips it if it's capped, self-target,
-                    // unresolvable, or the user already joined its sponsor, so a
-                    // stale/finished priority never suppresses other ads. When no
-                    // priority is set (or it's no longer eligible), the normal
-                    // weighted smart-distribution order stands unchanged.
-                    const prioId = settings[creatorId]?.priorityCampaign;
+                    let ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(guild.id, verified, fleet));
+                    // Partner per-server controls (set in the partner cabinet by
+                    // the server owner = creatorId), keyed by THIS display guild:
+                    //  • hiddenByGuild — campaigns the partner hid on this server;
+                    //    they are removed from the pool entirely (never shown).
+                    //  • priorityByGuild — one campaign pinned to show FIRST here;
+                    //    moved to the front of the weighted order. It's only a
+                    //    preference — the loop below still skips it if it's capped,
+                    //    self-target, unresolvable, or the user already joined its
+                    //    sponsor, so a stale/finished priority never suppresses
+                    //    other ads. With neither set, the normal weighted
+                    //    smart-distribution order stands unchanged.
+                    const pctl = settings[creatorId] || {};
+                    const hiddenHere = pctl.hiddenByGuild?.[guild.id];
+                    if (Array.isArray(hiddenHere) && hiddenHere.length) ordered = ordered.filter((c) => !hiddenHere.includes(c.id));
+                    const prioId = pctl.priorityByGuild?.[guild.id];
                     if (prioId) {
                         const pi = ordered.findIndex((c) => c.id === prioId);
                         if (pi > 0) { const [pc] = ordered.splice(pi, 1); ordered.unshift(pc); }

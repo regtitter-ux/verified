@@ -2139,70 +2139,110 @@ async function handlePartner(req, res, path, clients, config) {
         return send(res, 200, { servers: out }, cors);
     }
 
+    // The partner's own servers: distinct guildIds from their active cards.
+    const partnerGuildIds = () => [...new Set(cards.loadCards()
+        .filter((c) => c.creatorId === userId && !c.deletedAt)
+        .map((c) => c.guildId)
+        .filter((g) => /^\d{17,20}$/.test(String(g || ''))))];
+
     // Active ads currently AVAILABLE to each of the partner's servers (i.e. not
-    // hidden by the buyer/admin for that server), per server, plus which one the
-    // partner has pinned as priority. "Available" = campaigns.eligibleForGuild:
-    // active, not paused, not self-targeted, not opted-out of this guild, bot on
-    // the sponsor, remaining > 0. The switcher on the frontend flips between the
-    // partner's servers using this per-server list.
+    // opted-out by the buyer/admin for that server), per server, plus this
+    // partner's PER-SERVER priority + hide flags. "Available" =
+    // campaigns.eligibleForGuild: active, not paused, not self-targeted, not
+    // opted-out of this guild, bot on the sponsor, remaining > 0. The switcher on
+    // the frontend flips between the partner's servers using this per-server list.
     if (path === '/partner/ads' && req.method === 'GET') {
         const settings = loadJSON('settings.json');
-        const priority = settings[userId]?.priorityCampaign || null;
+        const pset = settings[userId] || {};
+        const priorityByGuild = pset.priorityByGuild || {};
+        const hiddenByGuild = pset.hiddenByGuild || {};
         const verified = loadJSON('verified.json', []);
         const fleet = campaigns.fleetGuildIds(clients);
-        // The partner's own servers: distinct guildIds from their active cards.
-        const mineCards = cards.loadCards().filter((c) => c.creatorId === userId && !c.deletedAt);
-        const guildIds = [...new Set(mineCards.map((c) => c.guildId).filter((g) => /^\d{17,20}$/.test(String(g || ''))))];
-        let priorityValid = false;
-        const servers = guildIds.map((gid) => {
+        const camps = campaigns.loadCampaigns();
+        const servers = partnerGuildIds().map((gid) => {
+            const prio = priorityByGuild[gid] || null;
+            const hiddenSet = new Set(Array.isArray(hiddenByGuild[gid]) ? hiddenByGuild[gid] : []);
+            let prioValid = false;
             const ads = campaigns.eligibleForGuild(gid, verified, fleet)
                 .map((e) => {
-                    const isPriority = e.id === priority;
-                    if (isPriority) priorityValid = true;
+                    const isPriority = e.id === prio;
+                    if (isPriority) prioValid = true;
+                    const purchased = Number(camps[e.id]?.purchased) || e.remaining;
                     return {
                         campaignId: e.id,
                         sponsorGuildId: e.sponsorGuildId,
                         sponsorName: guildNameOf(clients, e.sponsorGuildId),
                         sponsorIcon: guildIconOf(clients, e.sponsorGuildId),
                         remaining: e.remaining,
-                        isPriority
+                        purchased,
+                        delivered: Math.max(0, purchased - e.remaining),
+                        isPriority,
+                        isHidden: hiddenSet.has(e.id)
                     };
                 })
                 .sort((a, b) => b.remaining - a.remaining);
-            return { guildId: gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ads };
+            return {
+                guildId: gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid),
+                priorityCampaign: prioValid ? prio : null, ads
+            };
         });
-        // Lazily drop a stale priority (campaign finished / hidden everywhere) so
-        // the UI and the hot path agree; synchronous load→save, no lost update.
-        if (priority && !priorityValid && settings[userId]) {
-            delete settings[userId].priorityCampaign;
-            saveJSON('settings.json', settings);
-        }
-        return send(res, 200, { priorityCampaign: priorityValid ? priority : null, servers }, cors);
+        return send(res, 200, { servers }, cors);
     }
 
-    // Set (or clear) the partner's single priority campaign. Body: { campaignId }
-    // — empty/absent clears it. A campaign may be pinned only if it is currently
-    // eligible on at least one of the partner's servers.
+    // Set (or clear) the priority campaign FOR ONE of the partner's servers.
+    // Body: { guildId, campaignId } — empty campaignId clears it. The campaign
+    // must be eligible on that server. Priority and hide are mutually exclusive
+    // for the same campaign+server, so pinning also un-hides it.
     if (path === '/partner/priority' && req.method === 'PUT') {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = String(body?.guildId || '').trim();
         const cid = String(body?.campaignId || '').trim();
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad guild' }, cors);
+        if (!partnerGuildIds().includes(gid)) return send(res, 403, { error: 'not-your-server' }, cors);
         const settings = loadJSON('settings.json');
         if (!settings[userId]) settings[userId] = {};
+        const S = settings[userId];
+        S.priorityByGuild = S.priorityByGuild || {};
         if (!cid) {
-            delete settings[userId].priorityCampaign;
+            delete S.priorityByGuild[gid];
             saveJSON('settings.json', settings);
             return send(res, 200, { ok: true, priorityCampaign: null }, cors);
         }
         const verified = loadJSON('verified.json', []);
         const fleet = campaigns.fleetGuildIds(clients);
-        const mineCards = cards.loadCards().filter((c) => c.creatorId === userId && !c.deletedAt);
-        const guildIds = [...new Set(mineCards.map((c) => c.guildId).filter((g) => /^\d{17,20}$/.test(String(g || ''))))];
-        const available = guildIds.some((gid) => campaigns.eligibleForGuild(gid, verified, fleet).some((e) => e.id === cid));
+        const available = campaigns.eligibleForGuild(gid, verified, fleet).some((e) => e.id === cid);
         if (!available) return send(res, 400, { error: 'not-available' }, cors);
-        settings[userId].priorityCampaign = cid;
+        S.priorityByGuild[gid] = cid;
+        if (Array.isArray(S.hiddenByGuild?.[gid])) S.hiddenByGuild[gid] = S.hiddenByGuild[gid].filter((x) => x !== cid);
         saveJSON('settings.json', settings);
         return send(res, 200, { ok: true, priorityCampaign: cid }, cors);
+    }
+
+    // Hide (or unhide) a campaign on ONE of the partner's servers, so it won't be
+    // shown there. Body: { guildId, campaignId, hidden }. Hiding a campaign that
+    // is the server's priority clears that priority (they're exclusive).
+    if (path === '/partner/hide' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = String(body?.guildId || '').trim();
+        const cid = String(body?.campaignId || '').trim();
+        if (!/^\d{17,20}$/.test(gid) || !cid) return send(res, 400, { error: 'bad params' }, cors);
+        if (!partnerGuildIds().includes(gid)) return send(res, 403, { error: 'not-your-server' }, cors);
+        const settings = loadJSON('settings.json');
+        if (!settings[userId]) settings[userId] = {};
+        const S = settings[userId];
+        S.hiddenByGuild = S.hiddenByGuild || {};
+        const cur = new Set(Array.isArray(S.hiddenByGuild[gid]) ? S.hiddenByGuild[gid] : []);
+        if (body?.hidden) {
+            cur.add(cid);
+            if (S.priorityByGuild?.[gid] === cid) delete S.priorityByGuild[gid];
+        } else {
+            cur.delete(cid);
+        }
+        if (cur.size) S.hiddenByGuild[gid] = [...cur]; else delete S.hiddenByGuild[gid];
+        saveJSON('settings.json', settings);
+        return send(res, 200, { ok: true, hidden: Boolean(body?.hidden) }, cors);
     }
 
     // The partner's own active verification cards — same rich stats as the
