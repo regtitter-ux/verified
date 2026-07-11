@@ -93,8 +93,17 @@ function discordRequest({ method, path, headers = {}, body }) {
     });
 }
 
-// Exchange the OAuth code for the user's Discord id.
-async function resolveOauthUser(code) {
+// A Discord OAuth `code` is single-use: exchanging it twice fails. On mobile the
+// callback URL is often hit more than once (in-app-browser prefetch, a link
+// preview, or the user retrying), so the SECOND hit would fail the token
+// exchange and show "Couldn't log in". Make the exchange idempotent: cache the
+// resolved id per code briefly, and coalesce concurrent hits onto one in-flight
+// exchange so every duplicate callback resolves to the same user.
+const _oauthResolved = new Map();  // code -> { uid, ts }
+const _oauthInflight = new Map();  // code -> Promise<uid>
+const OAUTH_CODE_TTL = 3 * 60 * 1000;
+
+async function _exchangeOauthUser(code) {
     const form = new URLSearchParams({
         client_id: DISCORD_CLIENT_ID,
         client_secret: DISCORD_CLIENT_SECRET,
@@ -115,6 +124,20 @@ async function resolveOauthUser(code) {
     });
     if (!me.id) throw new Error('no user id');
     return me.id;
+}
+
+async function resolveOauthUser(code) {
+    const now = Date.now();
+    // prune old entries
+    for (const [k, v] of _oauthResolved) if (now - v.ts > OAUTH_CODE_TTL) _oauthResolved.delete(k);
+    const hit = _oauthResolved.get(code);
+    if (hit) return hit.uid;
+    if (_oauthInflight.has(code)) return _oauthInflight.get(code);
+    const p = _exchangeOauthUser(code)
+        .then((uid) => { _oauthResolved.set(code, { uid, ts: Date.now() }); return uid; })
+        .finally(() => { _oauthInflight.delete(code); });
+    _oauthInflight.set(code, p);
+    return p;
 }
 
 function adminOrigin() { return ADMIN_ORIGIN; }

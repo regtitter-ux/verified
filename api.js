@@ -448,11 +448,13 @@ async function handleAdmin(req, res, path, clients, config) {
         const dest = kind === 'buyer' ? '/order/' : kind === 'partner' ? '/partner/' : kind === 'investor' ? '/investor/' : '/admin/';
         const back = adminAuth.adminOrigin() + dest;
         if (!code || !kind) {
+            console.warn(`[OAUTH] denied: ${!code ? 'no code' : 'bad/expired state'} (kind=${kind || '-'})`);
             res.writeHead(302, { Location: back + '?login=denied' });
             return res.end();
         }
         let uid = null;
-        try { uid = await adminAuth.resolveOauthUser(code); } catch { uid = null; }
+        try { uid = await adminAuth.resolveOauthUser(code); }
+        catch (e) { console.warn('[OAUTH] denied: code exchange failed —', e && e.message); uid = null; }
         if (!uid) { res.writeHead(302, { Location: back + '?login=denied' }); return res.end(); }
 
         // Single sign-on across every cabinet: one successful login unlocks all
