@@ -280,7 +280,11 @@ const startBot = (token) => {
         const components = [];
         // Partner portal — a link button, always FIRST under the embed, opening
         // the partner cabinet (Discord-OAuth logs the user in automatically).
-        const PORTAL_URL = (process.env.PARTNER_PORTAL_URL || process.env.ADMIN_API_ORIGIN || 'https://vemoni.info').replace(/\/+$/, '') + '/partner/';
+        // ADMIN_API_ORIGIN may be a comma-separated list (apex + www) — take the
+        // first origin only, otherwise the Link button URL is invalid and Discord
+        // rejects the whole /bal reply ("Application did not respond").
+        const PORTAL_ORIGIN = (process.env.PARTNER_PORTAL_URL || process.env.ADMIN_API_ORIGIN || 'https://vemoni.info').split(',')[0].trim().replace(/\/+$/, '');
+        const PORTAL_URL = PORTAL_ORIGIN + '/partner/';
         components.push(new ActionRowBuilder().addComponents(
             new ButtonBuilder().setLabel('Partner portal').setStyle(ButtonStyle.Link).setURL(PORTAL_URL).setEmoji('🔗')
         ));

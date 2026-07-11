@@ -21,7 +21,10 @@ const ADMIN_SESSION_SECRET = (process.env.ADMIN_SESSION_SECRET || '').trim();
 const DISCORD_CLIENT_ID = (process.env.DISCORD_CLIENT_ID || '').trim();
 const DISCORD_CLIENT_SECRET = (process.env.DISCORD_CLIENT_SECRET || '').trim();
 const OAUTH_REDIRECT = (process.env.ADMIN_OAUTH_REDIRECT || '').trim();
-const ADMIN_ORIGIN = (process.env.ADMIN_API_ORIGIN || 'https://vemoni.info').trim().replace(/\/+$/, '');
+// ADMIN_API_ORIGIN may be a comma-separated list (apex + www) for CORS. For the
+// post-login redirect we need a single valid origin — take the first one, else
+// the OAuth callback's Location header is malformed and login bounces.
+const ADMIN_ORIGIN = (process.env.ADMIN_API_ORIGIN || 'https://vemoni.info').split(',')[0].trim().replace(/\/+$/, '');
 const OWNER_ID = (process.env.ADMIN_OWNER_ID || '833442190427684914').trim();
 const DEFAULT_ADMINS = ['604834976994689024'];
 if (!process.env.ADMIN_OWNER_ID) console.warn('[SECURITY] ADMIN_OWNER_ID is not set — falling back to a hardcoded owner id. Set ADMIN_OWNER_ID to your own Discord id.');
