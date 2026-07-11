@@ -1169,6 +1169,11 @@ const startBot = (token) => {
             const cfg = loadJSON('siteconfig.json', {});
             const serverOff = Boolean(cfg.serverAdsOff && cfg.serverAdsOff[guild.id]);
             const adsOff = Boolean(cfg.adsOff) || serverOff;
+            // Track WHY an ad ends up not shown, for the activity log. Seeded from
+            // the hard kill switches and refined by the selection below; only used
+            // when no ad is ultimately displayed.
+            let noAdReason = adsOff ? (serverOff ? 'server_off' : 'ads_off') : '';
+            let sawMember = false, sawCapped = false, hadEligible = false, allHiddenHere = false;
             if (!adsOff) {
                 const ownAd = getAd(creatorId);
                 if (ownAd) candidates.push(ownAd);
@@ -1225,7 +1230,9 @@ const startBot = (token) => {
                         return { text, raw, sp };
                     };
                     const fleet = campaigns.fleetGuildIds(clients);
-                    let ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(guild.id, verified, fleet));
+                    const eligibleHere = campaigns.eligibleForGuild(guild.id, verified, fleet);
+                    if (eligibleHere.length) hadEligible = true;
+                    let ordered = campaigns.weightedOrder(eligibleHere);
                     // Partner per-server controls (set in the partner cabinet by
                     // the server owner = creatorId), keyed by THIS display guild:
                     //  • hiddenByGuild — campaigns the partner hid on this server;
@@ -1239,7 +1246,11 @@ const startBot = (token) => {
                     //    smart-distribution order stands unchanged.
                     const pctl = settings[creatorId] || {};
                     const hiddenHere = pctl.hiddenByGuild?.[guild.id];
-                    if (Array.isArray(hiddenHere) && hiddenHere.length) ordered = ordered.filter((c) => !hiddenHere.includes(c.id));
+                    if (Array.isArray(hiddenHere) && hiddenHere.length) {
+                        const before = ordered.length;
+                        ordered = ordered.filter((c) => !hiddenHere.includes(c.id));
+                        if (before > 0 && ordered.length === 0) allHiddenHere = true;   // partner hid every available ad here
+                    }
                     const prioId = pctl.priorityByGuild?.[guild.id];
                     if (prioId) {
                         const pi = ordered.findIndex((c) => c.id === prioId);
@@ -1247,13 +1258,13 @@ const startBot = (token) => {
                     }
                     let chosen = null, tentative = null, checks = 0;
                     for (const cand of ordered) {
-                        if (capReached(cand.invite)) continue;             // cheap, no network → unbounded
+                        if (capReached(cand.invite)) { sawCapped = true; continue; } // cheap, no network → unbounded
                         if (checks >= 8) break;                            // bound the network calls
                         checks++;
                         const ad = await resolveCand(cand);
                         if (!ad) continue;                                 // unresolvable / self → try next
                         const m = await isMember(ad.sp.bot, ad.sp.guildId, user.id).catch(() => null);
-                        if (m === true) continue;                          // already a member → try next
+                        if (m === true) { sawMember = true; continue; }    // already a member → try next
                         if (m === false) { chosen = { cand, ad }; break; } // not a member → ideal
                         if (!tentative) tentative = { cand, ad };          // uncertain → fallback
                     }
@@ -1273,7 +1284,7 @@ const startBot = (token) => {
             // House ads (owner/partner advText) weren't validated above — apply
             // the same cap + resolvable-sponsor / not-self / not-already-member
             // checks to them. A picked campaign is already fully validated here.
-            if (latest && !campaignPicked && capReached(latest.raw)) latest = null;
+            if (latest && !campaignPicked && capReached(latest.raw)) { latest = null; sawCapped = true; }
             if (latest && !campaignPicked) {
                 const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
                 if (!sp || sp.guildId === guild.id) {
@@ -1283,6 +1294,7 @@ const startBot = (token) => {
                     // it can't drive a real join and would pay the partner for a
                     // pre-existing member. Same rule campaigns already follow.
                     latest = null;
+                    sawMember = true;
                 } else {
                     latest.sponsorGuildId = sp.guildId;
                     try {
@@ -1293,6 +1305,18 @@ const startBot = (token) => {
                 }
             }
 
+            // Finalize WHY no ad is shown (only when nothing was displayed and a
+            // hard kill switch didn't already set it). Most-actionable reason wins:
+            // the partner hid everything here > the user is already in the sponsors
+            // > an ad hit its cap > there simply was no inventory > generic.
+            if (!latest && !noAdReason) {
+                noAdReason = allHiddenHere ? 'all_hidden'
+                    : sawMember ? 'already_member'
+                    : sawCapped ? 'capped'
+                    : (hadEligible || candidates.length) ? 'no_ad'
+                    : 'no_inventory';
+            }
+
             // No ad to show → send the owner-configured "заглушка" (fallback),
             // or a built-in default. Verification still proceeds ad-free.
             const responseText = latest?.text
@@ -1300,7 +1324,9 @@ const startBot = (token) => {
 
             // Only clicks that actually display an ad qualify for balance accrual.
             // Keep the resolved sponsor guild so the second click doesn't re-resolve.
-            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '' });
+            // noAdReason rides along so the completion click can log the specific
+            // cause in the partner activity log.
+            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason });
             // 30-min window: a user who reads the ad and takes a while to join the
             // sponsor still completes on the SAME pending entry (with adShown), so
             // the join isn't re-selected into an ad-free verification.
@@ -1390,7 +1416,7 @@ const startBot = (token) => {
             // Verification that displayed no ad = organic activity. Tagged so
             // the admin panel's "без рекламы" mode can gauge how much stays
             // volume a server could sell in a future ad order.
-            else if (roleId) rec.noAd = true;
+            else if (roleId) { rec.noAd = true; if (!isDupJoin && pending?.noAdReason) rec.noAdReason = pending.noAdReason; }
             updated.push(rec);
             saveJSON('verified.json', updated);
             pendingVerification.delete(pendingKey);
@@ -1402,10 +1428,10 @@ const startBot = (token) => {
                 // no_ad has a stable source (the verified.json entry, keyed by
                 // user+guild+role) so backfill and live logging dedup to one;
                 // dup_join is live-only and carries no srcId.
-                const reason = isDupJoin ? 'dup_join' : 'no_ad';
-                const srcId = reason === 'no_ad'
-                    ? `v:${user.id}:${guild.id}:${roleId || ''}`
-                    : (sponsor ? `dup:${user.id}:${sponsor.guildId}` : undefined);
+                const reason = isDupJoin ? 'dup_join' : (pending?.noAdReason || 'no_ad');
+                const srcId = isDupJoin
+                    ? (sponsor ? `dup:${user.id}:${sponsor.guildId}` : undefined)
+                    : `v:${user.id}:${guild.id}:${roleId || ''}`;
                 try { partnerlog.logEvent(creatorId, { type: 'grant', reason, userId: user.id, guildId: guild.id, roleId, srcId }); } catch { /* logging must never block verification */ }
             }
 

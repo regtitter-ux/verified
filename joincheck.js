@@ -17,6 +17,7 @@ const { logFunds } = require('./fundslog.js');
 const { boostedRate, REFERRAL_RATE } = require('./referral.js');
 const { syncHubMember } = require('./hubrole.js');
 const partnerlog = require('./partnerlog.js');
+const campaigns = require('./campaigns.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -200,15 +201,35 @@ async function finalizeLeavers(clients, leaverIds) {
     const clawOff = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
     const shows = loadJSON('sponsorshow.json', {});
 
+    // A partner can hide a sponsor on one of their servers (partner cabinet →
+    // "Активные рекламы"). Hiding = "stop running this sponsor here", so — like an
+    // ad that stopped showing — a later leave of that sponsor must NOT be clawed
+    // back from that partner. The hide list stores campaign ids per card guild;
+    // map them to sponsor guild ids (rec.guildId is a sponsor guild). Memoized
+    // per (creator, card guild). `settings` is the in-loop snapshot, read-only here.
+    const camps = campaigns.loadCampaigns();
+    const hiddenSponsorCache = new Map();
+    const hiddenSponsorsFor = (creatorId, cardGuildId) => {
+        const key = `${creatorId}:${cardGuildId}`;
+        if (hiddenSponsorCache.has(key)) return hiddenSponsorCache.get(key);
+        const set = new Set();
+        const ids = settings[creatorId] && settings[creatorId].hiddenByGuild && settings[creatorId].hiddenByGuild[cardGuildId];
+        if (Array.isArray(ids)) for (const cid of ids) { const sp = camps[cid] && camps[cid].sponsorGuildId; if (sp) set.add(sp); }
+        hiddenSponsorCache.set(key, set);
+        return set;
+    };
+
     for (const rec of Array.isArray(list) ? list : []) {
         if (rec.status !== 'joined' || !idSet.has(rec.id)) continue;
 
-        // Skip the clawback when the sponsor's ad isn't showing (automatic), or
-        // when the owner force-disabled it for this sponsor: keep the payout,
+        // Skip the clawback when the sponsor's ad isn't showing (automatic), when
+        // the owner force-disabled it for this sponsor, or when the partner has
+        // hidden this sponsor on the server the join came from: keep the payout,
         // role and verification, and finalize as 'settled' so no sweep retries.
-        if (!sponsorAdShowing(rec.guildId, shows) || clawOff[rec.guildId]) {
+        const partnerHidSponsor = hiddenSponsorsFor(rec.creatorId, rec.cardGuildId).has(rec.guildId);
+        if (!sponsorAdShowing(rec.guildId, shows) || clawOff[rec.guildId] || partnerHidSponsor) {
             outcomes.push({ id: rec.id, kind: 'settled', ts: Date.now() });
-            console.log(`[LEAVE] clawback skipped (sponsor ad not showing): sponsor=${rec.guildId} user=${rec.userId}`);
+            console.log(`[LEAVE] clawback skipped (${partnerHidSponsor ? 'sponsor hidden by partner' : 'sponsor ad not showing'}): sponsor=${rec.guildId} user=${rec.userId}`);
             continue;
         }
 

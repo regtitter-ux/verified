@@ -93,7 +93,7 @@ function applyFilters(events, opts = {}) {
 // deduped by event key, so a re-run can't double up.
 // The reasons the source rebuild owns (derivable from the ledger). Everything
 // else in the log — dup_join, already_verified — is live-only and is preserved.
-const SOURCE_REASONS = new Set(['paid', 'no_ad', 'left']);
+const SOURCE_REASONS = new Set(['paid', 'no_ad', 'left', 'ads_off', 'server_off', 'all_hidden', 'already_member', 'capped', 'no_inventory']);
 
 function backfillIfNeeded() {
     try {
@@ -118,7 +118,7 @@ function backfillIfNeeded() {
         }
         for (const u of (Array.isArray(verified) ? verified : [])) {
             if (!u || !u.creatorId || !u.noAd) continue; // paid grants come from joinlinks
-            add(u.creatorId, { ts: Number(u.timestamp) || 0, type: 'grant', reason: 'no_ad', amount: 0, userId: u.id || null, guildId: u.guildId || null, roleId: u.roleId || null, srcId: `v:${u.id}:${u.guildId}:${u.roleId || ''}` });
+            add(u.creatorId, { ts: Number(u.timestamp) || 0, type: 'grant', reason: u.noAdReason || 'no_ad', amount: 0, userId: u.id || null, guildId: u.guildId || null, roleId: u.roleId || null, srcId: `v:${u.id}:${u.guildId}:${u.roleId || ''}` });
         }
 
         // Rebuild each partner's log: canonical source-derived events (srcId-keyed)
