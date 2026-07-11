@@ -382,7 +382,7 @@ function bearerToken(req) {
 }
 function buyerSessionOf(req) {
     return adminAuth.verifyBuyerSession(bearerToken(req))
-        || buyerSessionOf(req);
+        || adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
 }
 
 // Look up a guild name across every fleet bot's cache. Any bot that shares
