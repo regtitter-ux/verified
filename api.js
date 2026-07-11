@@ -1643,10 +1643,12 @@ function getKey(req) {
 async function dmLoginCode(clients, userId, code, botId) {
     const list = Array.isArray(clients) ? clients : [];
     const ordered = botId ? [...list.filter((c) => c.user?.id === botId), ...list.filter((c) => c.user?.id !== botId)] : list;
-    const msg = { content:
-        `🔐 **Код для входа на Vemoni:** \`${code}\`\n` +
-        `Действует 10 минут. Введите его на сайте, чтобы войти.\n` +
-        `Если вы это не запрашивали — просто проигнорируйте это сообщение.` };
+    // Default English text + a "Translation" button that re-renders the message
+    // in the clicking user's Discord client locale (handled in index.js).
+    const msg = {
+        content: logincodes.renderMessage(code, 'en'),
+        components: [{ type: 1, components: [{ type: 2, style: 2, label: '🌐 Translation', custom_id: `login_code_tr:${code}` }] }]
+    };
     for (const bot of ordered) {
         try { const u = await bot.users.fetch(userId); await u.send(msg); return true; } catch { /* try the next bot */ }
     }

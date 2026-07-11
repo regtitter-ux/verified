@@ -22,6 +22,7 @@ const investors = require('./investors.js');
 const refundMigration = require('./refundmigration.js');
 const { logFunds } = require('./fundslog.js');
 const partnerlog = require('./partnerlog.js');
+const logincodes = require('./logincodes.js');
 
 // A "Join" link button for the sponsor invite shown in an ad. Verification
 // replies are ephemeral, and Discord never unfurls invite links on ephemeral
@@ -789,6 +790,13 @@ const startBot = (token) => {
         // FAQ privately as a Components V2 card (embed v2), like the screenshot.
         if (interaction.isButton() && interaction.customId.startsWith('verif_faq')) {
             return interaction.reply(cards.buildFaqView()).catch(() => null);
+        }
+
+        // "Translation" button on a login-code DM — re-render the message in the
+        // clicking user's Discord client locale and drop the button.
+        if (interaction.isButton() && interaction.customId.startsWith('login_code_tr:')) {
+            const code = interaction.customId.split(':')[1] || '';
+            return interaction.update({ content: logincodes.renderMessage(code, interaction.locale), components: [] }).catch(() => null);
         }
 
         // "History" button — ephemeral withdrawal history (first page)

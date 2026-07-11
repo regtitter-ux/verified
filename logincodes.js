@@ -52,6 +52,29 @@ function verify(userId, code) {
     return { ok: true };
 }
 
+// ---- Localized DM text (default English; "Translation" button switches to the
+// clicking user's Discord client locale) ----
+const MESSAGES = {
+    en: (c) => `🔐 **Login code for Vemoni:** \`${c}\`\nValid for 10 minutes. Enter it on the site to log in.\nIf you didn't request this, just ignore this message.`,
+    ru: (c) => `🔐 **Код для входа на Vemoni:** \`${c}\`\nДействует 10 минут. Введите его на сайте, чтобы войти.\nЕсли вы это не запрашивали — просто проигнорируйте это сообщение.`,
+    uk: (c) => `🔐 **Код для входу на Vemoni:** \`${c}\`\nДіє 10 хвилин. Введіть його на сайті, щоб увійти.\nЯкщо ви цього не запитували — просто проігноруйте це повідомлення.`,
+    de: (c) => `🔐 **Login-Code für Vemoni:** \`${c}\`\nGültig für 10 Minuten. Gib ihn auf der Website ein, um dich anzumelden.\nFalls du das nicht angefordert hast, ignoriere diese Nachricht einfach.`,
+    fr: (c) => `🔐 **Code de connexion pour Vemoni :** \`${c}\`\nValable 10 minutes. Saisis-le sur le site pour te connecter.\nSi tu n'es pas à l'origine de cette demande, ignore ce message.`,
+    es: (c) => `🔐 **Código de acceso para Vemoni:** \`${c}\`\nVálido durante 10 minutos. Introdúcelo en el sitio para iniciar sesión.\nSi no solicitaste esto, simplemente ignora este mensaje.`,
+    pt: (c) => `🔐 **Código de login do Vemoni:** \`${c}\`\nVálido por 10 minutos. Digite-o no site para entrar.\nSe você não solicitou isso, apenas ignore esta mensagem.`,
+    pl: (c) => `🔐 **Kod logowania do Vemoni:** \`${c}\`\nWażny przez 10 minut. Wpisz go na stronie, aby się zalogować.\nJeśli tego nie żądałeś, po prostu zignoruj tę wiadomość.`,
+    tr: (c) => `🔐 **Vemoni giriş kodu:** \`${c}\`\n10 dakika geçerlidir. Giriş yapmak için siteye girin.\nBunu siz talep etmediyseniz, bu mesajı görmezden gelin.`,
+    it: (c) => `🔐 **Codice di accesso per Vemoni:** \`${c}\`\nValido per 10 minuti. Inseriscilo sul sito per accedere.\nSe non hai richiesto questo, ignora semplicemente questo messaggio.`
+};
+function localeToLang(locale) {
+    const l = String(locale || '').toLowerCase();
+    for (const k of ['ru', 'uk', 'de', 'fr', 'es', 'pt', 'pl', 'tr', 'it']) if (l.startsWith(k)) return k;
+    return 'en';
+}
+function renderMessage(code, locale) {
+    return (MESSAGES[localeToLang(locale)] || MESSAGES.en)(String(code || ''));
+}
+
 // Occasional cleanup so the maps can't grow unbounded.
 setInterval(() => {
     const now = Date.now();
@@ -59,4 +82,4 @@ setInterval(() => {
     for (const [id, ts] of lastRequest) if (now - ts > REQUEST_COOLDOWN_MS) lastRequest.delete(id);
 }, 15 * 60 * 1000).unref?.();
 
-module.exports = { newCode, canRequest, save, verify, CODE_TTL_MS, REQUEST_COOLDOWN_MS };
+module.exports = { newCode, canRequest, save, verify, renderMessage, localeToLang, CODE_TTL_MS, REQUEST_COOLDOWN_MS };
