@@ -2139,6 +2139,72 @@ async function handlePartner(req, res, path, clients, config) {
         return send(res, 200, { servers: out }, cors);
     }
 
+    // Active ads currently AVAILABLE to each of the partner's servers (i.e. not
+    // hidden by the buyer/admin for that server), per server, plus which one the
+    // partner has pinned as priority. "Available" = campaigns.eligibleForGuild:
+    // active, not paused, not self-targeted, not opted-out of this guild, bot on
+    // the sponsor, remaining > 0. The switcher on the frontend flips between the
+    // partner's servers using this per-server list.
+    if (path === '/partner/ads' && req.method === 'GET') {
+        const settings = loadJSON('settings.json');
+        const priority = settings[userId]?.priorityCampaign || null;
+        const verified = loadJSON('verified.json', []);
+        const fleet = campaigns.fleetGuildIds(clients);
+        // The partner's own servers: distinct guildIds from their active cards.
+        const mineCards = cards.loadCards().filter((c) => c.creatorId === userId && !c.deletedAt);
+        const guildIds = [...new Set(mineCards.map((c) => c.guildId).filter((g) => /^\d{17,20}$/.test(String(g || ''))))];
+        let priorityValid = false;
+        const servers = guildIds.map((gid) => {
+            const ads = campaigns.eligibleForGuild(gid, verified, fleet)
+                .map((e) => {
+                    const isPriority = e.id === priority;
+                    if (isPriority) priorityValid = true;
+                    return {
+                        campaignId: e.id,
+                        sponsorGuildId: e.sponsorGuildId,
+                        sponsorName: guildNameOf(clients, e.sponsorGuildId),
+                        sponsorIcon: guildIconOf(clients, e.sponsorGuildId),
+                        remaining: e.remaining,
+                        isPriority
+                    };
+                })
+                .sort((a, b) => b.remaining - a.remaining);
+            return { guildId: gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), ads };
+        });
+        // Lazily drop a stale priority (campaign finished / hidden everywhere) so
+        // the UI and the hot path agree; synchronous load→save, no lost update.
+        if (priority && !priorityValid && settings[userId]) {
+            delete settings[userId].priorityCampaign;
+            saveJSON('settings.json', settings);
+        }
+        return send(res, 200, { priorityCampaign: priorityValid ? priority : null, servers }, cors);
+    }
+
+    // Set (or clear) the partner's single priority campaign. Body: { campaignId }
+    // — empty/absent clears it. A campaign may be pinned only if it is currently
+    // eligible on at least one of the partner's servers.
+    if (path === '/partner/priority' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const cid = String(body?.campaignId || '').trim();
+        const settings = loadJSON('settings.json');
+        if (!settings[userId]) settings[userId] = {};
+        if (!cid) {
+            delete settings[userId].priorityCampaign;
+            saveJSON('settings.json', settings);
+            return send(res, 200, { ok: true, priorityCampaign: null }, cors);
+        }
+        const verified = loadJSON('verified.json', []);
+        const fleet = campaigns.fleetGuildIds(clients);
+        const mineCards = cards.loadCards().filter((c) => c.creatorId === userId && !c.deletedAt);
+        const guildIds = [...new Set(mineCards.map((c) => c.guildId).filter((g) => /^\d{17,20}$/.test(String(g || ''))))];
+        const available = guildIds.some((gid) => campaigns.eligibleForGuild(gid, verified, fleet).some((e) => e.id === cid));
+        if (!available) return send(res, 400, { error: 'not-available' }, cors);
+        settings[userId].priorityCampaign = cid;
+        saveJSON('settings.json', settings);
+        return send(res, 200, { ok: true, priorityCampaign: cid }, cors);
+    }
+
     // The partner's own active verification cards — same rich stats as the
     // admin "Экстренно" list, scoped to cards this partner owns.
     if (path === '/partner/cards' && req.method === 'GET') {

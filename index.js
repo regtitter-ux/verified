@@ -1226,6 +1226,20 @@ const startBot = (token) => {
                     };
                     const fleet = campaigns.fleetGuildIds(clients);
                     const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(guild.id, verified, fleet));
+                    // Partner priority: the server owner (creatorId) may pin ONE
+                    // campaign in their cabinet to always show first on their
+                    // server(s). If that campaign is still eligible here, move it
+                    // to the front of the weighted order. It's only a preference —
+                    // the loop below still skips it if it's capped, self-target,
+                    // unresolvable, or the user already joined its sponsor, so a
+                    // stale/finished priority never suppresses other ads. When no
+                    // priority is set (or it's no longer eligible), the normal
+                    // weighted smart-distribution order stands unchanged.
+                    const prioId = settings[creatorId]?.priorityCampaign;
+                    if (prioId) {
+                        const pi = ordered.findIndex((c) => c.id === prioId);
+                        if (pi > 0) { const [pc] = ordered.splice(pi, 1); ordered.unshift(pc); }
+                    }
                     let chosen = null, tentative = null, checks = 0;
                     for (const cand of ordered) {
                         if (capReached(cand.invite)) continue;             // cheap, no network → unbounded
