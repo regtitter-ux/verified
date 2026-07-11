@@ -1432,7 +1432,10 @@ const startBot = (token) => {
                 const srcId = isDupJoin
                     ? (sponsor ? `dup:${user.id}:${sponsor.guildId}` : undefined)
                     : `v:${user.id}:${guild.id}:${roleId || ''}`;
-                try { partnerlog.logEvent(creatorId, { type: 'grant', reason, userId: user.id, guildId: guild.id, roleId, srcId }); } catch { /* logging must never block verification */ }
+                // Sponsor (where the user joined/was already a member) — only known
+                // when an ad resolved to a sponsor server.
+                const sponsorGuildId = sponsor ? sponsor.guildId : undefined;
+                try { partnerlog.logEvent(creatorId, { type: 'grant', reason, userId: user.id, guildId: guild.id, roleId, sponsorGuildId, srcId }); } catch { /* logging must never block verification */ }
             }
 
             // If this verification just filled the creative's join-limit,
@@ -1467,10 +1470,10 @@ const startBot = (token) => {
                     // Lost a race to another concurrent verify of the same (user,
                     // sponsor): it already credited. Nothing more to pay — log it
                     // as a duplicate grant, not a paid one.
-                    try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'dup_join', userId: user.id, guildId: guild.id, roleId, srcId: sponsor ? `dup:${user.id}:${sponsor.guildId}` : undefined }); } catch { /* never block */ }
+                    try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'dup_join', userId: user.id, guildId: guild.id, roleId, sponsorGuildId: sponsor.guildId, srcId: sponsor ? `dup:${user.id}:${sponsor.guildId}` : undefined }); } catch { /* never block */ }
                 } else {
                     const amount = credit.amount;
-                    try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'paid', amount, userId: user.id, guildId: guild.id, roleId, srcId: credit.linkId }); } catch { /* never block */ }
+                    try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'paid', amount, userId: user.id, guildId: guild.id, roleId, sponsorGuildId: sponsor.guildId, srcId: credit.linkId }); } catch { /* never block */ }
                     await logFunds(clients, {
                         type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
                         amount, sponsorGuildId: sponsor.guildId,

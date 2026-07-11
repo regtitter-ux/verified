@@ -43,6 +43,7 @@ function logEvent(creatorId, entry) {
         amount: Number(entry.amount) || 0,
         userId: entry.userId ? String(entry.userId) : null,
         guildId: entry.guildId ? String(entry.guildId) : null,
+        sponsorGuildId: entry.sponsorGuildId ? String(entry.sponsorGuildId) : null,
         roleId: entry.roleId ? String(entry.roleId) : null,
         srcId: entry.srcId ? String(entry.srcId) : null
     };
@@ -98,7 +99,9 @@ const SOURCE_REASONS = new Set(['paid', 'no_ad', 'left', 'ads_off', 'server_off'
 function backfillIfNeeded() {
     try {
         const meta = loadJSON('partnerlogmeta.json', {});
-        if (meta && meta.rebuiltV2) return;
+        // Bumped V2→V3 to re-derive once and enrich historical paid/left events
+        // with sponsorGuildId (where the member joined/left), now shown in the log.
+        if (meta && meta.rebuiltV3) return;
 
         const joinlinks = loadJSON('joinlinks.json', []);
         const verified = loadJSON('verified.json', []);
@@ -108,7 +111,7 @@ function backfillIfNeeded() {
         for (const r of (Array.isArray(joinlinks) ? joinlinks : [])) {
             if (!r || !r.creatorId || !r.id) continue;
             const ts = Number(r.ts) || 0;
-            const base = { userId: r.userId || null, guildId: r.cardGuildId || null, roleId: r.roleId || null };
+            const base = { userId: r.userId || null, guildId: r.cardGuildId || null, sponsorGuildId: r.guildId || null, roleId: r.roleId || null };
             add(r.creatorId, { ts, type: 'grant', reason: 'paid', amount: Number(r.amount) || 0, srcId: String(r.id), ...base });
             if (r.status === 'left') {
                 const lt = Number(r.leftAt) || ts;
@@ -135,7 +138,7 @@ function backfillIfNeeded() {
             added += (src[cid] || []).length;
         }
         save(all);
-        saveJSON('partnerlogmeta.json', { ...(meta || {}), backfilled: true, rebuiltV2: true, at: Date.now(), added });
+        saveJSON('partnerlogmeta.json', { ...(meta || {}), backfilled: true, rebuiltV2: true, rebuiltV3: true, at: Date.now(), added });
         console.log(`[PARTNERLOG] rebuilt from source: ${added} derived event(s) across ${Object.keys(src).length} partner(s); duplicates removed`);
     } catch (e) {
         console.error('[PARTNERLOG] rebuild error:', e.message);

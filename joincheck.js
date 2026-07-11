@@ -240,7 +240,7 @@ async function finalizeLeavers(clients, leaverIds) {
         // across multiple records of the same creator); the actual debit is
         // applied to a fresh load in the commit block.
         const before = settings[rec.creatorId] ? (Number(settings[rec.creatorId].balance) || 0) : 0;
-        const outcome = { id: rec.id, kind: 'left', ts: Date.now(), userId: rec.userId, cardGuildId: rec.cardGuildId, roleId: rec.roleId, partnerId: rec.creatorId };
+        const outcome = { id: rec.id, kind: 'left', ts: Date.now(), userId: rec.userId, cardGuildId: rec.cardGuildId, sponsorGuildId: rec.guildId, roleId: rec.roleId, partnerId: rec.creatorId };
         if (settings[rec.creatorId]) {
             settings[rec.creatorId].balance = round2(before - rec.amount);
             outcome.creatorId = rec.creatorId;
@@ -317,7 +317,7 @@ async function finalizeLeavers(clients, leaverIds) {
                 freshSettings[o.creatorId].balance = round2((Number(freshSettings[o.creatorId].balance) || 0) - o.amt);
                 settingsDirty = true;
                 // Partner activity log — the clawback debit we actually applied.
-                try { partnerlog.logEvent(o.partnerId, { type: 'debit', amount: o.amt, reason: 'left', userId: o.userId, guildId: o.cardGuildId, roleId: o.roleId, srcId: o.id }); } catch { /* never break the commit */ }
+                try { partnerlog.logEvent(o.partnerId, { type: 'debit', amount: o.amt, reason: 'left', userId: o.userId, guildId: o.cardGuildId, sponsorGuildId: o.sponsorGuildId, roleId: o.roleId, srcId: o.id }); } catch { /* never break the commit */ }
             }
             if (o.referrerId && freshSettings[o.referrerId]) {
                 freshSettings[o.referrerId].balance = round2((Number(freshSettings[o.referrerId].balance) || 0) - o.refClaw);
@@ -325,7 +325,7 @@ async function finalizeLeavers(clients, leaverIds) {
                 settingsDirty = true;
             }
             // Partner activity log — the verification removal (снятие верифки).
-            if (o.unverified) { try { partnerlog.logEvent(o.partnerId, { type: 'unverify', reason: 'left', userId: o.userId, guildId: o.cardGuildId, roleId: o.roleId, srcId: o.id }); } catch { /* never break the commit */ } }
+            if (o.unverified) { try { partnerlog.logEvent(o.partnerId, { type: 'unverify', reason: 'left', userId: o.userId, guildId: o.cardGuildId, sponsorGuildId: o.sponsorGuildId, roleId: o.roleId, srcId: o.id }); } catch { /* never break the commit */ } }
         }
         if (settingsDirty) saveJSON('settings.json', freshSettings);
         if (listDirty) saveJSON('joinlinks.json', fl);

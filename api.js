@@ -548,6 +548,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const servers = {}, users = {}, partners = {};
         for (const e of events) {
             if (e.guildId && !(e.guildId in servers)) servers[e.guildId] = guildNameOf(clients, e.guildId);
+            if (e.sponsorGuildId && !(e.sponsorGuildId in servers)) servers[e.sponsorGuildId] = guildNameOf(clients, e.sponsorGuildId);
             if (e.userId && !(e.userId in users)) users[e.userId] = userNameOf(clients, e.userId);
             if (e.creatorId && !(e.creatorId in partners)) partners[e.creatorId] = userNameOf(clients, e.creatorId);
         }
@@ -2017,9 +2018,13 @@ async function handlePartner(req, res, path, clients, config) {
             sort: q.get('sort') || null,
             limit: Math.min(500, Number(q.get('limit')) || 300)
         });
-        const servers = {};
-        for (const e of events) if (e.guildId && !(e.guildId in servers)) servers[e.guildId] = guildNameOf(clients, e.guildId);
-        return send(res, 200, { events, servers }, cors);
+        const servers = {}, users = {};
+        for (const e of events) {
+            if (e.guildId && !(e.guildId in servers)) servers[e.guildId] = guildNameOf(clients, e.guildId);
+            if (e.sponsorGuildId && !(e.sponsorGuildId in servers)) servers[e.sponsorGuildId] = guildNameOf(clients, e.sponsorGuildId);
+            if (e.userId && !(e.userId in users)) users[e.userId] = userNameOf(clients, e.userId);
+        }
+        return send(res, 200, { events, servers, users }, cors);
     }
 
     if (path === '/partner/me' && req.method === 'GET') {
