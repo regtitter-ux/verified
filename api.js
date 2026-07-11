@@ -29,9 +29,15 @@ const sales = require('./sales.js');
 const partnerlog = require('./partnerlog.js');
 const logincodes = require('./logincodes.js');
 
-// Admin panel served from a separate origin (the vemoni.info static site).
-// Only exact-match origins get CORS + credentialed cookies allowed.
-const ADMIN_ORIGIN = (process.env.ADMIN_API_ORIGIN || 'https://vemoni.info').trim();
+// The site can be reached from more than one origin (e.g. the apex AND the www
+// host). ADMIN_API_ORIGIN may be a comma-separated list; any of them gets CORS +
+// credentialed cookies. A user on a non-whitelisted host (say www when only the
+// apex is listed) has EVERY credentialed API call blocked → they bounce back to
+// the login screen even after a valid login.
+const ADMIN_ORIGINS = (process.env.ADMIN_API_ORIGIN || 'https://vemoni.info,https://www.vemoni.info')
+    .split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean);
+const ADMIN_ORIGIN = ADMIN_ORIGINS[0];
+const isAllowedOrigin = (o) => ADMIN_ORIGINS.includes(String(o || '').replace(/\/+$/, ''));
 
 // Optional allowlist of sponsor guild IDs that /api/join-check will pay for.
 // When set, a partner can only be credited for joins to these servers — a
@@ -352,7 +358,12 @@ function send(res, status, obj, extraHeaders = {}) {
 // which means no CORS headers → the browser blocks the request.
 function corsHeaders(req) {
     const origin = req.headers.origin || '';
-    if (origin !== ADMIN_ORIGIN) return {};
+    if (!isAllowedOrigin(origin)) {
+        // A real browser hitting from a host we don't whitelist → its credentialed
+        // calls are blocked and the user bounces. Surface it so it's diagnosable.
+        if (origin) console.warn('[CORS] blocked credentialed origin:', origin, '(allowed:', ADMIN_ORIGINS.join(', ') + ')');
+        return {};
+    }
     return {
         'Access-Control-Allow-Origin': origin,
         'Access-Control-Allow-Credentials': 'true',
@@ -1680,10 +1691,13 @@ async function handleLoginCode(req, res, path, clients, cors) {
         const code = String(body?.code || '').trim();
         if (!/^\d{17,20}$/.test(userId)) { send(res, 400, { error: 'bad-id' }, cors); return true; }
         const r = logincodes.verify(userId, code);
-        if (!r.ok) { send(res, 400, { error: r.reason, attemptsLeft: r.attemptsLeft }, cors); return true; }
+        if (!r.ok) { console.warn(`[LOGIN-CODE] verify failed for ${userId}: ${r.reason}`); send(res, 400, { error: r.reason, attemptsLeft: r.attemptsLeft }, cors); return true; }
         const role = adminAuth.roleOf(userId);
         const cookies = [adminAuth.buyerCookieHeader(adminAuth.issueBuyerSession(userId))];
         if (role) cookies.push(adminAuth.sessionCookieHeader(adminAuth.issueSession(userId, role)));
+        // If CORS didn't allow this origin, `cors` is empty → the browser will
+        // DROP these Set-Cookie headers (no ACA-Credentials), and the user bounces.
+        console.log(`[LOGIN-CODE] verified ${userId} (role=${role || 'none'}), cookies issued; origin=${req.headers.origin || '-'}${Object.keys(cors).length ? '' : ' [CORS BLOCKED → cookie will be dropped]'}`);
         send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': cookies });
         return true;
     }
@@ -2323,7 +2337,7 @@ function startApiServer(clients, config) {
             const mutating = req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE' || req.method === 'PATCH';
             if (isCabinet && mutating) {
                 const origin = req.headers.origin || '';
-                if (origin && origin !== ADMIN_ORIGIN) return send(res, 403, { error: 'bad origin' });
+                if (origin && !isAllowedOrigin(origin)) return send(res, 403, { error: 'bad origin' });
             }
 
             // Public: docs + health

@@ -212,11 +212,19 @@ function readCookie(cookieHeader, name) {
 }
 function readSessionCookie(cookieHeader) { return readCookie(cookieHeader, SESSION_COOKIE); }
 
+// Optional cookie Domain — set COOKIE_DOMAIN=.vemoni.info ONLY when the API is
+// served from a vemoni.info subdomain (e.g. api.vemoni.info), which makes the
+// session cookie FIRST-PARTY and thus immune to third-party-cookie blocking
+// (Safari ITP, "block third-party cookies", privacy extensions). Leave it unset
+// when the API is on a different site (e.g. *.railway.app) — a mismatched Domain
+// would make every browser reject the cookie.
+const COOKIE_DOMAIN = (process.env.COOKIE_DOMAIN || '').trim();
 function cookieHeaderFor(name, token, { clear = false } = {}) {
     const parts = [
         `${name}=${clear ? '' : encodeURIComponent(token)}`,
         'Path=/', 'HttpOnly', 'Secure', 'SameSite=None'
     ];
+    if (COOKIE_DOMAIN) parts.push(`Domain=${COOKIE_DOMAIN}`);
     if (clear) parts.push('Max-Age=0');
     else parts.push(`Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
     return parts.join('; ');
