@@ -368,9 +368,21 @@ function corsHeaders(req) {
         'Access-Control-Allow-Origin': origin,
         'Access-Control-Allow-Credentials': 'true',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Vary': 'Origin'
     };
+}
+
+// Buyer session from EITHER the Authorization: Bearer token (localStorage-based,
+// works when third-party cookies are blocked) OR the cookie. The token and the
+// cookie carry the same signed session, so both paths are equivalent.
+function bearerToken(req) {
+    const h = req.headers.authorization || '';
+    return h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+}
+function buyerSessionOf(req) {
+    return adminAuth.verifyBuyerSession(bearerToken(req))
+        || buyerSessionOf(req);
 }
 
 // Look up a guild name across every fleet bot's cache. Any bot that shares
@@ -481,9 +493,13 @@ async function handleAdmin(req, res, path, clients, config) {
             res.writeHead(302, { Location: back + '?login=denied', 'Set-Cookie': adminAuth.buyerCookieHeader(adminAuth.issueBuyerSession(uid)) });
             return res.end();
         }
-        const cookies = [adminAuth.buyerCookieHeader(adminAuth.issueBuyerSession(uid))];
+        const buyerToken = adminAuth.issueBuyerSession(uid);
+        const cookies = [adminAuth.buyerCookieHeader(buyerToken)];
         if (role) cookies.push(adminAuth.sessionCookieHeader(adminAuth.issueSession(uid, role)));
-        res.writeHead(302, { Location: back, 'Set-Cookie': cookies });
+        // Also hand the token to the frontend via the URL fragment (never sent to
+        // servers, stripped immediately) so login survives third-party-cookie
+        // blocking: the page stores it and sends it as a Bearer header.
+        res.writeHead(302, { Location: back + '#t=' + encodeURIComponent(buyerToken), 'Set-Cookie': cookies });
         return res.end();
     }
     if (path === '/admin/logout' && req.method === 'POST') {
@@ -1693,12 +1709,13 @@ async function handleLoginCode(req, res, path, clients, cors) {
         const r = logincodes.verify(userId, code);
         if (!r.ok) { console.warn(`[LOGIN-CODE] verify failed for ${userId}: ${r.reason}`); send(res, 400, { error: r.reason, attemptsLeft: r.attemptsLeft }, cors); return true; }
         const role = adminAuth.roleOf(userId);
-        const cookies = [adminAuth.buyerCookieHeader(adminAuth.issueBuyerSession(userId))];
+        const token = adminAuth.issueBuyerSession(userId);
+        const cookies = [adminAuth.buyerCookieHeader(token)];
         if (role) cookies.push(adminAuth.sessionCookieHeader(adminAuth.issueSession(userId, role)));
-        // If CORS didn't allow this origin, `cors` is empty → the browser will
-        // DROP these Set-Cookie headers (no ACA-Credentials), and the user bounces.
-        console.log(`[LOGIN-CODE] verified ${userId} (role=${role || 'none'}), cookies issued; origin=${req.headers.origin || '-'}${Object.keys(cors).length ? '' : ' [CORS BLOCKED → cookie will be dropped]'}`);
-        send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': cookies });
+        console.log(`[LOGIN-CODE] verified ${userId} (role=${role || 'none'}); origin=${req.headers.origin || '-'}`);
+        // Return the token too: the frontend stores it and sends it as a Bearer
+        // header, so login works even when the (third-party) cookie is blocked.
+        send(res, 200, { ok: true, token }, { ...cors, 'Set-Cookie': cookies });
         return true;
     }
     return false;
@@ -1723,14 +1740,14 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': [adminAuth.buyerCookieHeader('', { clear: true }), adminAuth.sessionCookieHeader('', { clear: true })] });
     }
     if (path === '/order/whoami' && req.method === 'GET') {
-        const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+        const sess = buyerSessionOf(req);
         return send(res, 200, sess
             ? { authed: true, userId: sess.userId, isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }
             : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
-    const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+    const sess = buyerSessionOf(req);
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
     const buyerId = sess.userId;
 
@@ -1974,12 +1991,12 @@ async function handlePartner(req, res, path, clients, config) {
         return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': [adminAuth.buyerCookieHeader('', { clear: true }), adminAuth.sessionCookieHeader('', { clear: true })] });
     }
     if (path === '/partner/whoami' && req.method === 'GET') {
-        const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+        const sess = buyerSessionOf(req);
         return send(res, 200, sess ? { authed: true, userId: sess.userId, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
-    const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+    const sess = buyerSessionOf(req);
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
     const userId = sess.userId;
 
@@ -2199,12 +2216,12 @@ async function handleInvestor(req, res, path, clients, config) {
         return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': [adminAuth.buyerCookieHeader('', { clear: true }), adminAuth.sessionCookieHeader('', { clear: true })] });
     }
     if (path === '/investor/whoami' && req.method === 'GET') {
-        const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+        const sess = buyerSessionOf(req);
         return send(res, 200, sess ? { authed: true, userId: sess.userId, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
-    const sess = adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+    const sess = buyerSessionOf(req);
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
     const userId = sess.userId;
     const verified = () => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; };
