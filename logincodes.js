@@ -8,7 +8,11 @@
 const crypto = require('crypto');
 
 const CODE_TTL_MS = 10 * 60 * 1000;        // code lives 10 minutes
-const REQUEST_COOLDOWN_MS = 60 * 60 * 1000; // one new code per hour
+// Cooldown between code requests, in minutes, via LOGIN_CODE_COOLDOWN_MIN
+// (default 60). 0 = no cooldown.
+const _cd = process.env.LOGIN_CODE_COOLDOWN_MIN;
+const COOLDOWN_MIN = _cd !== undefined && _cd !== '' && Number.isFinite(Number(_cd)) ? Math.max(0, Number(_cd)) : 60;
+const REQUEST_COOLDOWN_MS = COOLDOWN_MIN * 60 * 1000;
 const MAX_ATTEMPTS = 5;                      // wrong-code tries before the code dies
 
 const store = new Map();        // userId -> { code, expires, attempts }
@@ -21,6 +25,7 @@ function newCode() {
 // Cooldown check — call BEFORE generating/DMing so a rejected request doesn't
 // burn the hour.
 function canRequest(userId) {
+    if (REQUEST_COOLDOWN_MS <= 0) return { ok: true }; // cooldown disabled
     const last = lastRequest.get(String(userId)) || 0;
     const wait = REQUEST_COOLDOWN_MS - (Date.now() - last);
     return wait <= 0 ? { ok: true } : { ok: false, retryAfterMs: wait };
