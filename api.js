@@ -1788,10 +1788,11 @@ async function handleBuyer(req, res, path, clients, config) {
     // Wallet: balance + recent top-ups (reconciles pending top-ups first).
     if (path === '/order/wallet' && req.method === 'GET') {
         await wallet.reconcileTopups(buyerId, campaigns.isInvoicePaid).catch(() => null);
+        const minTopup = managers.isManager(buyerId) ? managers.MIN_TOPUP : wallet.MIN_TOPUP;
         return send(res, 200, {
             balance: wallet.balanceOf(buyerId),
             topups: wallet.recentTopups(buyerId),
-            minTopup: wallet.MIN_TOPUP,
+            minTopup,
             cryptoEnabled: cryptopay.enabled()
         }, cors);
     }
@@ -1801,7 +1802,8 @@ async function handleBuyer(req, res, path, clients, config) {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const amount = +(Number(body?.amount) || 0).toFixed(2);
-        if (!(amount >= wallet.MIN_TOPUP)) return send(res, 400, { error: 'min-topup' }, cors);
+        const minTopup = managers.isManager(buyerId) ? managers.MIN_TOPUP : wallet.MIN_TOPUP;
+        if (!(amount >= minTopup)) return send(res, 400, { error: 'min-topup' }, cors);
         let invoice = null;
         try { invoice = await cryptopay.createUsdtInvoice(amount.toFixed(2), { description: `Пополнение баланса Vemoni на $${amount.toFixed(2)}`.slice(0, 1024) }); }
         catch (e) { return send(res, 502, { error: 'invoice-failed' }, cors); }

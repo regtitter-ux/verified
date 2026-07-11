@@ -10,6 +10,9 @@
 const { loadJSON, saveJSON } = require('./database.js');
 
 const PRICE_PER_100 = Number(process.env.MANAGER_PRICE) || 9;          // $ per 100 joins for managers
+// Managers top up in whole 100-join batches, so their wallet minimum matches the
+// per-100 price ($9) instead of the public $5. Override with MANAGER_MIN_TOPUP.
+const MIN_TOPUP = Number(process.env.MANAGER_MIN_TOPUP) || 9;          // $ minimum wallet top-up for managers
 // Manager margin as a fraction of retail = (retail − manager) / retail. Only
 // used to describe the discount on the order page; no money is paid out.
 const COMMISSION_RATE = Number.isFinite(Number(process.env.MANAGER_COMMISSION_RATE))
@@ -50,4 +53,4 @@ function joinEconomics(campaign, publicRevenuePerJoin) {
     return { revenue: round4(per100 / 100), managerId: String(campaign.managerId) };
 }
 
-module.exports = { PRICE_PER_100, COMMISSION_RATE, loadManagers, saveManagers, isManager, priceForBuyer, joinEconomics, round2, round4 };
+module.exports = { PRICE_PER_100, MIN_TOPUP, COMMISSION_RATE, loadManagers, saveManagers, isManager, priceForBuyer, joinEconomics, round2, round4 };
