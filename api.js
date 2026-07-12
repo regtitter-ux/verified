@@ -453,6 +453,25 @@ function userHandleOf(clients, uid) {
 function userMiniOf(clients, uid) {
     return { userId: String(uid), name: userNameOf(clients, uid), username: userHandleOf(clients, uid), avatar: userAvatarOf(clients, uid) };
 }
+// The user's Discord profile banner. The banner hash is not present on cached
+// users, so force-fetch once and cache the result for an hour (null → the
+// frontend derives a banner from the avatar colour).
+const _bannerCache = new Map();
+async function userBannerOf(clients, uid) {
+    uid = String(uid);
+    const hit = _bannerCache.get(uid);
+    if (hit && (Date.now() - hit.at) < 3600e3) return hit.url;
+    for (const c of Array.isArray(clients) ? clients : []) {
+        try {
+            const u = await c.users.fetch(uid, { force: true });
+            const url = (u && u.bannerURL) ? (u.bannerURL({ size: 600, extension: 'png' }) || null) : null;
+            _bannerCache.set(uid, { url, at: Date.now() });
+            return url;
+        } catch (_) { /* try next client */ }
+    }
+    _bannerCache.set(uid, { url: null, at: Date.now() });
+    return null;
+}
 
 function verifStats(entries) {
     const now = Date.now();
@@ -529,7 +548,7 @@ async function handleAdmin(req, res, path, clients, config) {
     }
     if (path === '/admin/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
-        return send(res, 200, sess ? { authed: true, ...userMiniOf(clients, sess.userId), role: sess.role, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
+        return send(res, 200, sess ? { authed: true, ...userMiniOf(clients, sess.userId), banner: await userBannerOf(clients, sess.userId), role: sess.role, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
 
     // Everything below requires a valid session cookie.
@@ -1764,7 +1783,7 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         return send(res, 200, sess
-            ? { authed: true, ...userMiniOf(clients, sess.userId), isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }
+            ? { authed: true, ...userMiniOf(clients, sess.userId), banner: await userBannerOf(clients, sess.userId), isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }
             : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
@@ -2017,7 +2036,7 @@ async function handlePartner(req, res, path, clients, config) {
     if (path === '/partner/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         if (!sess) return send(res, 200, { authed: false }, cors);
-        return send(res, 200, { authed: true, ...userMiniOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }, cors);
+        return send(res, 200, { authed: true, ...userMiniOf(clients, sess.userId), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
@@ -2352,7 +2371,7 @@ async function handleInvestor(req, res, path, clients, config) {
     }
     if (path === '/investor/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
-        return send(res, 200, sess ? { authed: true, ...userMiniOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
+        return send(res, 200, sess ? { authed: true, ...userMiniOf(clients, sess.userId), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
