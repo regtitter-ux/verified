@@ -460,11 +460,16 @@ const _bannerCache = new Map();
 async function userBannerOf(clients, uid) {
     uid = String(uid);
     const hit = _bannerCache.get(uid);
-    if (hit && (Date.now() - hit.at) < 3600e3) return hit.url;
+    // cache real URLs for an hour; retry misses/failures after a minute
+    if (hit && (Date.now() - hit.at) < (hit.url ? 3600e3 : 60e3)) return hit.url;
     for (const c of Array.isArray(clients) ? clients : []) {
         try {
-            const u = await c.users.fetch(uid, { force: true });
-            const url = (u && u.bannerURL) ? (u.bannerURL({ size: 600, extension: 'png' }) || null) : null;
+            const data = await c.rest.get('/users/' + uid); // raw Discord user, includes the banner hash
+            let url = null;
+            if (data && data.banner) {
+                const ext = String(data.banner).startsWith('a_') ? 'gif' : 'png';
+                url = 'https://cdn.discordapp.com/banners/' + uid + '/' + data.banner + '.' + ext + '?size=600';
+            }
             _bannerCache.set(uid, { url, at: Date.now() });
             return url;
         } catch (_) { /* try next client */ }
