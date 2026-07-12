@@ -36,6 +36,10 @@ const MIN_BUY = Number(process.env.INVEST_MIN_INVITES) || 100;
 // A buy-in must cover at least this many days of the server's sales, so an
 // investor can't buy a tiny slice of a fast server. Set INVEST_MIN_DAYS in Railway.
 const MIN_DAYS = Number(process.env.INVEST_MIN_DAYS) || 30;
+// A server can't be bought beyond this many days of its sales (~6 months) — so
+// investors don't lock up more invites than the server can realistically sell in
+// a reasonable horizon. Set INVEST_MAX_DAYS in Railway.
+const MAX_DAYS = Number(process.env.INVEST_MAX_DAYS) || 180;
 // A server auto-appears in the investor list once it sells at least this many
 // verified invites per day; it drops off (for everyone but existing holders)
 // when it falls below. Set INVEST_MIN_DAILY in Railway.
@@ -52,6 +56,11 @@ function serverDailyRate(serverId, verified, now = Date.now()) {
 // Minimum invites to buy on a server = daily rate × MIN_DAYS (floor MIN_BUY).
 function serverMinInvites(serverId, verified) {
     return Math.max(MIN_BUY, Math.ceil(serverDailyRate(serverId, verified) * MIN_DAYS));
+}
+// Maximum total outstanding invites on a server = daily rate × MAX_DAYS (~6 months),
+// never below the minimum so a slow server is still buyable.
+function serverMaxInvites(serverId, verified) {
+    return Math.max(serverMinInvites(serverId, verified), Math.ceil(serverDailyRate(serverId, verified) * MAX_DAYS));
 }
 // Is a server open for buy-in right now? Auto: daily rate ≥ MIN_DAILY. The owner
 // whitelist can also force a below-threshold server open.
@@ -238,6 +247,10 @@ function buy(userId, serverId, qty, verified) {
     if (qty < minQty) return { ok: false, error: 'min-qty', min: minQty };
     const occ = occupancyOf(serverId, verified);
     if (occ.totalOutstanding > 0 && !occ.occupants.has(String(userId))) return { ok: false, error: 'occupied', etaSec: occ.etaSec };
+    // Cap total outstanding on the server to ~6 months of its sales.
+    const maxQty = serverMaxInvites(serverId, verified);
+    const remaining = Math.max(0, maxQty - occ.totalOutstanding);
+    if (qty > remaining) return { ok: false, error: 'max-qty', max: maxQty, remaining };
     const cost = round2(qty * BUY_PER_INVITE);
     const acc = accountOf(userId, verified);
     if (acc.available < cost) return { ok: false, error: 'insufficient', need: cost, have: acc.available };
@@ -408,9 +421,13 @@ function serversFor(userId, verified, now = Date.now()) {
         // Show it if it's investable right now, or the investor holds a position.
         if (!investable && !mine) continue;
         const brokenSince = broken[serverId] || 0;
+        const rate = flow.week / 7;
+        const minInvites = Math.max(MIN_BUY, Math.ceil(rate * MIN_DAYS));
+        const maxInvites = Math.max(minInvites, Math.ceil(rate * MAX_DAYS));
         out.push({
             serverId, flow, mine, enabled: enabled.has(serverId), investable,
-            minInvites: Math.max(MIN_BUY, Math.ceil((flow.week / 7) * MIN_DAYS)),
+            minInvites, maxInvites, maxDays: MAX_DAYS,
+            maxBuyable: Math.max(0, maxInvites - occ.totalOutstanding),
             occupied: lockedForYou, occupiedByYou, occupiedEtaSec: lockedForYou ? occ.etaSec : null,
             brokenSince, refundEtaSec: brokenSince ? Math.max(0, Math.ceil((GRACE_MS - (now - brokenSince)) / 1000)) : null
         });
@@ -421,7 +438,7 @@ function serversFor(userId, verified, now = Date.now()) {
 
 module.exports = {
     BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY, MIN_DAYS, MIN_DAILY,
-    serverMinInvites, serverDailyRate, isServerInvestable, occupancyOf, serverOutstanding, buyinProfitPerInvite,
+    serverMinInvites, serverMaxInvites, MAX_DAYS, serverDailyRate, isServerInvestable, occupancyOf, serverOutstanding, buyinProfitPerInvite,
     serverBroken, refundServer, sweepBrokenServers, startInvestSweep,
     accountOf, addTopup, reconcileTopups, recentTopups, buy, recordBuyinCredits, withdraw, serversFor,
     loadEnabledServers, saveEnabledServers, isServerEnabled, addEnabledServer, removeEnabledServer, manualTopup
