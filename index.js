@@ -1,5 +1,5 @@
 const {
-    Client, GatewayIntentBits, Events, AuditLogEvent,
+    Client, GatewayIntentBits, Events, AuditLogEvent, ActivityType,
     EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
     ModalBuilder, TextInputBuilder, TextInputStyle, PermissionsBitField
 } = require('discord.js');
@@ -64,6 +64,33 @@ const cryptopay = require('./cryptopay.js');
 // Every bot instance (one per token) registers here so any of them can
 // coordinate: post payout requests from the service bot, DM from the user's bot.
 const clients = [];
+
+// Env-driven presence for EVERY network bot. Edit the variable on Railway → the
+// redeploy applies the new status to all bots. Variables:
+//   BOT_STATUS       — the status text shown under the bot (empty → no activity)
+//   BOT_STATUS_TYPE  — playing | watching | listening | competing | streaming | custom  (default: custom)
+//   BOT_PRESENCE     — online | idle | dnd | invisible  (default: online)
+//   BOT_STATUS_URL   — stream URL, only used when BOT_STATUS_TYPE=streaming
+function applyBotPresence(c) {
+    try {
+        const text = (process.env.BOT_STATUS || '').trim();
+        const status = ['online', 'idle', 'dnd', 'invisible'].includes((process.env.BOT_PRESENCE || '').toLowerCase())
+            ? process.env.BOT_PRESENCE.toLowerCase() : 'online';
+        const typeMap = {
+            playing: ActivityType.Playing, watching: ActivityType.Watching, listening: ActivityType.Listening,
+            competing: ActivityType.Competing, streaming: ActivityType.Streaming, custom: ActivityType.Custom
+        };
+        const type = typeMap[(process.env.BOT_STATUS_TYPE || 'custom').toLowerCase()] ?? ActivityType.Custom;
+        const opts = { status, activities: [] };
+        if (text) {
+            const act = { name: text, type };
+            if (type === ActivityType.Custom) act.state = text;          // custom status renders the `state`
+            if (type === ActivityType.Streaming) act.url = process.env.BOT_STATUS_URL || 'https://twitch.tv/vemoni';
+            opts.activities = [act];
+        }
+        c.user.setPresence(opts);
+    } catch (e) { console.error('[PRESENCE]', e.message); }
+}
 
 // Interaction de-duplication, shared across every bot in this process. Discord
 // can deliver the SAME interaction more than once when a gateway session
@@ -448,6 +475,7 @@ const startBot = (token) => {
     client.once(Events.ClientReady, async (c) => {
         console.log(`[ONLINE] ${c.user.tag}`);
         if (!clients.includes(c)) clients.push(c);
+        applyBotPresence(c); // env-driven status for every bot
         try {
             const commands = [
                 {
