@@ -271,6 +271,7 @@ function withdraw(userId, amount, verified) {
     if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
     settings[userId].balance = round2((Number(settings[userId].balance) || 0) + amt);
     saveJSON('settings.json', settings);
+    try { require('./partnerlog.js').logEvent(userId, { type: 'credit', reason: 'invest_withdraw', amount: amt, srcId: `invw:${userId}:${Date.now()}` }); } catch (_) { /* never block */ }
     return { ok: true, amount: amt, partnerBalance: settings[userId].balance };
 }
 

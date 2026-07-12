@@ -3,6 +3,10 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { logFunds } = require('./fundslog.js');
 const { REFERRAL_RATE } = require('./referral.js'); // referrer earns 10% of each referred user's withdrawal
 const cryptopay = require('./cryptopay.js');
+const partnerlog = require('./partnerlog.js');
+
+// Mirror a partner money movement into the activity log (never blocks the payout).
+function logPartnerMoney(userId, entry) { try { partnerlog.logEvent(userId, entry); } catch (_) { /* never block */ } }
 
 const WITHDRAW_CHANNEL = '1521877173647184054';
 const THRESHOLD = 10;                       // auto-withdraw once balance reaches this
@@ -130,6 +134,7 @@ function payReferral(clients, referredId, amount, _seen) {
     settings[referrerId].refBonusAccrued = round2((Number(settings[referrerId].refBonusAccrued) || 0) + bonus);
     saveJSON('settings.json', settings);
 
+    logPartnerMoney(referrerId, { type: 'credit', reason: 'referral_bonus', amount: bonus, userId: referredId, srcId: `refbonus:${referredId}:${Date.now()}` });
     logFunds(clients, {
         type: 'credit', creatorId: referrerId, userId: referredId,
         amount: bonus, reason: 'Referral bonus (10% of withdrawal)'
@@ -166,6 +171,7 @@ async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
         s.balance = 0;
         const eligible = drainRefBonusPool(s, amount);
         saveJSON('settings.json', settings);
+        logPartnerMoney(userId, { type: 'debit', reason: 'payout', amount, srcId: `payout:${userId}:${Date.now()}` });
         return autoPayViaTransfer(clients, userId, amount, _seen, eligible);
     }
     // Otherwise fall back to a redeemable USDT check the user claims themselves.
@@ -173,6 +179,7 @@ async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
         s.balance = 0;
         const eligible = drainRefBonusPool(s, amount);
         saveJSON('settings.json', settings);
+        logPartnerMoney(userId, { type: 'debit', reason: 'payout', amount, srcId: `payout:${userId}:${Date.now()}` });
         return autoPayViaCheck(clients, userId, amount, _seen, eligible);
     }
 
@@ -189,6 +196,7 @@ async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
         createdAt: Date.now()
     };
     s.withdrawals.push(withdrawal);
+    logPartnerMoney(userId, { type: 'debit', reason: 'payout', amount, srcId: `payout:${withdrawal.id}` });
     // See drainRefBonusPool comment — own earnings only feed the upstream 10%.
     const eligible = drainRefBonusPool(s, amount);
     saveJSON('settings.json', settings);
@@ -225,6 +233,7 @@ function refundReserved(userId, amount) {
     if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
     settings[userId].balance = round2((Number(settings[userId].balance) || 0) + amount);
     saveJSON('settings.json', settings);
+    logPartnerMoney(userId, { type: 'credit', reason: 'payout_refund', amount, srcId: `prefund:${userId}:${Date.now()}` });
 }
 
 // Notify the money owner that a payout was deferred — throttled to once per 6h so a

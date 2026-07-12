@@ -4,8 +4,10 @@
 //
 // Shape: partnerlog.json = { [creatorId]: [ event, … ] } where event =
 //   { ts, type, reason, amount, userId, guildId, roleId, srcId }
-//   type   : 'grant' | 'debit' | 'unverify'
-//   reason : 'paid' | 'no_ad' | 'dup_join' | 'already_verified' | 'left'
+//   type   : 'grant' | 'debit' | 'unverify' | 'credit'
+//   reason : verification — 'paid' | 'no_ad' | 'dup_join' | 'already_verified' | 'left'
+//            money in  (credit) — 'referral_bonus' | 'payout_refund' | 'invest_withdraw' | 'admin_credit'
+//            money out (debit)  — 'left' (clawback) | 'payout' | 'referral_clawback' | 'admin_debit'
 //   srcId  : stable identity of the underlying fact (joinlink id, verified-entry
 //            key, …). Every event that CAN be re-derived (live logging + startup
 //            backfill) carries one, so the two can never produce two log lines
@@ -83,6 +85,7 @@ function applyFilters(events, opts = {}) {
     if (opts.partner) out = out.filter((e) => e.creatorId === opts.partner);
     if (opts.since) out = out.filter((e) => (e.ts || 0) >= opts.since);
     if (opts.sort === 'oldest') out = out.slice().sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    else if (opts.sort === 'amount') out = out.slice().sort((a, b) => Math.abs(b.amount || 0) - Math.abs(a.amount || 0));
     const limit = Number(opts.limit) || 300;
     return out.slice(0, limit);
 }

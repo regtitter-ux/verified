@@ -1318,6 +1318,9 @@ async function handleAdmin(req, res, path, clients, config) {
             if (Math.abs(delta) > 1_000_000) return send(res, 400, { error: 'delta too large' }, cors);
             s.balance = money((Number(s.balance) || 0) + delta);
             saveJSON('settings.json', settings);
+            try { partnerlog.logEvent(userId, delta >= 0
+                ? { type: 'credit', reason: 'admin_credit', amount: Math.abs(delta), srcId: `adj:${userId}:${Date.now()}` }
+                : { type: 'debit', reason: 'admin_debit', amount: Math.abs(delta), srcId: `adj:${userId}:${Date.now()}` }); } catch (_) { /* never block */ }
             auditDo('balance.change', `${userId}: ${delta > 0 ? '+' : ''}${delta} → $${s.balance}`);
             if (delta > 0) maybeAutoWithdraw(clients, userId).catch(() => null);
             return send(res, 200, { ok: true, balance: s.balance }, cors);

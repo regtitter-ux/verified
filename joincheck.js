@@ -323,6 +323,8 @@ async function finalizeLeavers(clients, leaverIds) {
                 freshSettings[o.referrerId].balance = round2((Number(freshSettings[o.referrerId].balance) || 0) - o.refClaw);
                 freshSettings[o.referrerId].refBonusAccrued = round2(Math.max(0, (Number(freshSettings[o.referrerId].refBonusAccrued) || 0) - o.refClaw));
                 settingsDirty = true;
+                // Partner activity log — the referrer's referral-bonus clawback.
+                if (o.refClaw > 0) { try { partnerlog.logEvent(o.referrerId, { type: 'debit', amount: o.refClaw, reason: 'referral_clawback', userId: o.userId, sponsorGuildId: o.sponsorGuildId, srcId: `refclaw:${o.id}` }); } catch { /* never break the commit */ } }
             }
             // Partner activity log — the verification removal (снятие верифки).
             if (o.unverified) { try { partnerlog.logEvent(o.partnerId, { type: 'unverify', reason: 'left', userId: o.userId, guildId: o.cardGuildId, sponsorGuildId: o.sponsorGuildId, roleId: o.roleId, srcId: o.id }); } catch { /* never break the commit */ } }
