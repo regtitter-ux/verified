@@ -2478,6 +2478,33 @@ function startApiServer(clients, config) {
             // Read-only, no credentials → open to any origin.
             if (req.method === 'GET' && p === '/feed') return send(res, 200, { servers: feed.loadFeed() }, { 'Access-Control-Allow-Origin': '*' });
 
+            // Public: live "someone just earned" feed for the home page. Recent
+            // CONFIRMED paid joins → the sponsor server that gained a member, its
+            // live member count, and the payout. Read-only, no credentials, any
+            // origin. Newest first; only sponsors a bot still shares (name/count
+            // resolvable) are included.
+            if (req.method === 'GET' && p === '/credits-feed') {
+                const jl = loadJSON('joinlinks.json', []);
+                const now = Date.now();
+                const WINDOW = 12 * 3600 * 1000;                 // last 12h of real credits
+                const rows = (Array.isArray(jl) ? jl : [])
+                    .filter((r) => r && (r.status === 'joined' || r.status === 'settled')
+                        && Number(r.ts) > now - WINDOW && /^\d{17,20}$/.test(String(r.guildId || '')))
+                    .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0))
+                    .slice(0, 60);
+                const events = [];
+                for (const r of rows) {
+                    const gid = String(r.guildId);
+                    const name = guildNameOf(clients, gid);
+                    if (!name) continue;                          // bot no longer on sponsor → skip
+                    let members = null, icon = null;
+                    for (const c of clients) { const g = c.guilds?.cache?.get(gid); if (g) { members = (g.memberCount ?? null); icon = (g.iconURL?.({ size: 64 }) || null); break; } }
+                    events.push({ ts: Number(r.ts) || 0, amount: Number(r.amount) || 0, name, icon, members });
+                    if (events.length >= 25) break;
+                }
+                return send(res, 200, { events }, { 'Access-Control-Allow-Origin': '*' });
+            }
+
             // Admin panel (TOTP-gated, CORS-scoped to ADMIN_ORIGIN).
             // Await so any async rejection lands in this outer try/catch —
             // otherwise handleAdmin's promise would settle after we've
