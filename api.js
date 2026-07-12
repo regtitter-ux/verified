@@ -432,6 +432,15 @@ function userNameOf(clients, uid) {
     }
     return null;
 }
+// The user's Discord avatar URL across the fleet caches (null → frontend uses a
+// letter fallback).
+function userAvatarOf(clients, uid) {
+    for (const c of Array.isArray(clients) ? clients : []) {
+        const u = c.users?.cache?.get(String(uid));
+        if (u) { try { return u.displayAvatarURL({ size: 64, extension: 'png' }); } catch { return null; } }
+    }
+    return null;
+}
 
 function verifStats(entries) {
     const now = Date.now();
@@ -1995,7 +2004,13 @@ async function handlePartner(req, res, path, clients, config) {
     }
     if (path === '/partner/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
-        return send(res, 200, sess ? { authed: true, userId: sess.userId, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
+        if (!sess) return send(res, 200, { authed: false }, cors);
+        return send(res, 200, {
+            authed: true, userId: sess.userId,
+            name: userNameOf(clients, sess.userId),
+            avatar: userAvatarOf(clients, sess.userId),
+            isAdmin: Boolean(adminAuth.roleOf(sess.userId))
+        }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
