@@ -437,9 +437,21 @@ function userNameOf(clients, uid) {
 function userAvatarOf(clients, uid) {
     for (const c of Array.isArray(clients) ? clients : []) {
         const u = c.users?.cache?.get(String(uid));
-        if (u) { try { return u.displayAvatarURL({ size: 64, extension: 'png' }); } catch { return null; } }
+        if (u) { try { return u.displayAvatarURL({ size: 128, extension: 'png' }); } catch { return null; } }
     }
     return null;
+}
+// The @username (handle), distinct from the display/global name.
+function userHandleOf(clients, uid) {
+    for (const c of Array.isArray(clients) ? clients : []) {
+        const u = c.users?.cache?.get(String(uid));
+        if (u) return u.username || null;
+    }
+    return null;
+}
+// Compact identity for the account menu: { userId, name, username, avatar }.
+function userMiniOf(clients, uid) {
+    return { userId: String(uid), name: userNameOf(clients, uid), username: userHandleOf(clients, uid), avatar: userAvatarOf(clients, uid) };
 }
 
 function verifStats(entries) {
@@ -517,7 +529,7 @@ async function handleAdmin(req, res, path, clients, config) {
     }
     if (path === '/admin/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
-        return send(res, 200, sess ? { authed: true, userId: sess.userId, role: sess.role } : { authed: false }, cors);
+        return send(res, 200, sess ? { authed: true, ...userMiniOf(clients, sess.userId), role: sess.role, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
 
     // Everything below requires a valid session cookie.
@@ -1752,7 +1764,7 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         return send(res, 200, sess
-            ? { authed: true, userId: sess.userId, isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }
+            ? { authed: true, ...userMiniOf(clients, sess.userId), isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }
             : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
@@ -2005,12 +2017,7 @@ async function handlePartner(req, res, path, clients, config) {
     if (path === '/partner/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         if (!sess) return send(res, 200, { authed: false }, cors);
-        return send(res, 200, {
-            authed: true, userId: sess.userId,
-            name: userNameOf(clients, sess.userId),
-            avatar: userAvatarOf(clients, sess.userId),
-            isAdmin: Boolean(adminAuth.roleOf(sess.userId))
-        }, cors);
+        return send(res, 200, { authed: true, ...userMiniOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
@@ -2345,7 +2352,7 @@ async function handleInvestor(req, res, path, clients, config) {
     }
     if (path === '/investor/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
-        return send(res, 200, sess ? { authed: true, userId: sess.userId, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
+        return send(res, 200, sess ? { authed: true, ...userMiniOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
