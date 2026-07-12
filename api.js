@@ -15,7 +15,7 @@ const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes } = req
 const { syncHubMember } = require('./hubrole.js');
 const { logFunds } = require('./fundslog.js');
 const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares, distributeProfit } = require('./shares.js');
-const { boostActive, BOOST_RATE, BOOST_MS } = require('./referral.js');
+const { boostActive, BOOST_RATE, BOOST_MS, REFERRAL_RATE } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
@@ -2074,6 +2074,31 @@ async function handlePartner(req, res, path, clients, config) {
             if (e.userId && !(e.userId in users)) users[e.userId] = userNameOf(clients, e.userId);
         }
         return send(res, 200, { events, servers, users }, cors);
+    }
+
+    // Referral stats for this partner, reconstructed from existing data (no new
+    // events needed): who they referred and how much they earned from each. The
+    // referrer earns REFERRAL_RATE of every referred user's withdrawals.
+    if (path === '/partner/referrals' && req.method === 'GET') {
+        const settings = loadJSON('settings.json', {});
+        const s = settings[userId] || {};
+        const refs = (Array.isArray(s.referrals) ? s.referrals : []).filter((r) => /^\d{17,20}$/.test(String(r)));
+        const list = refs.map((rid) => {
+            const rs = settings[rid] || {};
+            const wds = Array.isArray(rs.withdrawals) ? rs.withdrawals : [];
+            const withdrawn = money(wds.reduce((a, w) => a + (Number(w.amount) || 0), 0));
+            const earned = money(withdrawn * REFERRAL_RATE);
+            const active = withdrawn > 0 || (Number(rs.balance) || 0) > 0;
+            return { ...userMiniOf(clients, rid), withdrawn, earned, active };
+        }).sort((a, b) => b.earned - a.earned);
+        return send(res, 200, {
+            count: refs.length,
+            activeCount: list.filter((r) => r.active).length,
+            totalEarned: money(list.reduce((a, r) => a + r.earned, 0)),
+            pending: money(s.refBonusAccrued),
+            rate: REFERRAL_RATE,
+            referrals: list
+        }, cors);
     }
 
     if (path === '/partner/me' && req.method === 'GET') {
