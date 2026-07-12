@@ -1,8 +1,9 @@
 const {
-    Client, GatewayIntentBits, Events,
+    Client, GatewayIntentBits, Events, AuditLogEvent,
     EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
     ModalBuilder, TextInputBuilder, TextInputStyle, PermissionsBitField
 } = require('discord.js');
+const auditlog = require('./auditlog.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
@@ -134,6 +135,30 @@ const startBot = (token) => {
     // periodic sweep catches deletions everywhere else.
     client.on(Events.MessageDelete, (msg) => {
         cards.handleMessageDelete(clients, msg).catch((e) => console.error('[CARDS] delete handler:', e.message));
+    });
+
+    // Audit: a network bot was added to a server. Filter out gateway
+    // availability/startup events by requiring the bot's own join to be fresh,
+    // and try to learn WHO invited it from the guild's audit log.
+    client.on(Events.GuildCreate, async (guild) => {
+        try {
+            const joinedAt = guild.members?.me?.joinedTimestamp || 0;
+            if (joinedAt && Date.now() - joinedAt > 120000) return; // not a real new join (availability/startup)
+            let by = 'discord';
+            try {
+                const logs = await guild.fetchAuditLogs({ type: AuditLogEvent.BotAdd, limit: 6 });
+                const entry = logs?.entries?.find((e) => e.target?.id === client.user.id);
+                if (entry?.executor?.id) by = entry.executor.id;
+            } catch (_) { /* no ViewAuditLog permission */ }
+            auditlog.logAction(by, 'bot.join', `${client.user?.username || botId} → ${guild.name} (${guild.id}) · https://discord.com/channels/${guild.id}`);
+        } catch (e) { console.error('[AUDIT] guildCreate:', e.message); }
+    });
+    // Audit: a network bot was removed from a server (skip transient outages).
+    client.on(Events.GuildDelete, (guild) => {
+        try {
+            if (guild.available === false) return; // outage, not a removal
+            auditlog.logAction('discord', 'bot.leave', `${client.user?.username || botId} ✕ ${guild.name || 'server'} (${guild.id}) · https://discord.com/channels/${guild.id}`);
+        } catch (e) { console.error('[AUDIT] guildDelete:', e.message); }
     });
 
     // Realtime leave-clawback. This event only fires on bots that were given
@@ -785,6 +810,7 @@ const startBot = (token) => {
                         messageId: sentCard.id, channelId: sentCard.channelId, guildId: interaction.guild.id,
                         creatorId: interaction.user.id, roleId: role.id, botId: interaction.client.user.id
                     });
+                    auditlog.logAction(interaction.user.id, 'card.create', `${interaction.guild.name} (${interaction.guild.id}) · #${interaction.channel?.name || sentCard.channelId} · https://discord.com/channels/${interaction.guild.id}/${sentCard.channelId}/${sentCard.id}`);
                 } catch (e) { console.error('[CARDS] track error:', e.message); }
             }
             return interaction.editReply({ content: `✅ Verification card created — grants <@&${role.id}>` }).catch(() => null);
