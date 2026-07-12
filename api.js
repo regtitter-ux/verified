@@ -590,10 +590,20 @@ async function handleAdmin(req, res, path, clients, config) {
     // Owner-only: read the admin action audit log.
     if (path === '/admin/audit' && req.method === 'GET') {
         if (!isOwner) return ownerOnly();
-        const url = new URL(req.url, 'http://x');
-        const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 300));
-        const entries = audit.recent(limit).map((e) => ({ ...e, userName: userNameOf(clients, e.userId) }));
-        return send(res, 200, { entries }, cors);
+        const q = new URL(req.url, 'http://x').searchParams;
+        const limit = Math.min(1000, Math.max(1, Number(q.get('limit')) || 300));
+        const action = (q.get('action') || '').trim();   // exact action or a group ('bot', 'card', …)
+        const user = (q.get('user') || '').trim();
+        const periodMs = { '24h': 86400000, '7d': 604800000, '30d': 2592000000 }[q.get('period')];
+        const since = periodMs ? Date.now() - periodMs : 0;
+        const oldest = q.get('sort') === 'oldest';
+        let list = audit.loadAudit();
+        if (action) list = list.filter((e) => e.action === action || String(e.action).split('.')[0] === action);
+        if (/^\d{17,20}$/.test(user)) list = list.filter((e) => e.userId === user);
+        if (since) list = list.filter((e) => (e.ts || 0) >= since);
+        list = list.slice().sort((a, b) => oldest ? (a.ts || 0) - (b.ts || 0) : (b.ts || 0) - (a.ts || 0));
+        const entries = list.slice(0, limit).map((e) => ({ ...e, userName: userNameOf(clients, e.userId) }));
+        return send(res, 200, { entries, total: list.length }, cors);
     }
 
     // Partner activity log across ALL partners, with filters (by partner, by
