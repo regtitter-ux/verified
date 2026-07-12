@@ -478,6 +478,28 @@ async function userBannerOf(clients, uid) {
     return null;
 }
 
+// Like userMiniOf, but if the user isn't in any bot cache, force-fetch it via
+// REST (cached 1h) so we still get a real username/avatar — used for referrals,
+// whose referred users are usually not cached.
+const _userCache = new Map();
+async function userMiniLive(clients, uid) {
+    uid = String(uid);
+    const cached = userMiniOf(clients, uid);
+    if (cached.username) return cached; // already resolvable from a cache
+    const hit = _userCache.get(uid);
+    if (hit && (Date.now() - hit.at) < 3600e3) return hit.v;
+    for (const c of Array.isArray(clients) ? clients : []) {
+        try {
+            const d = await c.rest.get('/users/' + uid);
+            const av = (d && d.avatar) ? `https://cdn.discordapp.com/avatars/${uid}/${d.avatar}.${String(d.avatar).startsWith('a_') ? 'gif' : 'png'}?size=128` : null;
+            const v = { userId: uid, name: (d && (d.global_name || d.username)) || null, username: (d && d.username) || null, avatar: av };
+            _userCache.set(uid, { v, at: Date.now() });
+            return v;
+        } catch (_) { /* try next client */ }
+    }
+    return cached;
+}
+
 function verifStats(entries) {
     const now = Date.now();
     return {
@@ -2077,20 +2099,39 @@ async function handlePartner(req, res, path, clients, config) {
     }
 
     // Referral stats for this partner, reconstructed from existing data (no new
-    // events needed): who they referred and how much they earned from each. The
-    // referrer earns REFERRAL_RATE of every referred user's withdrawals.
+    // events needed): who they referred, how much they earned from each (the
+    // referrer earns REFERRAL_RATE of every referred user's withdrawals), the
+    // referred user's server and its verification funnel (click → checked → stayed).
     if (path === '/partner/referrals' && req.method === 'GET') {
         const settings = loadJSON('settings.json', {});
         const s = settings[userId] || {};
         const refs = (Array.isArray(s.referrals) ? s.referrals : []).filter((r) => /^\d{17,20}$/.test(String(r)));
-        const list = refs.map((rid) => {
+        const refSet = new Set(refs.map(String));
+
+        // One enrichCards pass over all referred users' live cards, grouped per referrer.
+        const theirCards = cards.loadCards().filter((c) => c && !c.deletedAt && refSet.has(String(c.creatorId)));
+        const enriched = enrichCards(clients, theirCards).list;
+        const zero = () => ({ hour: 0, day: 0, week: 0 });
+        const addW = (a, b) => { a.hour += b.hour || 0; a.day += b.day || 0; a.week += b.week || 0; };
+        const byRef = {};
+        for (const ec of enriched) {
+            const cid = String(ec.creatorId || '');
+            const g = byRef[cid] || (byRef[cid] = { servers: new Set(), funnel: { clicks: zero(), checked: zero(), stayed: zero() } });
+            if (ec.guildName) g.servers.add(ec.guildName);
+            addW(g.funnel.clicks, ec.stats.clicks); addW(g.funnel.checked, ec.stats.checked); addW(g.funnel.stayed, ec.stats.stayed);
+        }
+
+        const list = await Promise.all(refs.map(async (rid) => {
             const rs = settings[rid] || {};
             const wds = Array.isArray(rs.withdrawals) ? rs.withdrawals : [];
             const withdrawn = money(wds.reduce((a, w) => a + (Number(w.amount) || 0), 0));
             const earned = money(withdrawn * REFERRAL_RATE);
-            const active = withdrawn > 0 || (Number(rs.balance) || 0) > 0;
-            return { ...userMiniOf(clients, rid), withdrawn, earned, active };
-        }).sort((a, b) => b.earned - a.earned);
+            const g = byRef[String(rid)] || { servers: new Set(), funnel: { clicks: zero(), checked: zero(), stayed: zero() } };
+            const active = withdrawn > 0 || (Number(rs.balance) || 0) > 0 || g.funnel.checked.week > 0;
+            const mini = await userMiniLive(clients, rid);
+            return { ...mini, withdrawn, earned, active, server: [...g.servers].join(', ') || null, funnel: g.funnel };
+        }));
+        list.sort((a, b) => (b.earned - a.earned) || (b.funnel.checked.week - a.funnel.checked.week));
         return send(res, 200, {
             count: refs.length,
             activeCount: list.filter((r) => r.active).length,
