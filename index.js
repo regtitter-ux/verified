@@ -150,14 +150,16 @@ const startBot = (token) => {
                 const entry = logs?.entries?.find((e) => e.target?.id === client.user.id);
                 if (entry?.executor?.id) by = entry.executor.id;
             } catch (_) { /* no ViewAuditLog permission */ }
-            auditlog.logAction(by, 'bot.join', `${client.user?.username || botId} → ${guild.name} (${guild.id}) · https://discord.com/channels/${guild.id}`);
+            const cnt = guild.memberCount != null ? ` · ${guild.memberCount.toLocaleString('en-US')} участников` : '';
+            auditlog.logAction(by, 'bot.join', `${client.user?.username || botId} → ${guild.name} (${guild.id})${cnt} · https://discord.com/channels/${guild.id}`, `bot.join|${client.user?.id}|${guild.id}`);
         } catch (e) { console.error('[AUDIT] guildCreate:', e.message); }
     });
     // Audit: a network bot was removed from a server (skip transient outages).
     client.on(Events.GuildDelete, (guild) => {
         try {
             if (guild.available === false) return; // outage, not a removal
-            auditlog.logAction('discord', 'bot.leave', `${client.user?.username || botId} ✕ ${guild.name || 'server'} (${guild.id}) · https://discord.com/channels/${guild.id}`);
+            const cnt = guild.memberCount != null ? ` · ${guild.memberCount.toLocaleString('en-US')} участников` : '';
+            auditlog.logAction('discord', 'bot.leave', `${client.user?.username || botId} ✕ ${guild.name || 'server'} (${guild.id})${cnt} · https://discord.com/channels/${guild.id}`);
         } catch (e) { console.error('[AUDIT] guildDelete:', e.message); }
     });
 
@@ -810,7 +812,8 @@ const startBot = (token) => {
                         messageId: sentCard.id, channelId: sentCard.channelId, guildId: interaction.guild.id,
                         creatorId: interaction.user.id, roleId: role.id, botId: interaction.client.user.id
                     });
-                    auditlog.logAction(interaction.user.id, 'card.create', `${interaction.guild.name} (${interaction.guild.id}) · #${interaction.channel?.name || sentCard.channelId} · https://discord.com/channels/${interaction.guild.id}/${sentCard.channelId}/${sentCard.id}`);
+                    const gc = interaction.guild.memberCount != null ? ` · ${interaction.guild.memberCount.toLocaleString('en-US')} участников` : '';
+                    auditlog.logAction(interaction.user.id, 'card.create', `${interaction.guild.name} (${interaction.guild.id})${gc} · #${interaction.channel?.name || sentCard.channelId} · https://discord.com/channels/${interaction.guild.id}/${sentCard.channelId}/${sentCard.id}`, `card.create|${sentCard.id}`);
                 } catch (e) { console.error('[CARDS] track error:', e.message); }
             }
             return interaction.editReply({ content: `✅ Verification card created — grants <@&${role.id}>` }).catch(() => null);
@@ -1575,6 +1578,11 @@ investors.startInvestSweep(clients);
 // One-time: seed the partner activity log from existing joinlinks/verified so
 // it isn't empty for history that predates the log (idempotent, marker-guarded).
 partnerlog.backfillIfNeeded();
+
+// One-time: seed the admin audit log with historical card create/delete (from
+// cards.json) and every server a bot is currently on. Delayed so the bots are
+// logged in and their guild caches (names + member counts) are populated.
+setTimeout(() => { try { auditlog.backfillOnce(clients, cards); } catch (e) { console.error('[AUDIT] backfill:', e.message); } }, 40 * 1000);
 
 // Data backups: rolling local snapshots + off-site copies to a Discord channel.
 backup.startBackupSweep(clients);

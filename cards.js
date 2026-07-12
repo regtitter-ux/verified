@@ -65,7 +65,7 @@ function markDeleted(messageId, deletedBy = null) {
         list[i].deletedBy = deletedBy || list[i].deletedBy || null;
         saveCards(list);
         const c = list[i];
-        try { require('./auditlog.js').logAction(c.deletedBy || 'system', 'card.delete', `owner ${c.creatorId || '?'} · guild ${c.guildId || '?'} · https://discord.com/channels/${c.guildId || ''}`); } catch (_) { /* never block */ }
+        try { require('./auditlog.js').logAction(c.deletedBy || 'system', 'card.delete', `owner ${c.creatorId || '?'} · guild ${c.guildId || '?'} · https://discord.com/channels/${c.guildId || ''}`, `card.delete|${c.messageId}`); } catch (_) { /* never block */ }
     } else if (deletedBy && !list[i].deletedBy) {
         list[i].deletedBy = deletedBy; saveCards(list);
     }
