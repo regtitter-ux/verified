@@ -1198,8 +1198,9 @@ async function handleAdmin(req, res, path, clients, config) {
             if (u.roleId && u.adKey && u.creatorId) vCount[u.creatorId] = (vCount[u.creatorId] || 0) + 1;
         }
         const nowTs = Date.now();
+        const wallets = loadJSON('wallets.json', {});
 
-        let users = Object.keys(settings).map((uid) => {
+        let users = [...new Set([...Object.keys(settings), ...Object.keys(wallets)])].map((uid) => {
             const s = settings[uid] || {};
             const withdrawals = Array.isArray(s.withdrawals) ? s.withdrawals : [];
             const withdrawnTotal = money(withdrawals
@@ -1215,6 +1216,7 @@ async function handleAdmin(req, res, path, clients, config) {
                 userId: uid,
                 username: userNameOf(clients, uid),
                 balance: money(s.balance),
+                walletBalance: money(wallets[uid]?.balance || 0),
                 requisites: (s.requisites || '').trim(),
                 hasRequisites: Boolean((s.requisites || '').trim()),
                 bid: getBid(s),
@@ -1236,7 +1238,7 @@ async function handleAdmin(req, res, path, clients, config) {
         // Skeleton settings rows (created just to hold botId or a partner list
         // but with no financial activity) are noise; drop them.
         users = users.filter((u) =>
-            u.balance !== 0 || u.verifications > 0 || u.withdrawnTotal > 0 ||
+            u.balance !== 0 || u.walletBalance !== 0 || u.verifications > 0 || u.withdrawnTotal > 0 ||
             u.withdrawalsCount > 0 || u.referralsCount > 0 || u.referrer
         );
 
@@ -1356,6 +1358,17 @@ async function handleAdmin(req, res, path, clients, config) {
             auditDo('balance.change', `${userId}: ${delta > 0 ? '+' : ''}${delta} → $${s.balance}`);
             if (delta > 0) maybeAutoWithdraw(clients, userId).catch(() => null);
             return send(res, 200, { ok: true, balance: s.balance }, cors);
+        }
+        if (field === 'wallet') {
+            // The order-cabinet (buyer) wallet balance that funds ad campaigns.
+            const delta = Number(body.delta);
+            if (!Number.isFinite(delta)) return send(res, 400, { error: 'delta must be a number' }, cors);
+            if (Math.abs(delta) > 1_000_000) return send(res, 400, { error: 'delta too large' }, cors);
+            let bal;
+            if (delta >= 0) bal = wallet.credit(userId, delta);
+            else { bal = wallet.debit(userId, -delta); if (bal === null) return send(res, 400, { error: 'insufficient wallet balance', have: wallet.balanceOf(userId) }, cors); }
+            auditDo('wallet.change', `${userId}: ${delta > 0 ? '+' : ''}${delta} → $${bal}`);
+            return send(res, 200, { ok: true, wallet: bal }, cors);
         }
         if (field === 'bid') {
             const bid = Number(body.bid);
