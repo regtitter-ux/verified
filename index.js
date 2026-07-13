@@ -4,6 +4,7 @@ const {
     ModalBuilder, TextInputBuilder, TextInputStyle, PermissionsBitField
 } = require('discord.js');
 const auditlog = require('./auditlog.js');
+const lotmon = require('./lotmon.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
@@ -584,6 +585,7 @@ const startBot = (token) => {
     if (isAdminBot) {
         client.on(Events.MessageCreate, async (message) => {
             if (message.author.bot) return;
+            lotmon.handleMessage(clients, message).catch((e) => console.error('[LOTS]', e.message)); // auction-bid monitoring
             if (await handleManualBalance(message, clients)) return;
             if (await handleDone(message, clients)) return;
             if (!message.content.startsWith(config.prefix)) return;
@@ -1611,6 +1613,9 @@ partnerlog.backfillIfNeeded();
 // cards.json) and every server a bot is currently on. Delayed so the bots are
 // logged in and their guild caches (names + member counts) are populated.
 setTimeout(() => { try { auditlog.backfillOnce(clients, cards); } catch (e) { console.error('[AUDIT] backfill:', e.message); } }, 40 * 1000);
+
+// Re-arm close timers for any auction lots that were still active before a restart.
+setTimeout(() => lotmon.rescheduleAll(clients), 30 * 1000);
 
 // Data backups: rolling local snapshots + off-site copies to a Discord channel.
 backup.startBackupSweep(clients);

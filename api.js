@@ -24,6 +24,8 @@ const cards = require('./cards.js');
 const audit = require('./auditlog.js');
 const backup = require('./backup.js');
 const wallet = require('./wallet.js');
+const lots = require('./lots.js');
+const lotmon = require('./lotmon.js');
 const investors = require('./investors.js');
 const sales = require('./sales.js');
 const partnerlog = require('./partnerlog.js');
@@ -604,6 +606,33 @@ async function handleAdmin(req, res, path, clients, config) {
         list = list.slice().sort((a, b) => oldest ? (a.ts || 0) - (b.ts || 0) : (b.ts || 0) - (a.ts || 0));
         const entries = list.slice(0, limit).map((e) => ({ ...e, userName: userNameOf(clients, e.userId) }));
         return send(res, 200, { entries, total: list.length }, cors);
+    }
+
+    // Auction lots: list history/results, and launch a new lot.
+    if (path === '/admin/lots' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const view = lots.list().map((l) => ({
+            id: l.id, status: l.status, stays: l.stays, start: l.start, step: l.step,
+            highest: l.highest, highestBidder: l.highestBidder,
+            highestBidderName: l.highestBidder ? (userNameOf(clients, l.highestBidder) || null) : null,
+            bidsCount: Array.isArray(l.bids) ? l.bids.length : 0,
+            guildId: l.guildId, channelId: l.channelId,
+            createdAt: l.createdAt, closedAt: l.closedAt, lastBidAt: l.lastBidAt,
+            winnerId: l.winnerId, winnerBid: l.winnerBid,
+            winnerName: l.winnerId ? (userNameOf(clients, l.winnerId) || null) : null,
+            bids: (Array.isArray(l.bids) ? l.bids : []).slice(-20).map((b) => ({
+                userId: b.userId, name: b.username || userNameOf(clients, b.userId) || null, amount: b.amount, ts: b.ts
+            }))
+        }));
+        return send(res, 200, { lots: view, guildId: lotmon.GUILD_ID, winMs: lotmon.WIN_MS }, cors);
+    }
+    if (path === '/admin/lots' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const r = await lotmon.createLot(clients, { stays: body.stays, start: body.start, step: body.step });
+        if (!r.ok) return send(res, r.error === 'no-bot-on-guild' || r.error === 'no-guild' ? 409 : 400, r, cors);
+        return send(res, 200, r, cors);
     }
 
     // Partner activity log across ALL partners, with filters (by partner, by

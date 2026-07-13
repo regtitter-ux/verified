@@ -1,0 +1,55 @@
+// Auction "lots": each lot sells a number of `stays`. The owner launches one from
+// the admin panel; the bot opens a channel where people bid by posting a number.
+// A bid that isn't outbid for the win window wins and the channel closes. This
+// module is the persistent store (bid history + results); the Discord side
+// (channel creation, message monitoring, timers) lives in lotmon.js.
+const crypto = require('crypto');
+const { loadJSON, saveJSON } = require('./database.js');
+
+function load() { const r = loadJSON('lots.json', { lots: [] }); return (r && Array.isArray(r.lots)) ? r : { lots: [] }; }
+function save(o) { saveJSON('lots.json', o); }
+
+function list() { return load().lots.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)); }
+function byId(id) { return load().lots.find((l) => l.id === id) || null; }
+function activeByChannel(channelId) { return load().lots.find((l) => l.channelId === String(channelId) && l.status === 'active') || null; }
+function activeLots() { return load().lots.filter((l) => l.status === 'active'); }
+
+function create(rec) {
+    const db = load();
+    const lot = {
+        id: crypto.randomBytes(6).toString('hex'),
+        status: 'active',
+        stays: 0, start: 0, step: 0,
+        guildId: null, channelId: null, botId: null,
+        highest: 0, highestBidder: null, lastMsgId: null, lastBidAt: 0,
+        bids: [], createdAt: Date.now(), closedAt: null, winnerId: null, winnerBid: 0,
+        ...rec
+    };
+    db.lots.push(lot);
+    save(db);
+    return lot;
+}
+
+function update(id, patch) {
+    const db = load();
+    const l = db.lots.find((x) => x.id === id);
+    if (!l) return null;
+    Object.assign(l, patch);
+    save(db);
+    return l;
+}
+
+// Append a winning-so-far bid and advance the highest.
+function addBid(id, bid) {
+    const db = load();
+    const l = db.lots.find((x) => x.id === id);
+    if (!l) return null;
+    l.bids.push(bid);
+    l.highest = bid.amount;
+    l.highestBidder = bid.userId;
+    l.lastBidAt = bid.ts;
+    save(db);
+    return l;
+}
+
+module.exports = { load, save, list, byId, activeByChannel, activeLots, create, update, addBid };
