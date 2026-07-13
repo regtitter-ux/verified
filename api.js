@@ -624,7 +624,15 @@ async function handleAdmin(req, res, path, clients, config) {
                 userId: b.userId, name: b.username || userNameOf(clients, b.userId) || null, amount: b.amount, ts: b.ts
             }))
         }));
-        return send(res, 200, { lots: view, guildId: lotmon.GUILD_ID, winMs: lotmon.WIN_MS }, cors);
+        return send(res, 200, { lots: view, guildId: lotmon.GUILD_ID, winMs: lotmon.WIN_MS, template: lots.getTemplate() }, cors);
+    }
+    if (path === '/admin/lots/template' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const template = lots.setTemplate(body.text);
+        auditDo('lots.template', `${String(template).length} chars`);
+        return send(res, 200, { ok: true, template }, cors);
     }
     if (path === '/admin/lots' && req.method === 'POST') {
         if (!isOwner) return ownerOnly();

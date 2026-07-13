@@ -9,6 +9,18 @@ const { loadJSON, saveJSON } = require('./database.js');
 function load() { const r = loadJSON('lots.json', { lots: [] }); return (r && Array.isArray(r.lots)) ? r : { lots: [] }; }
 function save(o) { saveJSON('lots.json', o); }
 
+// Owner-editable message the bot posts when a lot opens. Placeholders:
+//   {stays} = number of stays, {sb} = starting price, {ob} = min bid increment.
+const DEFAULT_TEMPLATE =
+    '# 💹 Лот: {stays} stays\n' +
+    '**Стартовая цена: ＄{sb}** · **мин. шаг: ＄{ob}**\n\n' +
+    'Пишите вашу ставку числом в чат. Если ставку никто не перебьёт 15 минут — она побеждает, и лот закрывается.';
+function getTemplate() { const t = load().template; return (typeof t === 'string' && t.trim()) ? t : DEFAULT_TEMPLATE; }
+function setTemplate(text) { const db = load(); db.template = (text == null ? '' : String(text)).slice(0, 2000); save(db); return getTemplate(); }
+function renderTemplate(stays, start, step) {
+    return getTemplate().replace(/\{stays\}/g, String(stays)).replace(/\{sb\}/g, String(start)).replace(/\{ob\}/g, String(step));
+}
+
 function list() { return load().lots.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)); }
 function byId(id) { return load().lots.find((l) => l.id === id) || null; }
 function activeByChannel(channelId) { return load().lots.find((l) => l.channelId === String(channelId) && l.status === 'active') || null; }
@@ -52,4 +64,4 @@ function addBid(id, bid) {
     return l;
 }
 
-module.exports = { load, save, list, byId, activeByChannel, activeLots, create, update, addBid };
+module.exports = { load, save, list, byId, activeByChannel, activeLots, create, update, addBid, getTemplate, setTemplate, renderTemplate, DEFAULT_TEMPLATE };

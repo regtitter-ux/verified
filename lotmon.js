@@ -57,11 +57,8 @@ async function createLot(clients, opts = {}) {
     } catch (e) { return { ok: false, error: 'channel-failed', detail: e.message }; }
 
     const lot = lots.create({ stays, start, step, guildId: GUILD_ID, channelId: channel.id, botId: bot.user.id });
-    await channel.send(
-        `# 💹 Лот: ${stays} stays\n` +
-        `**Стартовая цена: ＄${start}** · **мин. шаг: ＄${step}**\n\n` +
-        `Пишите вашу ставку числом в чат. Если ставку никто не перебьёт ${Math.round(WIN_MS / 60000)} минут — она побеждает, и лот закрывается.`
-    ).catch(() => null);
+    const announce = lots.renderTemplate(stays, start, step).trim();
+    if (announce) await channel.send(announce).catch(() => null);
     return { ok: true, lot, channelId: channel.id };
 }
 
