@@ -12,9 +12,9 @@ function save(o) { saveJSON('lots.json', o); }
 // Owner-editable message the bot posts when a lot opens. Placeholders:
 //   {stays} = number of stays, {sb} = starting price, {ob} = min bid increment.
 const DEFAULT_TEMPLATE =
-    '# 💹 Лот: {stays} stays\n' +
-    '**Стартовая цена: ＄{sb}** · **мин. шаг: ＄{ob}**\n\n' +
-    'Пишите вашу ставку числом в чат. Если ставку никто не перебьёт 15 минут — она побеждает, и лот закрывается.';
+    '# 💹 Lot: {stays} stays\n' +
+    '**Starting price: ＄{sb}** · **minimal increase: ＄{ob}**\n\n' +
+    'Post your bid as a number in the chat. If no one outbids it for 15 minutes, it wins and the lot closes.';
 function getTemplate() { const t = load().template; return (typeof t === 'string' && t.trim()) ? t : DEFAULT_TEMPLATE; }
 function setTemplate(text) { const db = load(); db.template = (text == null ? '' : String(text)).slice(0, 2000); save(db); return getTemplate(); }
 function renderTemplate(stays, start, step) {

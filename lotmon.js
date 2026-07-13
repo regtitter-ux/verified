@@ -84,15 +84,15 @@ async function handleMessage(clients, message) {
         }
         const closeTs = Math.floor((Date.now() + WIN_MS) / 1000);
         const newMsg = await message.channel.send(
-            `# Высшая ставка: ＄${bid}\n` +
-            `**Мин. шаг: ＄${lot.step}** · <@${message.author.id}>\n\n` +
-            `-# Авто-закрытие: <t:${closeTs}:R>`
+            `# Highest bid: ＄${bid}\n` +
+            `**Minimal increase: ＄${lot.step}** · <@${message.author.id}>\n\n` +
+            `-# Auto-close: <t:${closeTs}:R>`
         ).catch(() => null);
         lots.addBid(lot.id, { userId: message.author.id, username: message.author.username || null, amount: bid, ts: Date.now(), messageId: message.id });
         lots.update(lot.id, { lastMsgId: newMsg ? newMsg.id : null });
         scheduleClose(clients, lot.id);
     } else if (message.content.trim() === String(bid)) {
-        const err = await message.channel.send(`⚠️ <@${message.author.id}>, ставка слишком мала! Минимум: **＄${minReq}**`).catch(() => null);
+        const err = await message.channel.send(`⚠️ <@${message.author.id}>, bid is too low! Min: **＄${minReq}**`).catch(() => null);
         if (err) setTimeout(() => err.delete().catch(() => null), 5000);
     }
 }
@@ -113,9 +113,9 @@ async function closeLot(clients, lotId) {
         try { await channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false }); } catch (_) {}
         if (lot.lastMsgId && lot.highest > 0) {
             const m = await channel.messages.fetch(lot.lastMsgId).catch(() => null);
-            if (m) await m.edit(`# 🏆 Победа: ＄${lot.highest}\n${lot.highestBidder ? `<@${lot.highestBidder}>` : ''}\n\n-# Ставки закрыты`).catch(() => null);
+            if (m) await m.edit(`# 🏆 Winner: ＄${lot.highest}\n${lot.highestBidder ? `<@${lot.highestBidder}>` : ''}\n\n-# Bids closed`).catch(() => null);
         } else {
-            await channel.send('# Лот закрыт — ставок не было').catch(() => null);
+            await channel.send('# Lot closed — no bids').catch(() => null);
         }
     }
     lots.update(lotId, { status: 'closed', closedAt: Date.now(), winnerId: lot.highestBidder, winnerBid: lot.highest });
