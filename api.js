@@ -2531,13 +2531,17 @@ async function handleInvestor(req, res, path, clients, config) {
     if (path === '/investor/servers' && req.method === 'GET') {
         const list = investors.serversFor(userId, verified())
             .filter((s) => s.investable || s.mine)
-            .slice(0, 60)
             .map((s) => ({
                 ...s,
                 name: guildNameOf(clients, s.serverId),
                 icon: guildIconOf(clients, s.serverId),
                 broken: investors.serverBroken(s.serverId, clients)
-            }));
+            }))
+            // A broken server (no bot / no active card) is only shown to investors
+            // who still hold UNSOLD invites there (they get the refund notice);
+            // for everyone else it drops out of the list until it recovers.
+            .filter((s) => (s.broken || s.brokenSince) ? Boolean(s.mine && s.mine.outstanding > 0) : true)
+            .slice(0, 60);
         return send(res, 200, { servers: list, pricing: { buyPer100: investors.BUY_PER_100, sellPer100: investors.SELL_PER_100, returnRate: investors.RETURN_RATE, minInvites: investors.MIN_BUY, minDays: investors.MIN_DAYS, minDaily: investors.MIN_DAILY } }, cors);
     }
 
