@@ -39,8 +39,14 @@ function call(path, method, params) {
     });
 }
 
+// Default coin the buyer is sent straight to (LTC — low minimum, cheap fees).
+// Override with NOWPAYMENTS_PAY_CURRENCY, or set it '' to let the buyer choose.
+const PAY_CURRENCY = 'NOWPAYMENTS_PAY_CURRENCY' in process.env
+    ? (process.env.NOWPAYMENTS_PAY_CURRENCY || '').trim().toLowerCase()
+    : 'ltc';
+
 // Create a hosted invoice. Returns { url, id } — `url` is the page the buyer opens
-// to pay from any crypto wallet (they choose the coin on that page).
+// to pay. If a pay currency is set, they land straight on that coin's payment.
 async function createPayment({ amount, orderId, currency = 'usd', callbackUrl, returnUrl }) {
     const params = {
         price_amount: Number(amount),
@@ -48,6 +54,7 @@ async function createPayment({ amount, orderId, currency = 'usd', callbackUrl, r
         order_id: String(orderId),
         order_description: 'Vemoni balance top-up'
     };
+    if (PAY_CURRENCY) params.pay_currency = PAY_CURRENCY;
     if (callbackUrl) params.ipn_callback_url = callbackUrl;
     if (returnUrl) { params.success_url = returnUrl; params.cancel_url = returnUrl; }
     const r = await call('/v1/invoice', 'POST', params);
