@@ -20,6 +20,7 @@ const cryptopay = require('./cryptopay.js');
 const cryptomus = require('./cryptomus.js');
 const nowpayments = require('./nowpayments.js');
 const usertoken = require('./usertoken.js');
+const config = require('./config.js');
 
 // The set of sponsor guilds joins can be verified on: every guild a network bot is
 // on, PLUS the reserve user account's guilds (invisible fallback). Used only on the
@@ -687,6 +688,28 @@ async function handleAdmin(req, res, path, clients, config) {
         const r = await lotmon.createLot(clients, { stays: body.stays, start: body.start, step: body.step });
         if (!r.ok) return send(res, r.error === 'no-bot-on-guild' || r.error === 'no-guild' ? 409 : 400, r, cors);
         return send(res, 200, r, cors);
+    }
+
+    // Runtime settings (owner-only): view + edit env-backed config without Railway.
+    // Most keys apply on the next restart; the reserve tokens apply live.
+    if (path === '/admin/config' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        return send(res, 200, { categories: config.adminView() }, cors);
+    }
+    if (path === '/admin/config' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null || !body.values || typeof body.values !== 'object') return send(res, 400, { error: 'bad json' }, cors);
+        config.setMany(body.values);
+        auditDo('config.change', Object.keys(body.values).join(', ').slice(0, 300));
+        return send(res, 200, { ok: true, categories: config.adminView() }, cors);
+    }
+    if (path === '/admin/config/restart' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        auditDo('config.restart', '');
+        send(res, 200, { ok: true }, cors);
+        setTimeout(() => process.exit(0), 400); // Railway auto-restarts the container
+        return;
     }
 
     // Partner activity log across ALL partners, with filters (by partner, by

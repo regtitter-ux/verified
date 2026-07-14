@@ -1,3 +1,6 @@
+// Apply admin-panel runtime overrides onto process.env BEFORE any other module
+// reads it at load time. Must stay the very first require.
+require('./config.js');
 const {
     Client, GatewayIntentBits, Events, AuditLogEvent, ActivityType,
     EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
