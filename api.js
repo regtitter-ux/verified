@@ -20,7 +20,9 @@ const cryptopay = require('./cryptopay.js');
 const cryptomus = require('./cryptomus.js');
 const nowpayments = require('./nowpayments.js');
 const usertoken = require('./usertoken.js');
-const config = require('./config.js');
+// Named runtimeConfig to avoid clashing with the app `config` object that
+// handleAdmin/handleBuyer/etc. receive as a parameter.
+const runtimeConfig = require('./config.js');
 
 // The set of sponsor guilds joins can be verified on: every guild a network bot is
 // on, PLUS the reserve user account's guilds (invisible fallback). Used only on the
@@ -694,15 +696,15 @@ async function handleAdmin(req, res, path, clients, config) {
     // Most keys apply on the next restart; the reserve tokens apply live.
     if (path === '/admin/config' && req.method === 'GET') {
         if (!isOwner) return ownerOnly();
-        return send(res, 200, { categories: config.adminView() }, cors);
+        return send(res, 200, { categories: runtimeConfig.adminView() }, cors);
     }
     if (path === '/admin/config' && req.method === 'PUT') {
         if (!isOwner) return ownerOnly();
         const body = await readBody(req);
         if (body === null || !body.values || typeof body.values !== 'object') return send(res, 400, { error: 'bad json' }, cors);
-        config.setMany(body.values);
+        runtimeConfig.setMany(body.values);
         auditDo('config.change', Object.keys(body.values).join(', ').slice(0, 300));
-        return send(res, 200, { ok: true, categories: config.adminView() }, cors);
+        return send(res, 200, { ok: true, categories: runtimeConfig.adminView() }, cors);
     }
     if (path === '/admin/config/restart' && req.method === 'POST') {
         if (!isOwner) return ownerOnly();
