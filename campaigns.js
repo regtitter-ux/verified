@@ -112,13 +112,28 @@ function delivered(campaign, verifiedList, allCampaigns) {
     return counts.get(campaign.id) || 0;
 }
 
+// Optional per-link join cap. When (re)setting the invite the buyer may set a
+// limit; the campaign then delivers up to `linkLimit` joins measured from
+// `linkBaseline` (the delivered count when the limit was armed) and STOPS serving
+// once reached — until the buyer manually resumes (which re-arms a fresh window).
+// 0/absent = no per-link cap (the campaign runs to its purchased total as usual).
+function linkProgress(campaign, del) {
+    const limit = Math.floor(Number(campaign?.linkLimit) || 0);
+    if (!(limit > 0)) return { limit: 0, delivered: 0, reached: false };
+    const base = Math.floor(Number(campaign?.linkBaseline) || 0);
+    const d = Math.max(0, (Number(del) || 0) - base);
+    return { limit, delivered: Math.min(d, limit), reached: d >= limit };
+}
+
 // A public-safe view of a campaign for the buyer dashboard.
 function publicView(campaign, verifiedList) {
     // Cap the shown count at what was ordered: two campaigns for the same server
     // can share an invite (one ad-key), so each sees all the joins and the raw
     // count can run past the purchased amount. A campaign never delivers more
     // than it bought — clamp the display so it can't read e.g. "308 / 200".
-    const del = Math.min(delivered(campaign, verifiedList), campaign.purchased);
+    const raw = delivered(campaign, verifiedList);
+    const del = Math.min(raw, campaign.purchased);
+    const lp = linkProgress(campaign, raw);
     return {
         id: campaign.id,
         invite: campaign.invite,
@@ -130,6 +145,9 @@ function publicView(campaign, verifiedList) {
         price: campaign.price,
         status: campaign.status,
         paused: Boolean(campaign.paused),
+        linkLimit: lp.limit,
+        linkDelivered: lp.delivered,
+        limitReached: lp.reached,
         disabledGuilds: Array.isArray(campaign.disabledGuilds) ? campaign.disabledGuilds : [],
         invoiceUrl: campaign.invoiceUrl || null,
         createdAt: campaign.createdAt || 0,
@@ -169,8 +187,10 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds) {
         if (c.sponsorGuildId === displayGuildId) continue;                 // never on itself
         if (Array.isArray(c.disabledGuilds) && c.disabledGuilds.includes(displayGuildId)) continue;
         if (botGuildIds && !botGuildIds.has(c.sponsorGuildId)) continue;   // no bot on buyer's server
-        const remaining = c.purchased - delivered(c, list, camps);
+        const del = delivered(c, list, camps);
+        const remaining = c.purchased - del;
         if (remaining <= 0) continue;                                      // already done
+        if (linkProgress(c, del).reached) continue;                        // per-link cap hit → stopped until resumed
         eligible.push({ id: c.id, invite: c.invite, sponsorGuildId: c.sponsorGuildId, remaining });
     }
     return eligible;
@@ -328,6 +348,6 @@ function retention(campaign, verifiedList, joinlinks, now = Date.now()) {
 
 module.exports = {
     PRICE_PER_100, MIN_JOINS, priceFor, round2, newId,
-    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, publicView, pickForGuild, eligibleForGuild, weightedOrder, botPresent, fleetGuildIds,
+    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, linkProgress, publicView, pickForGuild, eligibleForGuild, weightedOrder, botPresent, fleetGuildIds,
     isInvoicePaid, reconcile, startCampaignSweep, retention
 };

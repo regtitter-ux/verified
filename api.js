@@ -2182,8 +2182,17 @@ async function handleBuyer(req, res, path, clients, config) {
         // invalidated campaign back to active (works even if the invite string is
         // unchanged — the previously-dead link now resolves). Force a re-check.
         if (c.status === 'invalid') { c.status = 'active'; c.invalidAt = 0; c.inviteCheckedAt = Date.now(); dirty = true; }
-        if (dirty) campaigns.saveCampaigns(camps);
+        // Optional per-link join cap. `limit` > 0 arms a cap; empty/0 clears it (the
+        // campaign runs to its purchased total). Either way we (re)start the window
+        // from the current delivered count, so saving here also RESUMES a campaign
+        // that was stopped on a previous cap — "continue with the same or new link".
         const verified = loadJSON('verified.json', []);
+        const curDel = campaigns.delivered(c, verified, camps);
+        const lim = Math.floor(Number(body?.limit));
+        c.linkLimit = Number.isFinite(lim) && lim > 0 ? lim : 0;
+        c.linkBaseline = curDel;
+        dirty = true;
+        if (dirty) campaigns.saveCampaigns(camps);
         return send(res, 200, { ok: true, campaign: campaigns.publicView(camps[id], verified) }, cors);
     }
 
