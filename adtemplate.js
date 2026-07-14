@@ -40,14 +40,30 @@ function setTemplate(gid, text) {
 const LINK_RE = /^<?(?:https?:\/\/\S+|(?:discord(?:app)?\.com\/invite|discord\.gg)\/[\w-]+|\.gg\/[\w-]+)>?$/i;
 const isLink = (s) => typeof s === 'string' && s.trim() !== '' && !/\s/.test(s.trim()) && LINK_RE.test(s.trim());
 
+// Make a bare sponsor invite a full URL so it renders as a proper invite in
+// Discord. `discord.gg/x`, `discordapp.com/invite/x` and `.gg/x` get `https://`
+// prepended; anything that already has a scheme, or isn't a recognised Discord
+// invite, is returned untouched — so a working link can never break.
+function normalizeLink(s) {
+    const a = String(s || '').trim().replace(/^<|>$/g, '');
+    if (!a || /^https?:\/\//i.test(a)) return a;
+    if (/^(?:www\.)?discord(?:app)?\.com\/invite\/[\w-]+/i.test(a)) return 'https://' + a.replace(/^www\./i, '');
+    if (/^(?:www\.)?discord\.gg\/[\w-]+/i.test(a)) return 'https://' + a.replace(/^www\./i, '');
+    if (/^\.gg\/[\w-]+/i.test(a)) return 'https://discord' + a; // .gg/x → https://discord.gg/x
+    return a;
+}
+
 // Turn the argument passed to !adv3 into the final ad text.
-// If it's a bare sponsor link and the template has a {link} slot → fill it in.
-// Otherwise treat the argument as literal ad text (old behaviour).
+// If it's a bare sponsor link and the template has a {link} slot → fill it in
+// (normalising the link to a full https:// URL first). Otherwise treat the
+// argument as literal ad text (old behaviour).
 function applyTemplate(gid, rawArg) {
     const arg = (rawArg || '').trim();
     if (isLink(arg)) {
+        const link = normalizeLink(arg);
         const tmpl = getTemplate(gid);
-        if (tmpl.includes('{link}')) return tmpl.split('{link}').join(arg.replace(/^<|>$/g, ''));
+        if (tmpl.includes('{link}')) return tmpl.split('{link}').join(link);
+        return link; // a bare link used as the whole ad → still normalise it
     }
     return arg;
 }
@@ -80,4 +96,4 @@ function formatServerTemplatesBlock() {
     return out;
 }
 
-module.exports = { DEFAULT_TEMPLATE, getTemplate, setTemplate, applyTemplate, isLink, listServerTemplates, formatServerTemplatesBlock };
+module.exports = { DEFAULT_TEMPLATE, getTemplate, setTemplate, applyTemplate, isLink, normalizeLink, listServerTemplates, formatServerTemplatesBlock };
