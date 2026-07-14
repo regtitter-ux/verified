@@ -18,6 +18,7 @@ const { boostedRate, REFERRAL_RATE } = require('./referral.js');
 const { syncHubMember } = require('./hubrole.js');
 const partnerlog = require('./partnerlog.js');
 const campaigns = require('./campaigns.js');
+const usertoken = require('./usertoken.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -86,22 +87,36 @@ async function resolveSponsorPresence(clients, adText) {
         if (!guildId) continue;
         const bot = clients.find((c) => c.guilds.cache.has(guildId));
         if (bot) return { guildId, bot };
+        // Reserve (invisible to buyers): no network bot on this server, but the
+        // personal account is a member → joins can still be verified via the user
+        // token. bot:null signals "use the reserve" to isMember.
+        if (usertoken.enabled() && await usertoken.coversGuild(guildId)) return { guildId, bot: null };
     }
     return null;
 }
 
 // Is `userId` currently a member of `guildId`, seen through `bot`?
 // Returns true / false / null (null = couldn't determine, transient error).
+// When no bot covers the guild, falls back to the reserve user account for the
+// servers it's a member of (else null — never guesses).
 async function isMember(bot, guildId, userId) {
     const g = bot?.guilds.cache.get(guildId);
-    if (!g) return null;
-    try {
-        await g.members.fetch({ user: userId, force: true });
-        return true;
-    } catch (e) {
-        if (e?.code === 10007 || e?.code === 10013) return false; // Unknown Member / Unknown User
-        return null;
+    if (g) {
+        try {
+            await g.members.fetch({ user: userId, force: true });
+            return true;
+        } catch (e) {
+            if (e?.code === 10007 || e?.code === 10013) return false; // Unknown Member / Unknown User
+            return null;
+        }
     }
+    // Reserve path: no bot on this server → read membership via the user token,
+    // but only for servers the personal account actually covers (so a 404 means
+    // "not a member", not "the account isn't there").
+    if (usertoken.enabled() && await usertoken.coversGuild(guildId)) {
+        return usertoken.isMember(guildId, userId);
+    }
+    return null;
 }
 
 // Credit the card owner for one confirmed join (at their join-check rate) and
@@ -366,8 +381,9 @@ async function sweepOnce(clients) {
     for (const rec of snapshot) {
         if (rec.status !== 'joined') continue;
         const bot = clients.find((c) => c.guilds.cache.has(rec.guildId));
-        if (!bot) continue; // no bot on that server right now — can't tell, skip
-        const present = await isMember(bot, rec.guildId, rec.userId);
+        // No bot AND not covered by the reserve → can't tell, skip (never claw).
+        if (!bot && !(usertoken.enabled() && await usertoken.coversGuild(rec.guildId))) continue;
+        const present = await isMember(bot || null, rec.guildId, rec.userId);
         if (present === false) leavers.add(rec.id);
         await sleep(250); // be gentle on rate limits
     }

@@ -236,9 +236,9 @@ async function notifyBuyer(clients, campaign, kind) {
     const list = Array.isArray(clients) ? clients : [];
     const server = campaign.serverName || campaign.invite;
     const messages = {
-        started: `✅ Оплата получена — твоя реклама запущена!\nСервер: ${server}\nЗаказано заходов: **${campaign.purchased}**. Следи за прогрессом в личном кабинете.`,
-        complete: `🎉 Реклама выполнена!\nСервер: ${server}\nДоставлено заходов: **${campaign.purchased}/${campaign.purchased}**. Спасибо за заказ!`,
-        invalid: `⚠️ Реклама остановлена: ссылка-приглашение стала недействительной.\nСервер: ${server}\nОбнови приглашение и обратись в поддержку, чтобы возобновить показ.`
+        started: `✅ Payment received — your campaign is live!\nServer: ${server}\nJoins ordered: **${campaign.purchased}**. Track progress in your dashboard.`,
+        complete: `🎉 Campaign complete!\nServer: ${server}\nJoins delivered: **${campaign.purchased}/${campaign.purchased}**. Thanks for your order!`,
+        invalid: `⚠️ Campaign stopped: the invite link is no longer valid.\nServer: ${server}\nUpdate the invite and contact support to resume delivery.`
     };
     const msg = messages[kind];
     if (!msg) return;

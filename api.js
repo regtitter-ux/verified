@@ -19,6 +19,16 @@ const { boostActive, BOOST_RATE, BOOST_MS, REFERRAL_RATE } = require('./referral
 const cryptopay = require('./cryptopay.js');
 const cryptomus = require('./cryptomus.js');
 const nowpayments = require('./nowpayments.js');
+const usertoken = require('./usertoken.js');
+
+// The set of sponsor guilds joins can be verified on: every guild a network bot is
+// on, PLUS the reserve user account's guilds (invisible fallback). Used only on the
+// ad-serving / verification path — the buyer cabinet stays bot-only on purpose.
+async function coveredGuildIds(clients) {
+    const set = campaigns.fleetGuildIds(clients);
+    if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) set.add(g); } catch { /* ignore */ } }
+    return set;
+}
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
 const feed = require('./feed.js');
@@ -92,7 +102,7 @@ async function adForServer(clients, ownerId, serverId) {
             const verified = loadJSON('verified.json', []);
             const limits = loadJSON('adlimits.json', {});
             const capReached = (raw) => { const rec = limits[adKeyOf(raw)]; const cap = Number(rec?.limit) || 0; return cap > 0 && joinerCount(verified, adKeyOf(raw), Number(rec?.resetAt) || 0) >= cap; };
-            const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(serverId, verified, campaigns.fleetGuildIds(clients)));
+            const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(serverId, verified, await coveredGuildIds(clients)));
             let checks = 0;
             for (const cand of ordered) {
                 if (checks >= 8) break;                                  // bound the network calls
@@ -162,7 +172,7 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId) {
     const approvedSponsor = (gid) => !JOIN_CHECK_GUILDS.size || JOIN_CHECK_GUILDS.has(gid);
 
     // Same candidate order /api/ad uses: eligible campaigns (weighted), then house ad.
-    const cands = campaigns.weightedOrder(campaigns.eligibleForGuild(serverId, verified, campaigns.fleetGuildIds(clients)))
+    const cands = campaigns.weightedOrder(campaigns.eligibleForGuild(serverId, verified, await coveredGuildIds(clients)))
         .map((c) => ({ raw: c.invite, campaignId: c.id }));
     const s = loadJSON('settings.json')[ownerId] || {};
     const houseRaw = (s.serverAds && s.serverAds[serverId] && String(s.serverAds[serverId]).trim()) ? s.serverAds[serverId]

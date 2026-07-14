@@ -17,6 +17,7 @@ const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = 
 const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const { payShares, REVENUE_PER_JOIN } = require('./shares.js');
 const campaigns = require('./campaigns.js');
+const usertoken = require('./usertoken.js');
 const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
@@ -1289,6 +1290,10 @@ const startBot = (token) => {
                         return { text, raw, sp };
                     };
                     const fleet = campaigns.fleetGuildIds(clients);
+                    // Reserve (invisible): also treat the personal account's servers
+                    // as join-checkable so a campaign with no bot but where the owner
+                    // joined by request still shows and verifies.
+                    if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) fleet.add(g); } catch { /* ignore */ } }
                     const eligibleHere = campaigns.eligibleForGuild(guild.id, verified, fleet);
                     if (eligibleHere.length) hadEligible = true;
                     let ordered = campaigns.weightedOrder(eligibleHere);
