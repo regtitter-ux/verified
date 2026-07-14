@@ -15,7 +15,7 @@ const { adKeyOf, joinerCount } = require('./adcreative.js');
 const cryptopay = require('./cryptopay.js');
 
 const PRICE_PER_100 = Number(process.env.JOIN_SALE_PRICE) || 10; // $ per 100 verified joins
-const MIN_JOINS = Number(process.env.MIN_ORDER_JOINS) || 100;
+const MIN_JOINS = Number(process.env.MIN_ORDER_JOINS) || 1;
 const round2 = (n) => +(Number(n) || 0).toFixed(2);
 const newId = () => crypto.randomBytes(9).toString('hex');
 
