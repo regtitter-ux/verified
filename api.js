@@ -17,6 +17,7 @@ const { logFunds } = require('./fundslog.js');
 const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares, distributeProfit } = require('./shares.js');
 const { boostActive, BOOST_RATE, BOOST_MS, REFERRAL_RATE } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
+const cryptomus = require('./cryptomus.js');
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
 const feed = require('./feed.js');
@@ -1919,12 +1920,20 @@ async function handleBuyer(req, res, path, clients, config) {
     // Wallet: balance + recent top-ups (reconciles pending top-ups first).
     if (path === '/order/wallet' && req.method === 'GET') {
         await wallet.reconcileTopups(buyerId, campaigns.isInvoicePaid).catch(() => null);
+        // Webhook fallback: re-check any pending Cryptomus top-ups against the gateway.
+        if (cryptomus.enabled()) {
+            for (const t of wallet.pendingByProvider(buyerId, 'cryptomus')) {
+                const st = await cryptomus.paymentStatus(t.orderId).catch(() => null);
+                if (cryptomus.isPaidStatus(st)) wallet.settlePending(buyerId, { orderId: t.orderId });
+            }
+        }
         const minTopup = managers.isManager(buyerId) ? managers.MIN_TOPUP : wallet.MIN_TOPUP;
         return send(res, 200, {
             balance: wallet.balanceOf(buyerId),
             topups: wallet.recentTopups(buyerId),
             minTopup,
-            cryptoEnabled: cryptopay.enabled()
+            cryptoEnabled: cryptopay.enabled(),
+            cryptoWebEnabled: cryptomus.enabled()
         }, cors);
     }
     // Top up the wallet via a CryptoBot invoice. Body: { amount }.
@@ -1941,6 +1950,25 @@ async function handleBuyer(req, res, path, clients, config) {
         const invoiceUrl = invoice.bot_invoice_url || invoice.mini_app_invoice_url || invoice.web_app_invoice_url || invoice.pay_url;
         wallet.addTopup(buyerId, { invoiceId: invoice.invoice_id, amount, status: 'pending', createdAt: Date.now() });
         return send(res, 200, { ok: true, invoiceUrl, amount }, cors);
+    }
+
+    // Top up the wallet via Cryptomus — a hosted web checkout, so the buyer pays
+    // from ANY crypto wallet (no Telegram / no bot). Body: { amount }.
+    if (path === '/order/wallet/topup/cryptomus' && req.method === 'POST') {
+        if (!cryptomus.enabled()) return send(res, 503, { error: 'Оплата криптой временно недоступна' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const amount = +(Number(body?.amount) || 0).toFixed(2);
+        const minTopup = managers.isManager(buyerId) ? managers.MIN_TOPUP : wallet.MIN_TOPUP;
+        if (!(amount >= minTopup)) return send(res, 400, { error: 'min-topup' }, cors);
+        const orderId = `topup:${buyerId}:${crypto.randomBytes(5).toString('hex')}`;
+        const apiBase = (process.env.PUBLIC_API_BASE || `https://${req.headers.host}`).replace(/\/+$/, '');
+        let pay = null;
+        try { pay = await cryptomus.createPayment({ amount: amount.toFixed(2), orderId, callbackUrl: apiBase + '/cryptomus/webhook', returnUrl: 'https://vemoni.info/order/' }); }
+        catch (e) { return send(res, 502, { error: 'invoice-failed' }, cors); }
+        if (!pay || !pay.url) return send(res, 502, { error: 'invoice-failed' }, cors);
+        wallet.addTopup(buyerId, { provider: 'cryptomus', orderId, amount, status: 'pending', createdAt: Date.now() });
+        return send(res, 200, { ok: true, invoiceUrl: pay.url, amount }, cors);
     }
 
     // Create a campaign, paid instantly from the wallet balance. Body: { invite, joins }.
@@ -2681,6 +2709,25 @@ function startApiServer(clients, config) {
                     if (events.length >= 25) break;
                 }
                 return send(res, 200, { events }, { 'Access-Control-Allow-Origin': '*' });
+            }
+
+            // Public: Cryptomus payment webhook (server-to-server, no session). We
+            // never trust the posted status — we re-fetch it from Cryptomus and, if
+            // paid, credit the matching pending wallet top-up (idempotent).
+            if (req.method === 'POST' && p === '/cryptomus/webhook') {
+                try {
+                    const body = await readBody(req);
+                    const orderId = body && body.order_id;
+                    if (orderId && /^topup:\d{17,20}:/.test(String(orderId))) {
+                        const status = await cryptomus.paymentStatus(orderId).catch(() => null);
+                        if (cryptomus.isPaidStatus(status)) {
+                            const buyerId = String(orderId).split(':')[1];
+                            const credited = wallet.settlePending(buyerId, { orderId });
+                            if (credited > 0) console.log(`[CRYPTOMUS] credited $${credited} to ${buyerId} (${orderId})`);
+                        }
+                    }
+                } catch (e) { console.error('[CRYPTOMUS] webhook:', e.message); }
+                return send(res, 200, { ok: true }); // always 200 so Cryptomus doesn't retry-storm
             }
 
             // Admin panel (TOTP-gated, CORS-scoped to ADMIN_ORIGIN).

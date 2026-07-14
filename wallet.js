@@ -78,6 +78,32 @@ async function reconcileTopups(buyerId, isPaidFn) {
     return round2(credited);
 }
 
+// Pending top-ups for one provider (e.g. 'cryptomus') — used to reconcile against
+// the gateway as a webhook fallback.
+function pendingByProvider(buyerId, provider) {
+    const wa = loadWallets()[buyerId];
+    return (wa?.topups || []).filter((t) => t.status === 'pending' && t.provider === provider);
+}
+
+// Mark a specific pending top-up paid and credit it (idempotent). `match` is a set
+// of fields to match on the top-up record, e.g. { orderId } or { invoiceId }.
+// Returns the credited amount (0 if already paid / not found).
+function settlePending(buyerId, match) {
+    const w = loadWallets(); const wa = ensure(w, buyerId);
+    let credited = 0;
+    for (const t of wa.topups) {
+        if (t.status !== 'pending') continue;
+        const hit = Object.keys(match).every((k) => t[k] != null && String(t[k]) === String(match[k]));
+        if (hit) {
+            t.status = 'paid'; t.paidAt = Date.now();
+            wa.balance = round2((wa.balance || 0) + (Number(t.amount) || 0));
+            credited += Number(t.amount) || 0;
+        }
+    }
+    if (credited > 0) saveWallets(w);
+    return round2(credited);
+}
+
 function recentTopups(buyerId, limit = 20) {
     const wa = loadWallets()[buyerId];
     return (wa?.topups || []).slice(-limit).reverse()
@@ -90,4 +116,4 @@ function totalHeld() {
     return round2(Object.values(w).reduce((a, x) => a + (Number(x?.balance) || 0), 0));
 }
 
-module.exports = { MIN_TOPUP, balanceOf, credit, debit, addTopup, reconcileTopups, recentTopups, totalHeld, round2 };
+module.exports = { MIN_TOPUP, balanceOf, credit, debit, addTopup, reconcileTopups, pendingByProvider, settlePending, recentTopups, totalHeld, round2 };
