@@ -610,9 +610,9 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, { entries, total: list.length }, cors);
     }
 
-    // Auction lots: list history/results, and launch a new lot.
+    // Auction lots: list history/results, and launch a new lot. Any admin may
+    // view and launch; only the owner may edit the launch-message template.
     if (path === '/admin/lots' && req.method === 'GET') {
-        if (!isOwner) return ownerOnly();
         const view = lots.list().map((l) => ({
             id: l.id, status: l.status, stays: l.stays, start: l.start, step: l.step,
             highest: l.highest, highestBidder: l.highestBidder,
@@ -626,7 +626,8 @@ async function handleAdmin(req, res, path, clients, config) {
                 userId: b.userId, name: b.username || userNameOf(clients, b.userId) || null, amount: b.amount, ts: b.ts
             }))
         }));
-        return send(res, 200, { lots: view, guildId: lotmon.GUILD_ID, winMs: lotmon.WIN_MS, template: lots.getTemplate() }, cors);
+        // The launch-message template is owner-only — don't expose it to admins.
+        return send(res, 200, { lots: view, guildId: lotmon.GUILD_ID, winMs: lotmon.WIN_MS, template: isOwner ? lots.getTemplate() : null }, cors);
     }
     if (path === '/admin/lots/template' && req.method === 'PUT') {
         if (!isOwner) return ownerOnly();
@@ -637,7 +638,6 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, { ok: true, template }, cors);
     }
     if (path === '/admin/lots' && req.method === 'POST') {
-        if (!isOwner) return ownerOnly();
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const r = await lotmon.createLot(clients, { stays: body.stays, start: body.start, step: body.step });
