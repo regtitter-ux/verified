@@ -104,6 +104,18 @@ function settlePending(buyerId, match) {
     return round2(credited);
 }
 
+// Attach fields to a pending top-up matched by orderId (e.g. the gateway payment id
+// once the first webhook arrives) so later reconciliation can query the gateway.
+function updatePending(buyerId, orderId, patch) {
+    const w = loadWallets(); const wa = ensure(w, buyerId);
+    let changed = false;
+    for (const t of wa.topups) {
+        if (t.status === 'pending' && String(t.orderId) === String(orderId)) { Object.assign(t, patch); changed = true; }
+    }
+    if (changed) saveWallets(w);
+    return changed;
+}
+
 function recentTopups(buyerId, limit = 20) {
     const wa = loadWallets()[buyerId];
     return (wa?.topups || []).slice(-limit).reverse()
@@ -116,4 +128,4 @@ function totalHeld() {
     return round2(Object.values(w).reduce((a, x) => a + (Number(x?.balance) || 0), 0));
 }
 
-module.exports = { MIN_TOPUP, balanceOf, credit, debit, addTopup, reconcileTopups, pendingByProvider, settlePending, recentTopups, totalHeld, round2 };
+module.exports = { MIN_TOPUP, balanceOf, credit, debit, addTopup, reconcileTopups, pendingByProvider, settlePending, updatePending, recentTopups, totalHeld, round2 };
