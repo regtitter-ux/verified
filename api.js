@@ -445,6 +445,40 @@ function userAvatarOf(clients, uid) {
     }
     return null;
 }
+// Post full info about a new website ad order to an ops channel. Best-effort:
+// any failure (no bot on the guild, missing channel, send error) is swallowed so
+// it can never break order creation. Channel/guild overridable via env.
+const ORDER_NOTIFY_GUILD = (process.env.ORDER_NOTIFY_GUILD || '1523103725609156719').trim();
+const ORDER_NOTIFY_CHANNEL = (process.env.ORDER_NOTIFY_CHANNEL || '1526627488527290419').trim();
+async function notifyNewOrder(clients, o) {
+    try {
+        if (!ORDER_NOTIFY_CHANNEL) return;
+        const list = Array.isArray(clients) ? clients : [];
+        const bot = list.find((c) => c.guilds?.cache?.has(ORDER_NOTIFY_GUILD)) || list[0];
+        if (!bot) return;
+        const channel = bot.channels.cache.get(ORDER_NOTIFY_CHANNEL)
+            || await bot.channels.fetch(ORDER_NOTIFY_CHANNEL).catch(() => null);
+        if (!channel || typeof channel.send !== 'function') return;
+        const name = userNameOf(clients, o.buyerId);
+        const handle = userHandleOf(clients, o.buyerId);
+        const buyer = `<@${o.buyerId}>` + (name ? ` — ${name}${handle ? ' (@' + handle + ')' : ''}` : '') + `\n\`${o.buyerId}\``;
+        const fields = [
+            { name: '👤 Покупатель', value: buyer, inline: false },
+            { name: '📣 Сервер', value: `${o.serverName || '—'}\n\`${o.sponsorGuildId}\``, inline: true },
+            { name: '🔗 Инвайт', value: o.invite || '—', inline: true },
+            { name: '👥 Заходов заказано', value: String(o.joins), inline: true },
+            { name: '💵 Сумма', value: `$${Number(o.price).toFixed(2)} ($${Number(o.pricePer100).toFixed(2)} / 100)`, inline: true },
+            { name: '💳 Оплата', value: 'с баланса кабинета', inline: true },
+            { name: '🆔 Кампания', value: `\`${o.campaignId}\``, inline: true }
+        ];
+        if (o.isManager) fields.push({ name: '🧑‍💼 Менеджер', value: `да · комиссия ${Math.round((o.commissionRate || 0) * 100)}%`, inline: true });
+        await channel.send({
+            embeds: [{ title: '🛒 Новый заказ рекламы через сайт', color: 0x5865F2, fields, timestamp: new Date().toISOString() }],
+            allowedMentions: { parse: [] }
+        }).catch(() => null);
+    } catch { /* never break order creation */ }
+}
+
 // The @username (handle), distinct from the display/global name.
 function userHandleOf(clients, uid) {
     for (const c of Array.isArray(clients) ? clients : []) {
@@ -2029,6 +2063,12 @@ async function handleBuyer(req, res, path, clients, config) {
         };
         campaigns.saveCampaigns(camps);
         sales.recordSale({ campaignId: id, buyerId, amount: price, joins, sponsorGuildId, managerId: isMgr ? buyerId : null, via: 'wallet' });
+        // Fire-and-forget ops notification with full order details.
+        notifyNewOrder(clients, {
+            buyerId, serverName: inv.guild?.name || null, sponsorGuildId,
+            invite: `https://discord.gg/${inviteCode}`, joins, price, pricePer100,
+            isManager: isMgr, commissionRate: isMgr ? managers.COMMISSION_RATE : 0, campaignId: id
+        });
         return send(res, 200, { ok: true, price, balance: wallet.balanceOf(buyerId), campaign: campaigns.publicView(camps[id]) }, cors);
     }
 
