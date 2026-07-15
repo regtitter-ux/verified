@@ -2149,10 +2149,14 @@ async function handleBuyer(req, res, path, clients, config) {
         const camps = campaigns.loadCampaigns();
         const verified = loadJSON('verified.json', []);
         const joinlinks = loadJSON('joinlinks.json', []);
-        const fleet = campaigns.fleetGuildIds(clients);
+        // "botPresent" here drives the "add the bot" warning. Treat a server as
+        // covered when a network bot is on it OR the reserve account is (invisible
+        // fallback) — so a reserve-covered campaign doesn't show a false
+        // "won't run without a bot" warning, without revealing the reserve.
+        const covered = await coveredGuildIds(clients);
         const mine = Object.values(camps).filter((c) => c.buyerId === buyerId && c.status !== 'pending_payment')
             .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-            .map((c) => ({ ...campaigns.publicView(c, verified), botPresent: campaigns.botPresent(c, fleet), retention: campaigns.retention(c, verified, joinlinks) }));
+            .map((c) => ({ ...campaigns.publicView(c, verified), botPresent: campaigns.botPresent(c, covered), retention: campaigns.retention(c, verified, joinlinks) }));
         return send(res, 200, { campaigns: mine }, cors);
     }
 
@@ -2501,7 +2505,7 @@ async function handlePartner(req, res, path, clients, config) {
         const priorityByGuild = pset.priorityByGuild || {};
         const hiddenByGuild = pset.hiddenByGuild || {};
         const verified = loadJSON('verified.json', []);
-        const fleet = campaigns.fleetGuildIds(clients);
+        const fleet = await coveredGuildIds(clients); // bots + reserve (selfbot) sponsors
         const camps = campaigns.loadCampaigns();
         const servers = partnerGuildIds().map((gid) => {
             const prio = priorityByGuild[gid] || null;
@@ -2554,7 +2558,7 @@ async function handlePartner(req, res, path, clients, config) {
             return send(res, 200, { ok: true, priorityCampaign: null }, cors);
         }
         const verified = loadJSON('verified.json', []);
-        const fleet = campaigns.fleetGuildIds(clients);
+        const fleet = await coveredGuildIds(clients); // bots + reserve (selfbot) sponsors
         const available = campaigns.eligibleForGuild(gid, verified, fleet).some((e) => e.id === cid);
         if (!available) return send(res, 400, { error: 'not-available' }, cors);
         S.priorityByGuild[gid] = cid;
