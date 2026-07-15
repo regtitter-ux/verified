@@ -1155,9 +1155,37 @@ async function handleAdmin(req, res, path, clients, config) {
             total: netStats.total + lAll.total
         };
 
+        // Network-wide funnel (Vemoni's side, summed across EVERY server): first
+        // click → join verified → still on the server. Same three stages as a
+        // partner card, aggregated over all cards. clicks = unique (card,user)
+        // pairs, so it matches the sum of what each server's card shows.
+        const nfClick = (() => {
+            const cl = loadJSON('cardclicks.json', []);
+            const h = new Set(), d = new Set(), w = new Set();
+            for (const e of Array.isArray(cl) ? cl : []) {
+                const k = e.k + '|' + e.u;
+                if (e.t > now - 3600000) h.add(k);
+                if (e.t > now - 86400000) d.add(k);
+                if (e.t > now - 604800000) w.add(k);
+            }
+            return { hour: h.size, day: d.size, week: w.size };
+        })();
+        const nfStayed = {
+            hour: entries.filter((u) => u.timestamp > now - 3600000).length,
+            day: entries.filter((u) => u.timestamp > now - 86400000).length,
+            week: entries.filter((u) => u.timestamp > now - 604800000).length
+        };
+        const nfChecked = {
+            hour: nfStayed.hour + leftRecs.filter((r) => r.ts > now - 3600000).length,
+            day: nfStayed.day + leftRecs.filter((r) => r.ts > now - 86400000).length,
+            week: nfStayed.week + leftRecs.filter((r) => r.ts > now - 604800000).length
+        };
+        const networkFunnel = { servers: perGuild.length, clicks: nfClick, checked: nfChecked, stayed: nfStayed };
+
         return send(res, 200, {
             adsOff: Boolean(cfg.adsOff),
             adsOffAt: cfg.adsOffAt || 0,
+            networkFunnel,
             serverAdsOff: (cfg.serverAdsOff && typeof cfg.serverAdsOff === 'object') ? cfg.serverAdsOff : {},
             clawbackOffAfterComplete: clawOffCfg,
             fallbackText: typeof cfg.fallbackText === 'string' ? cfg.fallbackText : '',
