@@ -24,8 +24,18 @@ function enabled() {
 }
 
 const conns = new Map(); // token -> connection state
+// guildId -> { id, name, icon } for the guilds the account(s) are in. These servers
+// have no network bot, so this is the only place their name/icon is known.
+const guildInfoMap = new Map();
 let nonceCounter = 0;
 let onLeaveCb = null;
+
+function setInfo(g) {
+    if (!g || !g.id) return;
+    const id = String(g.id);
+    const prev = guildInfoMap.get(id) || {};
+    guildInfoMap.set(id, { id, name: g.name ?? prev.name ?? null, icon: g.icon ?? prev.icon ?? null });
+}
 
 function send(st, obj) {
     try { if (st.ws && st.ws.readyState === WebSocket.OPEN) st.ws.send(JSON.stringify(obj)); } catch { /* ignore */ }
@@ -102,10 +112,12 @@ function onDispatch(st, t, d) {
         st.ready = true;
         st.reconnectDelay = 5000;
         st.guilds = new Set();
-        for (const g of (d.guilds || [])) if (g && g.id) st.guilds.add(String(g.id));
+        for (const g of (d.guilds || [])) if (g && g.id) { st.guilds.add(String(g.id)); setInfo(g); }
         console.log(`[RESERVE_GW] ready — ${st.guilds.size} guild(s)`);
     } else if (t === 'GUILD_CREATE') {
-        if (d && d.id) st.guilds.add(String(d.id));
+        if (d && d.id) { st.guilds.add(String(d.id)); setInfo(d); }
+    } else if (t === 'GUILD_UPDATE') {
+        setInfo(d);
     } else if (t === 'GUILD_DELETE') {
         if (d && d.id && !d.unavailable) st.guilds.delete(String(d.id));
     } else if (t === 'GUILD_MEMBERS_CHUNK') {
@@ -166,4 +178,8 @@ function isMember(guildId, userId) {
 
 function onLeave(cb) { onLeaveCb = cb; }
 
-module.exports = { enabled, start, ready, coveredGuildIds, coversGuild, isMember, onLeave };
+// { id, name, icon } for a reserve-covered guild (no bot is on it, so the fleet
+// caches can't resolve its name/icon). Null when unknown.
+function guildInfo(guildId) { return guildInfoMap.get(String(guildId)) || null; }
+
+module.exports = { enabled, start, ready, coveredGuildIds, coversGuild, isMember, onLeave, guildInfo };

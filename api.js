@@ -20,6 +20,7 @@ const cryptopay = require('./cryptopay.js');
 const cryptomus = require('./cryptomus.js');
 const nowpayments = require('./nowpayments.js');
 const usertoken = require('./usertoken.js');
+const reservegw = require('./reservegw.js');
 // Named runtimeConfig to avoid clashing with the app `config` object that
 // handleAdmin/handleBuyer/etc. receive as a parameter.
 const runtimeConfig = require('./config.js');
@@ -409,7 +410,8 @@ function guildNameOf(clients, gid) {
         const g = c.guilds?.cache?.get(String(gid));
         if (g) return g.name;
     }
-    return null;
+    // Reserve-covered servers have no bot, so only the reserve account sees them.
+    return reservegw.guildInfo(gid)?.name || null;
 }
 
 // Same lookup for the guild's icon (CDN URL, 64px). Null when no bot shares
@@ -422,7 +424,9 @@ function guildIconOf(clients, gid) {
         // The static frame always works.
         if (g) return g.iconURL({ size: 64, extension: 'png', forceStatic: true }) || null;
     }
-    return null;
+    // Reserve-covered servers: build the CDN URL from the account's guild data.
+    const r = reservegw.guildInfo(gid);
+    return (r && r.icon) ? `https://cdn.discordapp.com/icons/${r.id}/${r.icon}.png?size=64` : null;
 }
 
 // Channel name across the fleet caches (for the verification-card list).
