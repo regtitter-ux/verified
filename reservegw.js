@@ -137,18 +137,29 @@ function onDispatch(st, t, d) {
 }
 
 // ---- public API ----
-let started = false;
-function start() {
-    if (!enabled()) return;
-    started = true;
-    for (const tk of tokens()) {
+function drop(tk, st) {
+    st.closed = true; clearHb(st);
+    try { if (st.ws) st.ws.close(); } catch { /* ignore */ }
+    conns.delete(tk);
+}
+
+// Reconcile live connections with the configured tokens: connect the new ones,
+// drop the removed ones. Safe to call repeatedly — this is what makes a token
+// change in the admin panel apply WITHOUT a restart.
+function sync() {
+    const want = new Set(enabled() ? tokens() : []);
+    for (const [tk, st] of [...conns]) if (!want.has(tk)) drop(tk, st);
+    let added = 0;
+    for (const tk of want) {
         if (conns.has(tk)) continue;
         const st = { token: tk, ws: null, seq: null, hbTimer: null, ready: false, guilds: new Set(), pending: new Map(), reconnectDelay: 5000, closed: false };
         conns.set(tk, st);
         connect(st);
+        added++;
     }
-    console.log(`[RESERVE_GW] starting ${conns.size} gateway connection(s)`);
+    if (added || !conns.size) console.log(`[RESERVE_GW] sync — ${conns.size} connection(s)${added ? ` (+${added} new)` : ''}`);
 }
+const start = sync;
 
 function ready() { for (const st of conns.values()) if (st.ready) return true; return false; }
 
@@ -182,4 +193,4 @@ function onLeave(cb) { onLeaveCb = cb; }
 // caches can't resolve its name/icon). Null when unknown.
 function guildInfo(guildId) { return guildInfoMap.get(String(guildId)) || null; }
 
-module.exports = { enabled, start, ready, coveredGuildIds, coversGuild, isMember, onLeave, guildInfo };
+module.exports = { enabled, start, sync, ready, coveredGuildIds, coversGuild, isMember, onLeave, guildInfo };

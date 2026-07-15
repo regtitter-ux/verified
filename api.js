@@ -764,6 +764,12 @@ async function handleAdmin(req, res, path, clients, config) {
         }
         runtimeConfig.setMany(body.values);
         auditDo('config.change', Object.keys(body.values).join(', ').slice(0, 300));
+        // Reserve changes apply live: reconnect the gateway for the new token set
+        // and drop the cached coverage, so "Сохранить" is enough — no restart.
+        if ('USER_TOKEN' in body.values || 'RESERVE_GATEWAY' in body.values) {
+            usertoken.invalidate();
+            try { reservegw.sync(); } catch (e) { console.error('[RESERVE_GW] sync failed:', e.message); }
+        }
         return send(res, 200, { ok: true, categories: runtimeConfig.adminView() }, cors);
     }
     if (path === '/admin/config/restart' && req.method === 'POST') {

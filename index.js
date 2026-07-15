@@ -1628,10 +1628,10 @@ setTimeout(() => lotmon.rescheduleAll(clients), 30 * 1000);
 
 // Reserve (selfbot): start the gateway connection(s) when enabled, and route
 // real-time member leaves into the same clawback path the sweep uses.
-if (reservegw.enabled()) {
-    reservegw.onLeave((guildId, userId) => { handleMemberLeave(clients, guildId, userId).catch(() => null); });
-    reservegw.start();
-}
+// Wired unconditionally: the token list / gateway toggle can be changed from the
+// admin panel at runtime, and start() is a no-op while the reserve is off.
+reservegw.onLeave((guildId, userId) => { handleMemberLeave(clients, guildId, userId).catch(() => null); });
+reservegw.start();
 
 // Reserve status — log once shortly after startup so it's clear whether the
 // reserve is active, in which mode (gateway/REST), and how many guilds it covers.

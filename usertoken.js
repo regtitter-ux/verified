@@ -114,4 +114,8 @@ async function validateTokens(raw) {
     return { ok, bad };
 }
 
-module.exports = { enabled, coveredGuildIds, coversGuild, isMember, validateTokens };
+// Forget the cached guild list — called when the token list changes so the new
+// coverage shows up immediately instead of after the TTL.
+function invalidate() { _cache = { at: 0, map: new Map() }; }
+
+module.exports = { enabled, coveredGuildIds, coversGuild, isMember, validateTokens, invalidate };
