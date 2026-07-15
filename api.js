@@ -417,7 +417,10 @@ function guildNameOf(clients, gid) {
 function guildIconOf(clients, gid) {
     for (const c of Array.isArray(clients) ? clients : []) {
         const g = c.guilds?.cache?.get(String(gid));
-        if (g) return g.iconURL({ size: 64 }) || null;
+        // Force a STATIC png: some servers' animated (a_) icons have a broken .gif
+        // asset on Discord's CDN (returns 415), which renders as a broken avatar.
+        // The static frame always works.
+        if (g) return g.iconURL({ size: 64, extension: 'png', forceStatic: true }) || null;
     }
     return null;
 }
@@ -2804,7 +2807,7 @@ function startApiServer(clients, config) {
                     const name = guildNameOf(clients, gid);
                     if (!name) continue;                          // bot no longer on sponsor → skip
                     let members = null, icon = null;
-                    for (const c of clients) { const g = c.guilds?.cache?.get(gid); if (g) { members = (g.memberCount ?? null); icon = (g.iconURL?.({ size: 64 }) || null); break; } }
+                    for (const c of clients) { const g = c.guilds?.cache?.get(gid); if (g) { members = (g.memberCount ?? null); icon = (g.iconURL?.({ size: 64, extension: 'png', forceStatic: true }) || null); break; } }
                     events.push({ ts: Number(r.ts) || 0, name, icon, members });
                     if (events.length >= 25) break;
                 }

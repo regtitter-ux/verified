@@ -140,7 +140,8 @@ function buildPersonalCard(guild, creatorId, roleId) {
 // Components V2 layout for the one personalized bot.
 function buildCard(guild, creatorId, roleId, description, botId) {
     if (String(botId || '') === PERSONALIZED_BOT_ID) return buildPersonalCard(guild, creatorId, roleId);
-    const icon = guild?.iconURL?.({ dynamic: true }) || null;
+    // Static png: a broken animated (a_) icon renders as a broken avatar in the embed.
+    const icon = guild?.iconURL?.({ extension: 'png', forceStatic: true }) || null;
     const embed = new EmbedBuilder()
         .setAuthor({ name: guild?.name || 'Server', iconURL: icon })
         .setTitle('Get verified!')
