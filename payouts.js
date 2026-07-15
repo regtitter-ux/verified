@@ -3,6 +3,7 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { logFunds } = require('./fundslog.js');
 const { REFERRAL_RATE } = require('./referral.js'); // referrer earns 10% of each referred user's withdrawal
 const cryptopay = require('./cryptopay.js');
+const nowpayments = require('./nowpayments.js');
 const partnerlog = require('./partnerlog.js');
 
 // Mirror a partner money movement into the activity log (never blocks the payout).
@@ -165,6 +166,15 @@ async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
     // referral income from what the referrer earns 10% on, so commissions don't
     // compound.
     //
+    // LTC to the partner's own address via NOWPayments. Most explicit of the
+    // modes (the owner set an address for this user), so it wins when enabled.
+    if (s.autoLtc && s.ltcAddress) {
+        s.balance = 0;
+        const eligible = drainRefBonusPool(s, amount);
+        saveJSON('settings.json', settings);
+        logPartnerMoney(userId, { type: 'debit', reason: 'payout', amount, srcId: `payout:${userId}:${Date.now()}` });
+        return autoPayViaLtc(clients, userId, amount, _seen, eligible);
+    }
     // Direct transfer (no check) takes precedence: money lands straight in the
     // recipient's @CryptoBot wallet, no claim link. Needs their Telegram id.
     if (cryptopay.enabled() && s.autoTransfer && s.tgUserId) {
@@ -271,6 +281,109 @@ async function alertOwnerCryptoPayConfig(clients, why) {
     ];
     await dmOwner(clients, OWNER_ID, { content: lines.join('\n') }).catch(() => null);
     console.error(`[CRYPTOPAY] admin-side failure: ${why}`);
+}
+
+// The balance was already reserved (set to 0). Send it as LTC straight to the
+// partner's own address via NOWPayments; on any failure, refund the reservation so
+// it retries later.
+//
+// The withdrawal is recorded as 'processing', NOT 'completed': NOWPayments accepts
+// the batch first and settles it later (and can still reject it — e.g. address
+// whitelisting). settleLtcPayouts() below finalises it or refunds the money, so a
+// rejected payout can never silently swallow a partner's balance.
+async function autoPayViaLtc(clients, userId, amount, _seen, eligibleForReferral = amount) {
+    const s0 = loadJSON('settings.json')[userId] || {};
+    const address = String(s0.ltcAddress || '').trim();
+    if (!address) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'no LTC address is set'); }
+    if (!nowpayments.payoutEnabled()) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'NOWPayments payouts are not configured'); }
+
+    const coin = await nowpayments.estimatePayout(amount);
+    if (!coin) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'could not estimate the LTC amount'); }
+
+    let batch;
+    try { batch = await nowpayments.createPayout({ address, amount: coin }); }
+    catch (e) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, `LTC payout failed (${e.message || 'unknown'})`); }
+    const wd = (batch && Array.isArray(batch.withdrawals) && batch.withdrawals[0]) || null;
+    if (!wd && !(batch && batch.id)) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'LTC payout was not accepted'); }
+
+    const settings = loadJSON('settings.json');
+    if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
+    if (!Array.isArray(settings[userId].withdrawals)) settings[userId].withdrawals = [];
+    const withdrawal = {
+        id: `${userId}-${Date.now()}`,
+        amount,
+        status: 'processing',
+        method: 'nowpayments_ltc',
+        payoutId: String((wd && wd.id) || batch.id),
+        batchId: batch && batch.id ? String(batch.id) : null,
+        coinAmount: coin,
+        address,
+        eligibleForReferral,
+        createdAt: Date.now()
+    };
+    settings[userId].withdrawals.push(withdrawal);
+    saveJSON('settings.json', settings);
+
+    logFunds(clients, {
+        type: 'debit', creatorId: userId, amount,
+        reason: `Auto-payout (LTC ${coin} → ${address})`
+    });
+    await dmOwner(clients, userId, {
+        content: `💸 Auto-payout sent: **$${amount.toFixed(2)}** ≈ **${coin} LTC**\nAddress: \`${address}\`\nIt will arrive after network confirmation.`
+    }).catch(() => null);
+}
+
+// Finalise LTC payouts that NOWPayments has settled — or refund the ones it
+// rejected. Runs periodically; each record is only acted on once.
+async function settleLtcPayouts(clients) {
+    if (!nowpayments.payoutEnabled()) return;
+    const snapshot = loadJSON('settings.json');
+    const pending = [];
+    for (const [uid, s] of Object.entries(snapshot)) {
+        for (const w of (Array.isArray(s?.withdrawals) ? s.withdrawals : [])) {
+            if (w && w.method === 'nowpayments_ltc' && w.status === 'processing' && w.payoutId) pending.push({ uid, id: w.id, payoutId: w.payoutId });
+        }
+    }
+    if (!pending.length) return;
+
+    for (const p of pending) {
+        const info = await nowpayments.payoutInfo(p.payoutId);
+        const status = info && (info.status || (Array.isArray(info.withdrawals) && info.withdrawals[0] && info.withdrawals[0].status));
+        if (!status) continue;                                   // unreachable → try again next sweep
+        const done = nowpayments.isPayoutDone(status);
+        const dead = nowpayments.isPayoutDead(status);
+        if (!done && !dead) continue;                            // still in flight
+
+        // Re-load fresh and win the transition, so a concurrent sweep can't
+        // double-refund or double-pay the referral.
+        const fresh = loadJSON('settings.json');
+        const w = (fresh[p.uid]?.withdrawals || []).find((x) => x && x.id === p.id);
+        if (!w || w.status !== 'processing') continue;
+        w.status = done ? 'completed' : 'failed';
+        if (done) w.completedAt = Date.now(); else w.failedAt = Date.now();
+        w.payoutStatus = String(status);
+        if (dead) fresh[p.uid].balance = round2((Number(fresh[p.uid].balance) || 0) + Number(w.amount || 0));
+        saveJSON('settings.json', fresh);
+
+        if (done) {
+            payReferral(clients, p.uid, Number(w.eligibleForReferral ?? w.amount) || 0, new Set());
+            console.log(`[LTC_PAYOUT] settled $${w.amount} for ${p.uid} (${status})`);
+        } else {
+            logPartnerMoney(p.uid, { type: 'credit', reason: 'payout_refund', amount: Number(w.amount) || 0, srcId: `ltcrefund:${w.id}` });
+            logFunds(clients, { type: 'credit', creatorId: p.uid, amount: Number(w.amount) || 0, reason: `LTC payout ${status} — balance refunded` });
+            await dmOwner(clients, p.uid, {
+                content: `⚠️ Your LTC payout of **$${Number(w.amount).toFixed(2)}** was not sent (${status}). Your balance has been restored — it will be retried automatically.`
+            }).catch(() => null);
+            console.error(`[LTC_PAYOUT] ${status} for ${p.uid} — refunded $${w.amount}`);
+        }
+    }
+}
+
+function startLtcPayoutSweep(clients) {
+    const every = Number(process.env.LTC_PAYOUT_SWEEP_MS) || 5 * 60 * 1000;
+    const tick = () => settleLtcPayouts(clients).catch((e) => console.error('[LTC_PAYOUT] sweep error:', e.message));
+    setInterval(tick, every);
+    setTimeout(tick, 90 * 1000);
 }
 
 // The balance was already reserved (set to 0). Issue a USDT check and deliver the
@@ -599,6 +712,8 @@ module.exports = {
     WITHDRAW_CHANNEL,
     THRESHOLD,
     MANUAL_USER,
+    settleLtcPayouts,
+    startLtcPayoutSweep,
     buildHistoryView,
     maybeAutoWithdraw,
     completeWithdrawal,

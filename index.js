@@ -11,7 +11,7 @@ const lotmon = require('./lotmon.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
-    buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone
+    buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone, startLtcPayoutSweep
 } = require('./payouts.js');
 const { startApiServer, createApiKey } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave, extractInviteCodes } = require('./joincheck.js');
@@ -1632,6 +1632,9 @@ setTimeout(() => lotmon.rescheduleAll(clients), 30 * 1000);
 // admin panel at runtime, and start() is a no-op while the reserve is off.
 reservegw.onLeave((guildId, userId) => { handleMemberLeave(clients, guildId, userId).catch(() => null); });
 reservegw.start();
+
+// Settle (or refund) LTC auto-payouts NOWPayments has finished/rejected.
+startLtcPayoutSweep(clients);
 
 // Reserve status — log once shortly after startup so it's clear whether the
 // reserve is active, in which mode (gateway/REST), and how many guilds it covers.

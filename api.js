@@ -1522,6 +1522,8 @@ async function handleAdmin(req, res, path, clients, config) {
                 refBonusAccrued: money(s.refBonusAccrued),
                 autoPayout: Boolean(s.autoPayout),
                 autoTransfer: Boolean(s.autoTransfer),
+                autoLtc: Boolean(s.autoLtc),
+                ltcAddress: s.ltcAddress || null,
                 referrer: s.referrer || null,
                 referralsCount: Array.isArray(s.referrals) ? s.referrals.length : 0,
                 verifications: vCount[uid] || 0,
@@ -1600,6 +1602,8 @@ async function handleAdmin(req, res, path, clients, config) {
             refBonusAccrued: money(s.refBonusAccrued),
             autoPayout: Boolean(s.autoPayout),
             autoTransfer: Boolean(s.autoTransfer),
+            autoLtc: Boolean(s.autoLtc),
+            ltcAddress: s.ltcAddress || null,
             tgUserId: s.tgUserId || null,
             referrer: s.referrer || null,
             referrals: Array.isArray(s.referrals) ? s.referrals : [],
@@ -1710,6 +1714,23 @@ async function handleAdmin(req, res, path, clients, config) {
             saveJSON('settings.json', settings);
             auditDo('autotransfer', `${userId}: ${s.autoTransfer ? 'on' : 'off'}${s.tgUserId ? ' tg=' + s.tgUserId : ''}`);
             return send(res, 200, { ok: true, autoTransfer: s.autoTransfer, tgUserId: s.tgUserId || null }, cors);
+        }
+        // LTC auto-payout: a toggle + the partner's own LTC address. Can't be
+        // enabled without an address to send to.
+        if (field === 'autoltc') {
+            if (body.ltcAddress !== undefined) {
+                const addr = String(body.ltcAddress || '').trim();
+                // Legacy (L/M/3…) and bech32 (ltc1…) — length-checked, not validated on-chain.
+                if (addr && !/^(ltc1[a-z0-9]{20,70}|[LM3][a-km-zA-HJ-NP-Z1-9]{25,40})$/.test(addr)) {
+                    return send(res, 400, { error: 'bad-ltc-address' }, cors);
+                }
+                s.ltcAddress = addr || null;
+            }
+            s.autoLtc = Boolean(body.autoLtc);
+            if (s.autoLtc && !s.ltcAddress) return send(res, 400, { error: 'ltc-address-required' }, cors);
+            saveJSON('settings.json', settings);
+            auditDo('autoltc', `${userId}: ${s.autoLtc ? 'on' : 'off'}${s.ltcAddress ? ' addr=' + s.ltcAddress : ''}`);
+            return send(res, 200, { ok: true, autoLtc: s.autoLtc, ltcAddress: s.ltcAddress || null, payoutReady: nowpayments.payoutEnabled() }, cors);
         }
         if (field === 'referrals') {
             const raw = Array.isArray(body.referrals) ? body.referrals : [];
@@ -2575,6 +2596,8 @@ async function handlePartner(req, res, path, clients, config) {
             refBonusAccrued: money(s.refBonusAccrued),
             autoPayout: Boolean(s.autoPayout),
             autoTransfer: Boolean(s.autoTransfer),
+            autoLtc: Boolean(s.autoLtc),
+            ltcAddress: s.ltcAddress || null,
             standingJoins: standing.length,
             standingPaid: sumAmt(standing),
             clawedJoins: clawed.length,
