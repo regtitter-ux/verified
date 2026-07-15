@@ -752,18 +752,46 @@ async function handleAdmin(req, res, path, clients, config) {
         return;
     }
 
-    // Verification-activity series for the Statistics chart: counts bucketed over
-    // a time range, totalled across every server that has a LIVE card, plus a
-    // per-server split so the panel can highlight one or more servers. Any admin
-    // may read. Points are capped so the payload stays small on long ranges.
-    if (path.startsWith('/admin/verif-series') && req.method === 'GET') {
-        const q = new URL(req.url, 'http://x').searchParams;
-        const range = ['day', 'week', 'month', 'all'].includes(q.get('range')) ? q.get('range') : 'day';
+    // Verification-activity series for the Statistics chart. Returns ALL THREE
+    // funnel stages at once so the panel can draw them together and toggle any of
+    // them off: first click -> join checked -> still on the server. Counts are
+    // bucketed over the range across every server with a LIVE card.
+    //   ?servers=gid,gid  scopes the totals to those servers AND returns their
+    //                     own bucketed rows (bounded to 8) for comparison.
+    // Payload stays small: per-server ROWS only for the selected few; the chip
+    // list carries scalar counts only. Any admin may read.
+    if (path.startsWith("/admin/verif-series") && req.method === "GET") {
+        const q = new URL(req.url, "http://x").searchParams;
+        const range = ["day", "week", "month", "all"].includes(q.get("range")) ? q.get("range") : "day";
+        const sel = String(q.get("servers") || "").split(",").map((x) => x.trim())
+            .filter((x) => /^d{17,20}$/.test(x)).slice(0, 8);
+        const selSet = new Set(sel);
         const now = Date.now();
-        const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
+
         // Only servers with a live (non-deleted) verification card.
         const activeGuilds = new Set();
         for (const c of cards.loadCards()) if (c && !c.deletedAt && c.guildId) activeGuilds.add(String(c.guildId));
+
+        // Flatten each stage into { t, gid } events.
+        //  clicks  - cardclicks.json (key "guildId:roleId:creatorId"); one event per
+        //            started session, pruned to 7 days on write (see CLICK_TTL).
+        //  stayed  - verified.json (leavers are removed from it).
+        //  checked - everyone who verified: still-standing + clawed-back leavers.
+        const vArr = (() => { const v = loadJSON("verified.json", []); return Array.isArray(v) ? v : []; })();
+        const jArr = (() => { const j2 = loadJSON("joinlinks.json", []); return Array.isArray(j2) ? j2 : []; })();
+        const cArr = (() => { const c2 = loadJSON("cardclicks.json", []); return Array.isArray(c2) ? c2 : []; })();
+        const ev = { clicks: [], checked: [], stayed: [] };
+        for (const e of cArr) { const gid = String(e.k || "").split(":")[0]; if (activeGuilds.has(gid)) ev.clicks.push({ t: Number(e.t) || 0, gid }); }
+        for (const u of vArr) {
+            const gid = String(u.guildId || ""); if (!activeGuilds.has(gid)) continue;
+            const t = Number(u.timestamp) || 0;
+            ev.stayed.push({ t, gid }); ev.checked.push({ t, gid });
+        }
+        for (const r of jArr) {
+            if (!r || r.status !== "left") continue;
+            const gid = String(r.cardGuildId || ""); if (!activeGuilds.has(gid)) continue;
+            ev.checked.push({ t: Number(r.ts) || 0, gid });
+        }
 
         const SPEC = {
             day: { span: 86400000, bucket: 15 * 60000 },
@@ -772,45 +800,45 @@ async function handleAdmin(req, res, path, clients, config) {
             all: { span: null, bucket: 86400000 }
         }[range];
         let span = SPEC.span;
-        if (span == null) { // "all time" → from the first verification on a carded server
+        if (span == null) { // "all time" -> from the earliest event on a carded server
             let first = now;
-            for (const u of vArr) {
-                const t = Number(u.timestamp) || 0;
-                if (t && t < first && activeGuilds.has(String(u.guildId))) first = t;
-            }
+            for (const k of ["clicks", "checked", "stayed"]) for (const e of ev[k]) if (e.t && e.t < first) first = e.t;
             span = Math.max(86400000, now - first);
         }
         const bucket = SPEC.bucket;
         const n = Math.max(1, Math.min(400, Math.ceil(span / bucket)));
         const from = now - n * bucket;
+        const idxOf = (t) => (!t || t < from) ? -1 : Math.min(n - 1, Math.floor((t - from) / bucket));
 
-        const total = new Array(n).fill(0);
-        const byGuild = new Map();
-        for (const u of vArr) {
-            const t = Number(u.timestamp) || 0;
-            if (!t || t < from) continue;
-            const gid = String(u.guildId || '');
-            if (!activeGuilds.has(gid)) continue;
-            const i = Math.min(n - 1, Math.floor((t - from) / bucket));
-            if (i < 0) continue;
-            total[i]++;
-            let a = byGuild.get(gid);
-            if (!a) { a = new Array(n).fill(0); byGuild.set(gid, a); }
-            a[i]++;
+        // One pass per stage: totals over the scope, rows for the selected servers,
+        // and scalar per-server counts for the chip list.
+        const scoped = selSet.size > 0;
+        const totals = {}; const rows = new Map(); const chips = new Map();
+        for (const k of ["clicks", "checked", "stayed"]) {
+            const total = new Array(n).fill(0);
+            for (const e of ev[k]) {
+                const i = idxOf(e.t); if (i < 0) continue;
+                if (!scoped || selSet.has(e.gid)) total[i]++;
+                if (selSet.has(e.gid)) {
+                    let r2 = rows.get(e.gid); if (!r2) { r2 = {}; rows.set(e.gid, r2); }
+                    let a = r2[k]; if (!a) { a = r2[k] = new Array(n).fill(0); }
+                    a[i]++;
+                }
+                let ch = chips.get(e.gid); if (!ch) { ch = { clicks: 0, checked: 0, stayed: 0 }; chips.set(e.gid, ch); }
+                ch[k]++;
+            }
+            totals[k] = total;
         }
-        const series = [...byGuild.entries()]
-            .map(([gid, data]) => ({
-                gid, name: guildNameOf(clients, gid) || gid, icon: guildIconOf(clients, gid),
-                data, total: data.reduce((s, x) => s + x, 0)
-            }))
-            .sort((a, b) => b.total - a.total);
-        const sum = total.reduce((s, x) => s + x, 0);
-        return send(res, 200, {
-            range, from, bucketMs: bucket, points: n, total, series,
-            peak: total.length ? Math.max(...total) : 0,
-            avg: n ? +(sum / n).toFixed(1) : 0,
-            sum, servers: series.length
-        }, cors);
+        const servers = [...chips.entries()]
+            .map(([gid, o]) => ({ gid, name: guildNameOf(clients, gid) || gid, icon: guildIconOf(clients, gid), ...o }))
+            .sort((a, b) => b.checked - a.checked || b.clicks - a.clicks);
+        const perServer = sel.map((gid) => {
+            const meta = servers.find((x) => x.gid === gid);
+            const r2 = rows.get(gid) || {};
+            const z = () => new Array(n).fill(0);
+            return { gid, name: (meta && meta.name) || gid, icon: (meta && meta.icon) || null, clicks: r2.clicks || z(), checked: r2.checked || z(), stayed: r2.stayed || z() };
+        });
+        return send(res, 200, { range, from, bucketMs: bucket, points: n, totals, perServer, servers, clicksTtlDays: 7 }, cors);
     }
 
     // Partner activity log across ALL partners, with filters (by partner, by
