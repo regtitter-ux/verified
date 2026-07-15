@@ -9,6 +9,7 @@
 //
 // ToS note: a persistent user-account gateway connection is a stronger automation
 // signal than occasional REST calls → higher ban risk. Operator's own risk.
+const https = require('https');
 const WebSocket = require('ws');
 const config = require('./config.js');
 
@@ -144,7 +145,7 @@ function onDispatch(st, t, d) {
         st.guilds = new Set();
         for (const g of (d.guilds || [])) if (g && g.id) { st.guilds.add(String(g.id)); setInfo(g); }
         console.log(`[RESERVE_GW] ready — ${st.guilds.size} guild(s)`);
-        backfillNames(st).catch(() => null);   // names the READY payload may omit
+        backfillNames(st).catch((e) => console.error('[RESERVE_GW] name backfill failed:', e.message));
     } else if (t === 'GUILD_CREATE') {
         if (d && d.id) { st.guilds.add(String(d.id)); setInfo(d); }
     } else if (t === 'GUILD_UPDATE') {
