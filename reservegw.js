@@ -30,11 +30,41 @@ const guildInfoMap = new Map();
 let nonceCounter = 0;
 let onLeaveCb = null;
 
+// User-account gateways send guilds either flat ({ id, name, icon }) or, with the
+// capabilities we identify with, nested ({ id, properties: { name, icon } }) —
+// read both, or the name silently comes back empty.
 function setInfo(g) {
-    if (!g || !g.id) return;
-    const id = String(g.id);
+    if (!g) return;
+    const p = (g.properties && typeof g.properties === 'object') ? g.properties : g;
+    const id = String(g.id || p.id || '');
+    if (!id) return;
     const prev = guildInfoMap.get(id) || {};
-    guildInfoMap.set(id, { id, name: g.name ?? prev.name ?? null, icon: g.icon ?? prev.icon ?? null });
+    guildInfoMap.set(id, { id, name: p.name ?? prev.name ?? null, icon: p.icon ?? prev.icon ?? null });
+}
+
+// Belt-and-braces: REST always returns id+name+icon for the account's guilds, so
+// fill in anything the gateway payload didn't carry. One request per connection.
+function restGuilds(token) {
+    return new Promise((resolve) => {
+        const req = https.request({
+            host: 'discord.com', path: '/api/v10/users/@me/guilds', method: 'GET',
+            headers: { Authorization: token, 'Content-Type': 'application/json' }
+        }, (res) => {
+            let data = '';
+            res.on('data', (c) => { data += c; });
+            res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
+        });
+        req.on('error', () => resolve(null));
+        req.setTimeout(12000, () => req.destroy());
+        req.end();
+    });
+}
+async function backfillNames(st) {
+    const list = await restGuilds(st.token);
+    if (!Array.isArray(list)) return;
+    for (const g of list) setInfo(g);
+    const named = [...st.guilds].filter((id) => guildInfoMap.get(id)?.name).length;
+    console.log(`[RESERVE_GW] names resolved for ${named}/${st.guilds.size} guild(s)`);
 }
 
 function send(st, obj) {
@@ -114,6 +144,7 @@ function onDispatch(st, t, d) {
         st.guilds = new Set();
         for (const g of (d.guilds || [])) if (g && g.id) { st.guilds.add(String(g.id)); setInfo(g); }
         console.log(`[RESERVE_GW] ready — ${st.guilds.size} guild(s)`);
+        backfillNames(st).catch(() => null);   // names the READY payload may omit
     } else if (t === 'GUILD_CREATE') {
         if (d && d.id) { st.guilds.add(String(d.id)); setInfo(d); }
     } else if (t === 'GUILD_UPDATE') {
