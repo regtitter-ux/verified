@@ -130,6 +130,51 @@ async function createPayout({ address, amount, currency, ipnCallbackUrl }) {
     return call('/v1/payout', 'POST', body, { Authorization: 'Bearer ' + jwt });
 }
 
+// ---- Payout 2FA ----
+// NOWPayments guards each payout batch with a TOTP code (the same secret their
+// dashboard shows when you set up 2FA). Generating it here lets payouts complete
+// unattended WITHOUT asking support to disable 2FA — and an unverified batch is
+// auto-rejected after an hour, so verifying immediately matters.
+// RFC 6238, SHA-1/6 digits/30s — implemented on node's crypto, no dependency.
+function base32Decode(str) {
+    const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    const clean = String(str || '').toUpperCase().replace(/[=\s-]/g, '');
+    let bits = 0, value = 0;
+    const out = [];
+    for (const c of clean) {
+        const idx = A.indexOf(c);
+        if (idx < 0) continue;
+        value = (value << 5) | idx; bits += 5;
+        if (bits >= 8) { out.push((value >>> (bits - 8)) & 0xff); bits -= 8; }
+    }
+    return Buffer.from(out);
+}
+function totp(secret, at = Date.now()) {
+    const key = base32Decode(secret);
+    if (!key.length) return null;
+    const buf = Buffer.alloc(8);
+    buf.writeBigInt64BE(BigInt(Math.floor(at / 1000 / 30)));
+    const h = crypto.createHmac('sha1', key).update(buf).digest();
+    const o = h[h.length - 1] & 0x0f;
+    const code = (((h[o] & 0x7f) << 24) | ((h[o + 1] & 0xff) << 16) | ((h[o + 2] & 0xff) << 8) | (h[o + 3] & 0xff)) % 1000000;
+    return String(code).padStart(6, '0');
+}
+const payout2faSecret = () => (process.env.NOWPAYMENTS_2FA_SECRET || '').trim();
+const has2fa = () => Boolean(payout2faSecret());
+
+// Verify a created batch so it actually goes out. Returns { ok } / { ok:false, reason }.
+async function verifyPayout(batchId) {
+    const secret = payout2faSecret();
+    if (!secret) return { ok: false, reason: 'no-2fa-secret' };
+    const code = totp(secret);
+    if (!code) return { ok: false, reason: 'bad-2fa-secret' };
+    try {
+        const jwt = await authJwt();
+        await call(`/v1/payout/${encodeURIComponent(batchId)}/verify`, 'POST', { verification_code: code }, { Authorization: 'Bearer ' + jwt });
+        return { ok: true };
+    } catch (e) { return { ok: false, reason: e.message || 'verify failed' }; }
+}
+
 // Batch/withdrawal record, or null. Used to settle or refund a pending payout.
 async function payoutInfo(id) {
     const jwt = await authJwt().catch(() => null);
@@ -143,5 +188,6 @@ const isPayoutDead = (s) => PAYOUT_DEAD.has(String(s || '').toUpperCase());
 
 module.exports = {
     enabled, hasSecret, createPayment, paymentInfo, paymentStatus, isPaidStatus, verifyWebhook,
-    payoutEnabled, payoutCurrency, estimatePayout, createPayout, payoutInfo, isPayoutDone, isPayoutDead
+    payoutEnabled, payoutCurrency, estimatePayout, createPayout, payoutInfo, isPayoutDone, isPayoutDead,
+    has2fa, verifyPayout, totp
 };

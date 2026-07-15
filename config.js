@@ -45,6 +45,8 @@ const REGISTRY = [
     { cat: 'Платежи', key: 'NOWPAYMENTS_EMAIL', label: 'NOWPayments: email аккаунта (для авто-выплат)', type: 'secret', live: true,
         help: 'Нужен только для АВТО-ВЫПЛАТ партнёрам (payout API требует логин, а не только ключ). У NOWPayments выплаты по умолчанию закрыты 2FA и белым списком адресов — попроси поддержку отключить оба, иначе выплаты будут висеть в WAITING.' },
     { cat: 'Платежи', key: 'NOWPAYMENTS_PASSWORD', label: 'NOWPayments: пароль аккаунта (для авто-выплат)', type: 'secret', live: true },
+    { cat: 'Платежи', key: 'NOWPAYMENTS_2FA_SECRET', label: 'NOWPayments: 2FA-секрет (ключ для ручного ввода)', type: 'secret', live: true,
+        help: 'TOTP-секрет из настройки 2FA в NOWPayments (строка вида JBSWY3DP…, показывается рядом с QR-кодом как «ключ для ручного ввода»). С ним выплаты подтверждаются автоматически, и 2FA отключать НЕ нужно. Без него батч ждёт ручного подтверждения в дашборде и через час авто-отклоняется (баланс вернётся).' },
     { cat: 'Платежи', key: 'NOWPAYMENTS_PAYOUT_CURRENCY', label: 'Монета авто-выплат партнёрам', type: 'text', def: 'ltc', live: true },
     { cat: 'Платежи', key: 'CRYPTO_PAY_TOKEN', label: 'CryptoBot (Crypto Pay) token', type: 'secret' },
     { cat: 'Платежи', key: 'CRYPTOMUS_MERCHANT', label: 'Cryptomus merchant UUID', type: 'secret' },

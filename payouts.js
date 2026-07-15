@@ -306,6 +306,16 @@ async function autoPayViaLtc(clients, userId, amount, _seen, eligibleForReferral
     const wd = (batch && Array.isArray(batch.withdrawals) && batch.withdrawals[0]) || null;
     if (!wd && !(batch && batch.id)) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'LTC payout was not accepted'); }
 
+    // NOWPayments holds every batch until it's 2FA-verified and auto-rejects it
+    // after an hour — verify right away when the TOTP secret is configured. A
+    // failure here isn't fatal: the batch simply expires and the sweep refunds.
+    if (batch && batch.id && nowpayments.has2fa()) {
+        const v = await nowpayments.verifyPayout(batch.id);
+        if (!v.ok) console.error(`[LTC_PAYOUT] 2FA verify failed for batch ${batch.id}: ${v.reason}`);
+    } else if (batch && batch.id) {
+        console.warn(`[LTC_PAYOUT] batch ${batch.id} created but no NOWPAYMENTS_2FA_SECRET — confirm it in the dashboard within 1h or it will be rejected`);
+    }
+
     const settings = loadJSON('settings.json');
     if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
     if (!Array.isArray(settings[userId].withdrawals)) settings[userId].withdrawals = [];
