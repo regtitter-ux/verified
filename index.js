@@ -29,6 +29,7 @@ const cards = require('./cards.js');
 const backup = require('./backup.js');
 const investors = require('./investors.js');
 const refundMigration = require('./refundmigration.js');
+const refundCampaign = require('./refundcampaign.js');
 const { logFunds } = require('./fundslog.js');
 const partnerlog = require('./partnerlog.js');
 const logincodes = require('./logincodes.js');
@@ -1655,6 +1656,9 @@ backup.startBackupSweep(clients);
 // old opt-out was keyed by the wrong guild). Guarded by a marker; delayed so
 // the bots are logged in when it posts the summary.
 setTimeout(() => refundMigration.runOnce(clients).catch((e) => console.error('[REFUND]', e.message)), 45 * 1000);
+// Return clawbacks charged for joins whose campaign had already finished (the ad
+// ERA fix in sponsorshow.js prevents new ones).
+setTimeout(() => refundCampaign.runOnce(clients).catch((e) => console.error('[REFUND]', e.message)), 50 * 1000);
 
 // Uptime monitoring: alert to ALERT_CHANNEL when a bot goes offline / recovers.
 const ALERT_CHANNEL = (process.env.ALERT_CHANNEL || '').trim();
