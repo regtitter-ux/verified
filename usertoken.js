@@ -12,6 +12,7 @@
 // banned — operate at your own risk, on disposable accounts.
 const https = require('https');
 const config = require('./config.js');
+const reservegw = require('./reservegw.js');
 
 // Current tokens, read live so panel edits apply without a restart.
 function tokens() {
@@ -57,14 +58,26 @@ async function refresh(force = false) {
     return _cache.map;
 }
 
-async function coveredGuildIds() { return new Set((await refresh()).keys()); }
-async function coversGuild(guildId) { return (await refresh()).has(String(guildId)); }
+// Prefer the gateway (persistent connection) when it's up — it's the reliable path
+// for user-token membership; REST is the fallback.
+async function coveredGuildIds() {
+    if (reservegw.enabled() && reservegw.ready()) return reservegw.coveredGuildIds();
+    return new Set((await refresh()).keys());
+}
+async function coversGuild(guildId) {
+    if (reservegw.enabled() && reservegw.ready()) return reservegw.coversGuild(guildId);
+    return (await refresh()).has(String(guildId));
+}
 
 // Is `userId` a member of `guildId`, via the account that covers that guild?
-// true / false / null (couldn't tell — transient / not permitted). Returns null if
-// no account covers the guild, so a 404 unambiguously means "not a member".
+// true / false / null (couldn't tell). Tries the gateway first, then REST.
 async function isMember(guildId, userId) {
     if (!enabled()) return null;
+    if (reservegw.enabled() && reservegw.ready()) {
+        const r = await reservegw.isMember(guildId, userId);
+        if (r !== null) return r;           // gateway answered → trust it
+        // gateway couldn't answer (guild not on this conn / timeout) → try REST
+    }
     const tk = (await refresh()).get(String(guildId));
     if (!tk) return null;
     const { status } = await apiGet(tk, `/guilds/${guildId}/members/${userId}`);

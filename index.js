@@ -21,6 +21,7 @@ const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('
 const { payShares, REVENUE_PER_JOIN } = require('./shares.js');
 const campaigns = require('./campaigns.js');
 const usertoken = require('./usertoken.js');
+const reservegw = require('./reservegw.js');
 const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
@@ -1625,13 +1626,21 @@ setTimeout(() => { try { auditlog.backfillOnce(clients, cards); } catch (e) { co
 // Re-arm close timers for any auction lots that were still active before a restart.
 setTimeout(() => lotmon.rescheduleAll(clients), 30 * 1000);
 
-// Reserve (selfbot) status — log once shortly after startup so it's clear whether
-// the user-token fallback is active and how many guilds it covers.
+// Reserve (selfbot): start the gateway connection(s) when enabled, and route
+// real-time member leaves into the same clawback path the sweep uses.
+if (reservegw.enabled()) {
+    reservegw.onLeave((guildId, userId) => { handleMemberLeave(clients, guildId, userId).catch(() => null); });
+    reservegw.start();
+}
+
+// Reserve status — log once shortly after startup so it's clear whether the
+// reserve is active, in which mode (gateway/REST), and how many guilds it covers.
 setTimeout(async () => {
     try {
         if (!usertoken.enabled()) { console.log('[USERTOKEN] reserve disabled (no USER_TOKEN set)'); return; }
+        const mode = (reservegw.enabled() && reservegw.ready()) ? 'gateway' : 'REST';
         const g = await usertoken.coveredGuildIds();
-        console.log(`[USERTOKEN] reserve active — ${g.size} guild(s) covered by the account(s)`);
+        console.log(`[USERTOKEN] reserve active (${mode}) — ${g.size} guild(s) covered`);
     } catch (e) { console.error('[USERTOKEN] status check failed:', e.message); }
 }, 25 * 1000);
 
