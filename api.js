@@ -713,7 +713,11 @@ async function handleAdmin(req, res, path, clients, config) {
         if (!isOwner) return ownerOnly();
         auditDo('config.restart', '');
         send(res, 200, { ok: true }, cors);
-        setTimeout(() => process.exit(0), 400); // Railway auto-restarts the container
+        // Railway restart policy is ALWAYS (railway.json), so a clean exit is
+        // restarted automatically. (Under the previous default ON_FAILURE policy
+        // exit(0) did NOT restart — the container stayed down.)
+        console.log('[CONFIG] restart requested from admin panel — exiting to reload');
+        setTimeout(() => process.exit(0), 400);
         return;
     }
 
