@@ -730,7 +730,26 @@ async function handleAdmin(req, res, path, clients, config) {
     // Most keys apply on the next restart; the reserve tokens apply live.
     if (path === '/admin/config' && req.method === 'GET') {
         if (!isOwner) return ownerOnly();
-        return send(res, 200, { categories: runtimeConfig.adminView() }, cors);
+        // Reserve status rides along so the token field can show what the
+        // account(s) actually cover — the fastest way to spot a dead token.
+        const covered = await usertoken.coveredGuildIds().catch(() => new Set());
+        return send(res, 200, {
+            categories: runtimeConfig.adminView(),
+            reserve: {
+                enabled: usertoken.enabled(),
+                gateway: reservegw.enabled() && reservegw.ready(),
+                guilds: [...covered].map((g) => ({ id: g, name: guildNameOf(clients, g) || g }))
+            }
+        }, cors);
+    }
+    // Reveal one secret's current value (owner only) — backs the "show tokens"
+    // toggle, since the normal view masks secrets. Audited.
+    if (path === '/admin/config/reveal' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const key = new URL(req.url, 'http://x').searchParams.get('key') || '';
+        if (!runtimeConfig.KEYS.has(key)) return send(res, 400, { error: 'bad key' }, cors);
+        auditDo('config.reveal', key);
+        return send(res, 200, { key, value: runtimeConfig.get(key) }, cors);
     }
     if (path === '/admin/config' && req.method === 'PUT') {
         if (!isOwner) return ownerOnly();
