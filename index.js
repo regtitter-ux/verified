@@ -1625,6 +1625,16 @@ setTimeout(() => { try { auditlog.backfillOnce(clients, cards); } catch (e) { co
 // Re-arm close timers for any auction lots that were still active before a restart.
 setTimeout(() => lotmon.rescheduleAll(clients), 30 * 1000);
 
+// Reserve (selfbot) status — log once shortly after startup so it's clear whether
+// the user-token fallback is active and how many guilds it covers.
+setTimeout(async () => {
+    try {
+        if (!usertoken.enabled()) { console.log('[USERTOKEN] reserve disabled (no USER_TOKEN set)'); return; }
+        const g = await usertoken.coveredGuildIds();
+        console.log(`[USERTOKEN] reserve active — ${g.size} guild(s) covered by the account(s)`);
+    } catch (e) { console.error('[USERTOKEN] status check failed:', e.message); }
+}, 25 * 1000);
+
 // Data backups: rolling local snapshots + off-site copies to a Discord channel.
 backup.startBackupSweep(clients);
 
