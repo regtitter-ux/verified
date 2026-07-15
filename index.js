@@ -22,6 +22,7 @@ const { payShares, REVENUE_PER_JOIN } = require('./shares.js');
 const campaigns = require('./campaigns.js');
 const usertoken = require('./usertoken.js');
 const reservegw = require('./reservegw.js');
+const perf = require('./perf.js');
 const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
@@ -1635,6 +1636,9 @@ reservegw.start();
 
 // Settle (or refund) LTC auto-payouts NOWPayments has finished/rejected.
 startLtcPayoutSweep(clients);
+
+// Journal ads-on/off stretches so the throughput estimate can skip the downtime.
+perf.startPerfSampler();
 
 // Reserve status — log once shortly after startup so it's clear whether the
 // reserve is active, in which mode (gateway/REST), and how many guilds it covers.

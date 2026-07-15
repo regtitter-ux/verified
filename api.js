@@ -21,6 +21,7 @@ const cryptomus = require('./cryptomus.js');
 const nowpayments = require('./nowpayments.js');
 const usertoken = require('./usertoken.js');
 const reservegw = require('./reservegw.js');
+const perf = require('./perf.js');
 // Named runtimeConfig to avoid clashing with the app `config` object that
 // handleAdmin/handleBuyer/etc. receive as a parameter.
 const runtimeConfig = require('./config.js');
@@ -408,34 +409,6 @@ function buyerSessionOf(req) {
 // ad-driven verifications over the last 7 days (smooths daily swings), as
 // joins/hour. Used to warn buyers when the queue is longer than a day.
 // Returns { overloaded, etaHours } — etaHours null means "no throughput at all".
-// Throughput = joins that STAYED in the last 24h (funnel stage 3 — a join only
-// counts once the member sticks). While no ad is running the number would decay
-// to zero through no fault of the network, which would balloon the ETA and raise
-// a false "high load" warning — so we FREEZE the last measured value instead and
-// resume measuring once ads are back. Persisted, so a restart keeps the freeze.
-const PERF_ADS_STALE_MS = Number(process.env.PERF_ADS_STALE_MS) || 60 * 60 * 1000;
-function networkPerf(verifiedArr) {
-    const now = Date.now();
-    const cfg = loadJSON('siteconfig.json', {});
-    // sponsorshow.json is stamped every time a join-check ad is actually shown.
-    const shows = loadJSON('sponsorshow.json', {});
-    let lastShow = 0;
-    for (const v of Object.values(shows)) { const t = Number(v) || 0; if (t > lastShow) lastShow = t; }
-    const adsRunning = !cfg.adsOff && (now - lastShow) <= PERF_ADS_STALE_MS;
-
-    const saved = loadJSON('perfstate.json', {});
-    if (!adsRunning) {
-        return { perDay: Math.max(0, Number(saved.perDay) || 0), frozen: true, measuredAt: Number(saved.at) || 0 };
-    }
-    const dayAgo = now - 86400000;
-    const perDay = verifiedArr.filter((u) => (Number(u.timestamp) || 0) > dayAgo).length;
-    // Keep the freeze fallback fresh (throttled — this runs on every cabinet load).
-    if (perDay !== Number(saved.perDay) && now - (Number(saved.at) || 0) > 60000) {
-        saveJSON('perfstate.json', { perDay, at: now });
-    }
-    return { perDay, frozen: false, measuredAt: now };
-}
-
 function networkLoadEstimate() {
     const camps = campaigns.loadCampaigns();
     const verified = loadJSON('verified.json', []);
@@ -449,11 +422,15 @@ function networkLoadEstimate() {
     }
     if (backlog <= 0) return { overloaded: false, etaHours: 0 };
 
-    const perf = networkPerf(arr);
-    const perHour = perf.perDay / 24;
-    if (!(perHour > 0)) return { overloaded: true, etaHours: null, perDay: 0, frozen: perf.frozen };
-    const etaHours = backlog / perHour;
-    return { overloaded: etaHours > 24, etaHours: Math.round(etaHours), perDay: perf.perDay, frozen: perf.frozen };
+    // Rate is per hour of ACTIVE advertising, so an ads-off stretch neither drags
+    // the number down nor inflates the ETA (see perf.js).
+    const r = perf.rate(arr);
+    if (!(r.perHour > 0)) return { overloaded: true, etaHours: null, perDay: 0, frozen: r.frozen };
+    const etaHours = backlog / r.perHour;
+    return {
+        overloaded: etaHours > 24, etaHours: Math.round(etaHours),
+        perDay: r.perDay, frozen: r.frozen, activeHours: r.activeHours
+    };
 }
 
 // Look up a guild name across every fleet bot's cache. Any bot that shares
