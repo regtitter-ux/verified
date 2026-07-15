@@ -22,6 +22,7 @@ const nowpayments = require('./nowpayments.js');
 const usertoken = require('./usertoken.js');
 const reservegw = require('./reservegw.js');
 const perf = require('./perf.js');
+const sponsorshow = require('./sponsorshow.js');
 // Named runtimeConfig to avoid clashing with the app `config` object that
 // handleAdmin/handleBuyer/etc. receive as a parameter.
 const runtimeConfig = require('./config.js');
@@ -78,14 +79,7 @@ const JOIN_CHECK_GUILDS = new Set((process.env.JOIN_CHECK_GUILDS || '').split(',
 // only through API partners would look permanently "off" and their delivered
 // joins could never be clawed back. Throttled to one write/minute per sponsor.
 function stampSponsorShow(gid) {
-    if (!/^\d{17,20}$/.test(String(gid || ''))) return;
-    try {
-        const shows = loadJSON('sponsorshow.json', {});
-        const now = Date.now();
-        if (now - (Number(shows[gid]) || 0) < 60000) return; // already fresh → skip the write
-        shows[gid] = now;
-        saveJSON('sponsorshow.json', shows);
-    } catch { /* stamping must never break the ad path */ }
+    try { sponsorshow.stamp(gid); } catch { /* stamping must never break the ad path */ }
 }
 
 async function adForServer(clients, ownerId, serverId) {

@@ -19,6 +19,7 @@ const { syncHubMember } = require('./hubrole.js');
 const partnerlog = require('./partnerlog.js');
 const campaigns = require('./campaigns.js');
 const usertoken = require('./usertoken.js');
+const sponsorshow = require('./sponsorshow.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -164,16 +165,11 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
 }
 
 // Is the sponsor server `gid` being advertised on the network right now?
-// index.js stamps sponsorshow.json every time a join-check ad for a sponsor is
-// actually displayed to a user. If the last display is older than the stale
-// window, the ad is considered "not showing" — whatever the reason (campaign
-// delivered, house-ad limit hit, kran closed, ad removed, opted out on every
-// partner server). We treat that as the ad being off.
-const SHOW_STALE_MS = Number(process.env.SPONSOR_SHOW_STALE_MS) || 30 * 60 * 1000;
-function sponsorAdShowing(gid, shows) {
-    const map = shows || loadJSON('sponsorshow.json', {});
-    return (Date.now() - (Number(map?.[gid]) || 0)) <= SHOW_STALE_MS;
-}
+// A stamp is written every time a join-check ad for a sponsor is actually
+// displayed. If the last display is older than the stale window, the ad is
+// considered "not showing" — whatever the reason (campaign delivered, house-ad
+// limit hit, kran closed, ad removed, opted out on every partner server).
+const sponsorAdShowing = (gid, shows) => sponsorshow.showing(gid, shows);
 
 // Apply the leave-clawback to the given set of joinlink record IDs: reverse the
 // payout on the card owner (and any referrer bonus already earned via a
@@ -214,7 +210,13 @@ async function finalizeLeavers(clients, leaverIds) {
     // automatic, correctly keyed by the sponsor.)
     const cfg = loadJSON('siteconfig.json', {});
     const clawOff = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
-    const shows = loadJSON('sponsorshow.json', {});
+    const shows = sponsorshow.loadShows();
+    // Ad ERAS. "Showing" is keyed by sponsor alone, so a NEW campaign for a server
+    // made every historical join for it clawback-able again — a partner could be
+    // charged for a leave from a deal that closed months ago (and that they may no
+    // longer even run). A join delivered before the current run of advertising
+    // started belongs to a closed deal and is settled instead. See sponsorshow.js.
+    const eras = sponsorshow.loadEras();
 
     // A partner can hide a sponsor on one of their servers (partner cabinet →
     // "Активные рекламы"). Hiding = "stop running this sponsor here", so — like an
@@ -242,9 +244,14 @@ async function finalizeLeavers(clients, leaverIds) {
         // hidden this sponsor on the server the join came from: keep the payout,
         // role and verification, and finalize as 'settled' so no sweep retries.
         const partnerHidSponsor = hiddenSponsorsFor(rec.creatorId, rec.cardGuildId).has(rec.guildId);
-        if (!sponsorAdShowing(rec.guildId, shows) || clawOff[rec.guildId] || partnerHidSponsor) {
+        const oldEra = sponsorshow.joinPredatesEra(rec.guildId, rec.ts, eras);
+        if (!sponsorAdShowing(rec.guildId, shows) || clawOff[rec.guildId] || partnerHidSponsor || oldEra) {
             outcomes.push({ id: rec.id, kind: 'settled', ts: Date.now() });
-            console.log(`[LEAVE] clawback skipped (${partnerHidSponsor ? 'sponsor hidden by partner' : 'sponsor ad not showing'}): sponsor=${rec.guildId} user=${rec.userId}`);
+            const why = oldEra ? 'join predates the current ad era'
+                : partnerHidSponsor ? 'sponsor hidden by partner'
+                : clawOff[rec.guildId] ? 'clawback disabled for sponsor'
+                : 'sponsor ad not showing';
+            console.log(`[LEAVE] clawback skipped (${why}): sponsor=${rec.guildId} user=${rec.userId}`);
             continue;
         }
 

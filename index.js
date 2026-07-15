@@ -23,6 +23,7 @@ const campaigns = require('./campaigns.js');
 const usertoken = require('./usertoken.js');
 const reservegw = require('./reservegw.js');
 const perf = require('./perf.js');
+const sponsorshow = require('./sponsorshow.js');
 const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
@@ -1345,7 +1346,7 @@ const startBot = (token) => {
                         latest = { text: pick.ad.text, ts: Date.now(), raw: pick.ad.raw, campaignId: pick.cand.id, sponsorGuildId: pick.ad.sp.guildId };
                         campaignPicked = true;
                         // Stamp "ad live" for the leave-clawback opt-out (joincheck.js).
-                        try { const shows = loadJSON('sponsorshow.json', {}); shows[pick.ad.sp.guildId] = Date.now(); saveJSON('sponsorshow.json', shows); } catch { /* stamping must never break verification */ }
+                        try { sponsorshow.stamp(pick.ad.sp.guildId); } catch { /* stamping must never break verification */ }
                     }
                 } catch (e) { /* never let campaign selection break verification */ }
             }
@@ -1366,11 +1367,7 @@ const startBot = (token) => {
                     sawMember = true;
                 } else {
                     latest.sponsorGuildId = sp.guildId;
-                    try {
-                        const shows = loadJSON('sponsorshow.json', {});
-                        shows[sp.guildId] = Date.now();
-                        saveJSON('sponsorshow.json', shows);
-                    } catch { /* stamping must never break verification */ }
+                    try { sponsorshow.stamp(sp.guildId); } catch { /* stamping must never break verification */ }
                 }
             }
 
