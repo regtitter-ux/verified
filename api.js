@@ -2232,9 +2232,10 @@ async function handleBuyer(req, res, path, clients, config) {
         for (const cl of clients) { inv = await cl.fetchInvite(inviteCode).catch(() => null); if (inv) break; }
         const newGuildId = inv?.guild?.id || null;
         if (!newGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
-        // …and a network bot must be on the target server (join-checkable).
-        const fleet = campaigns.fleetGuildIds(clients);
-        if (!fleet.has(newGuildId)) return send(res, 400, { error: 'no-bot' }, cors);
+        // …and the server must be join-checkable: a network bot on it, OR the
+        // reserve user account (selfbot) is a member (invisible fallback).
+        const covered = await coveredGuildIds(clients);
+        if (!covered.has(newGuildId)) return send(res, 400, { error: 'no-bot' }, cors);
 
         let dirty = false;
         const newInvite = `https://discord.gg/${inviteCode}`;
