@@ -403,6 +403,33 @@ function buyerSessionOf(req) {
         || adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
 }
 
+// How long the whole order book would take to deliver at the network's recent
+// throughput. Backlog = unmet joins across every running campaign; throughput =
+// ad-driven verifications over the last 7 days (smooths daily swings), as
+// joins/hour. Used to warn buyers when the queue is longer than a day.
+// Returns { overloaded, etaHours } — etaHours null means "no throughput at all".
+function networkLoadEstimate() {
+    const camps = campaigns.loadCampaigns();
+    const verified = loadJSON('verified.json', []);
+    const arr = Array.isArray(verified) ? verified : [];
+    const now = Date.now();
+
+    let backlog = 0;
+    for (const c of Object.values(camps)) {
+        if (!c || c.status !== 'active') continue;
+        const del = campaigns.delivered(c, arr, camps);
+        backlog += Math.max(0, (Number(c.purchased) || 0) - del);
+    }
+    if (backlog <= 0) return { overloaded: false, etaHours: 0 };
+
+    const weekAgo = now - 604800000;
+    const adJoins = arr.filter((u) => u.adKey && (Number(u.timestamp) || 0) > weekAgo).length;
+    const perHour = adJoins / (7 * 24);
+    if (!(perHour > 0)) return { overloaded: true, etaHours: null }; // backlog with no delivery
+    const etaHours = backlog / perHour;
+    return { overloaded: etaHours > 24, etaHours: Math.round(etaHours) };
+}
+
 // Look up a guild name across every fleet bot's cache. Any bot that shares
 // the guild will resolve — falls back to null when nobody sees it.
 function guildNameOf(clients, gid) {
@@ -1995,6 +2022,7 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/config' && req.method === 'GET') {
         const isMgr = managers.isManager(buyerId);
         return send(res, 200, {
+            networkLoad: networkLoadEstimate(),
             pricePer100: isMgr ? managers.PRICE_PER_100 : campaigns.PRICE_PER_100,
             publicPricePer100: campaigns.PRICE_PER_100,
             minJoins: campaigns.MIN_JOINS,
