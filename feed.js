@@ -20,9 +20,22 @@ const DEFAULT_FEED = [
     { code: '9eAUqwcuC', name: 'Server', members: null, color: '#22d3ee', accent: 'linear-gradient(150deg,#22d3ee,#0e6d80)', letter: 'S' }
 ];
 
+// Manual corrections for feed entries whose stored icon/invite went stale — a
+// server changed its icon AND its old invite expired, so the feed can't resolve
+// the new one on its own. Keyed by guild id; applied on read so the current
+// avatar always shows without mutating the stored file.
+const ICON_OVERRIDES = {
+    // sunlace — icon + invite changed; old hash 404s at the sizes we request.
+    '1346550267386007592': { icon: '62e92c5f8f9e57253125584c0398debc', code: 'EpfpUng7f' }
+};
+
 function loadFeed() {
     const raw = loadJSON('feedservers.json', null);
-    return Array.isArray(raw) ? raw : DEFAULT_FEED.map((s) => ({ ...s }));
+    const list = Array.isArray(raw) ? raw : DEFAULT_FEED.map((s) => ({ ...s }));
+    return list.map((s) => {
+        const o = s && s.id && ICON_OVERRIDES[String(s.id)];
+        return o ? { ...s, ...o } : s;
+    });
 }
 function saveFeed(list) {
     saveJSON('feedservers.json', Array.isArray(list) ? list : []);
