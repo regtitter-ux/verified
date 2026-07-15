@@ -764,7 +764,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const q = new URL(req.url, "http://x").searchParams;
         const range = ["day", "week", "month", "all"].includes(q.get("range")) ? q.get("range") : "day";
         const sel = String(q.get("servers") || "").split(",").map((x) => x.trim())
-            .filter((x) => /^d{17,20}$/.test(x)).slice(0, 8);
+            .filter((x) => /^\d{17,20}$/.test(x)).slice(0, 8);
         const selSet = new Set(sel);
         const now = Date.now();
 
