@@ -1329,17 +1329,30 @@ async function handleAdmin(req, res, path, clients, config) {
             }
             return { hour: h.size, day: d.size, week: w.size };
         })();
-        const nfStayed = {
-            hour: entries.filter((u) => u.timestamp > now - 3600000).length,
-            day: entries.filter((u) => u.timestamp > now - 86400000).length,
-            week: entries.filter((u) => u.timestamp > now - 604800000).length
+        // Split the same way the headline cards do, so the panel's "С рекламой /
+        // Без рекламы" switch drives the funnel too:
+        //   ads  — paid verifications (an ad was shown); leavers were clawed back,
+        //          so checked = still-standing + left.
+        //   noAd — organic ones. They never join-check a sponsor, so there's
+        //          nothing to claw back and checked == stayed.
+        // Clicks can't be split (cardclicks carry no adKey) — they're all starts.
+        const nfWin = (arr, tsField) => ({
+            hour: arr.filter((x) => (Number(x[tsField]) || 0) > now - 3600000).length,
+            day: arr.filter((x) => (Number(x[tsField]) || 0) > now - 86400000).length,
+            week: arr.filter((x) => (Number(x[tsField]) || 0) > now - 604800000).length
+        });
+        const nfPaidStayed = nfWin(paidEntries, 'timestamp');
+        const nfLeft = nfWin(leftRecs, 'ts');
+        const nfNoAdStayed = nfWin(entries.filter((u) => u.noAd), 'timestamp');
+        const networkFunnel = {
+            servers: perGuild.length,
+            clicks: nfClick,
+            ads: {
+                checked: { hour: nfPaidStayed.hour + nfLeft.hour, day: nfPaidStayed.day + nfLeft.day, week: nfPaidStayed.week + nfLeft.week },
+                stayed: nfPaidStayed
+            },
+            noAd: { checked: nfNoAdStayed, stayed: nfNoAdStayed }
         };
-        const nfChecked = {
-            hour: nfStayed.hour + leftRecs.filter((r) => r.ts > now - 3600000).length,
-            day: nfStayed.day + leftRecs.filter((r) => r.ts > now - 86400000).length,
-            week: nfStayed.week + leftRecs.filter((r) => r.ts > now - 604800000).length
-        };
-        const networkFunnel = { servers: perGuild.length, clicks: nfClick, checked: nfChecked, stayed: nfStayed };
 
         return send(res, 200, {
             adsOff: Boolean(cfg.adsOff),
