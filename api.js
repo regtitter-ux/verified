@@ -459,6 +459,17 @@ function guildIconOf(clients, gid) {
     return (r && r.icon) ? `https://cdn.discordapp.com/icons/${r.id}/${r.icon}.png?size=64` : null;
 }
 
+// Member count across the fleet caches, falling back to the reserve account's
+// view for servers no bot is on. Null when nobody can see the guild.
+function guildMembersOf(clients, gid) {
+    for (const c of Array.isArray(clients) ? clients : []) {
+        const g = c.guilds?.cache?.get(String(gid));
+        if (g) return g.memberCount ?? null;
+    }
+    const r = reservegw.guildInfo(gid);
+    return (r && Number.isFinite(r.members)) ? r.members : null;
+}
+
 // Channel name across the fleet caches (for the verification-card list).
 function channelNameOf(clients, cid) {
     for (const c of Array.isArray(clients) ? clients : []) {
@@ -3034,9 +3045,11 @@ function startApiServer(clients, config) {
                 for (const r of rows) {
                     const gid = String(r.guildId);
                     const name = guildNameOf(clients, gid);
-                    if (!name) continue;                          // bot no longer on sponsor → skip
-                    let members = null, icon = null;
-                    for (const c of clients) { const g = c.guilds?.cache?.get(gid); if (g) { members = (g.memberCount ?? null); icon = (g.iconURL?.({ size: 64, extension: 'png', forceStatic: true }) || null); break; } }
+                    if (!name) continue;                          // nobody (bot or reserve) sees it → skip
+                    // Both resolve through the reserve too, so selfbot-covered
+                    // sponsors get an avatar and a member count like any other.
+                    const icon = guildIconOf(clients, gid);
+                    const members = guildMembersOf(clients, gid);
                     events.push({ ts: Number(r.ts) || 0, name, icon, members });
                     if (events.length >= 25) break;
                 }

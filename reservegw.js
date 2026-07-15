@@ -40,15 +40,24 @@ function setInfo(g) {
     const id = String(g.id || p.id || '');
     if (!id) return;
     const prev = guildInfoMap.get(id) || {};
-    guildInfoMap.set(id, { id, name: p.name ?? prev.name ?? null, icon: p.icon ?? prev.icon ?? null });
+    // member_count rides on the gateway guild object; REST calls it
+    // approximate_member_count (with_counts=true). Keep whichever we have.
+    const n = Number(g.member_count ?? p.member_count ?? g.approximate_member_count ?? p.approximate_member_count);
+    guildInfoMap.set(id, {
+        id,
+        name: p.name ?? prev.name ?? null,
+        icon: p.icon ?? prev.icon ?? null,
+        members: (Number.isFinite(n) && n > 0) ? n : (prev.members ?? null)
+    });
 }
 
-// Belt-and-braces: REST always returns id+name+icon for the account's guilds, so
-// fill in anything the gateway payload didn't carry. One request per connection.
+// Belt-and-braces: REST always returns id+name+icon for the account's guilds, and
+// with_counts adds the member count — fill in anything the gateway payload didn't
+// carry. One request per connection.
 function restGuilds(token) {
     return new Promise((resolve) => {
         const req = https.request({
-            host: 'discord.com', path: '/api/v10/users/@me/guilds', method: 'GET',
+            host: 'discord.com', path: '/api/v10/users/@me/guilds?with_counts=true', method: 'GET',
             headers: { Authorization: token, 'Content-Type': 'application/json' }
         }, (res) => {
             let data = '';
@@ -65,7 +74,8 @@ async function backfillNames(st) {
     if (!Array.isArray(list)) return;
     for (const g of list) setInfo(g);
     const named = [...st.guilds].filter((id) => guildInfoMap.get(id)?.name).length;
-    console.log(`[RESERVE_GW] names resolved for ${named}/${st.guilds.size} guild(s)`);
+    const counted = [...st.guilds].filter((id) => guildInfoMap.get(id)?.members).length;
+    console.log(`[RESERVE_GW] names resolved for ${named}/${st.guilds.size} guild(s), member counts for ${counted}`);
 }
 
 function send(st, obj) {
