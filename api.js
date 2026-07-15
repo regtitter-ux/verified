@@ -752,6 +752,67 @@ async function handleAdmin(req, res, path, clients, config) {
         return;
     }
 
+    // Verification-activity series for the Statistics chart: counts bucketed over
+    // a time range, totalled across every server that has a LIVE card, plus a
+    // per-server split so the panel can highlight one or more servers. Any admin
+    // may read. Points are capped so the payload stays small on long ranges.
+    if (path.startsWith('/admin/verif-series') && req.method === 'GET') {
+        const q = new URL(req.url, 'http://x').searchParams;
+        const range = ['day', 'week', 'month', 'all'].includes(q.get('range')) ? q.get('range') : 'day';
+        const now = Date.now();
+        const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
+        // Only servers with a live (non-deleted) verification card.
+        const activeGuilds = new Set();
+        for (const c of cards.loadCards()) if (c && !c.deletedAt && c.guildId) activeGuilds.add(String(c.guildId));
+
+        const SPEC = {
+            day: { span: 86400000, bucket: 15 * 60000 },
+            week: { span: 7 * 86400000, bucket: 2 * 3600000 },
+            month: { span: 30 * 86400000, bucket: 12 * 3600000 },
+            all: { span: null, bucket: 86400000 }
+        }[range];
+        let span = SPEC.span;
+        if (span == null) { // "all time" → from the first verification on a carded server
+            let first = now;
+            for (const u of vArr) {
+                const t = Number(u.timestamp) || 0;
+                if (t && t < first && activeGuilds.has(String(u.guildId))) first = t;
+            }
+            span = Math.max(86400000, now - first);
+        }
+        const bucket = SPEC.bucket;
+        const n = Math.max(1, Math.min(400, Math.ceil(span / bucket)));
+        const from = now - n * bucket;
+
+        const total = new Array(n).fill(0);
+        const byGuild = new Map();
+        for (const u of vArr) {
+            const t = Number(u.timestamp) || 0;
+            if (!t || t < from) continue;
+            const gid = String(u.guildId || '');
+            if (!activeGuilds.has(gid)) continue;
+            const i = Math.min(n - 1, Math.floor((t - from) / bucket));
+            if (i < 0) continue;
+            total[i]++;
+            let a = byGuild.get(gid);
+            if (!a) { a = new Array(n).fill(0); byGuild.set(gid, a); }
+            a[i]++;
+        }
+        const series = [...byGuild.entries()]
+            .map(([gid, data]) => ({
+                gid, name: guildNameOf(clients, gid) || gid, icon: guildIconOf(clients, gid),
+                data, total: data.reduce((s, x) => s + x, 0)
+            }))
+            .sort((a, b) => b.total - a.total);
+        const sum = total.reduce((s, x) => s + x, 0);
+        return send(res, 200, {
+            range, from, bucketMs: bucket, points: n, total, series,
+            peak: total.length ? Math.max(...total) : 0,
+            avg: n ? +(sum / n).toFixed(1) : 0,
+            sum, servers: series.length
+        }, cors);
+    }
+
     // Partner activity log across ALL partners, with filters (by partner, by
     // verifying user, by server, by type/reason, by period). Any admin may read.
     if (path === '/admin/activity' && req.method === 'GET') {
