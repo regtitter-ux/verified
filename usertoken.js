@@ -86,4 +86,32 @@ async function isMember(guildId, userId) {
     return null;                         // 401/403/429/5xx/network — don't act
 }
 
-module.exports = { enabled, coveredGuildIds, coversGuild, isMember };
+// The account id is the base64 first segment of the token — enough to identify a
+// bad entry in the panel without ever echoing the secret back.
+function idFromToken(tk) {
+    try {
+        const id = Buffer.from(String(tk).split('.')[0], 'base64').toString('utf8').replace(/\D/g, '');
+        return /^\d{17,20}$/.test(id) ? id : null;
+    } catch { return null; }
+}
+
+// Check a raw USER_TOKEN value (newline/comma/space separated) against Discord
+// before it's stored, so a dead token can't be saved and silently cover nothing.
+// Returns { ok: [{ line, id, username }], bad: [{ line, id, reason }] }.
+// Only 401 is a definitive "dead"; anything else is reported as unverifiable
+// rather than quietly accepted.
+async function validateTokens(raw) {
+    const list = String(raw || '').split(/[\s,]+/).map((t) => t.trim()).filter(Boolean);
+    const ok = [], bad = [];
+    for (let i = 0; i < list.length; i++) {
+        const tk = list[i];
+        const id = idFromToken(tk);
+        const { status, json } = await apiGet(tk, '/users/@me');
+        if (status === 200 && json && json.id) ok.push({ line: i + 1, id: json.id, username: json.username || null });
+        else if (status === 401) bad.push({ line: i + 1, id, reason: 'невалиден или истёк' });
+        else bad.push({ line: i + 1, id, reason: status === 0 ? 'не удалось проверить (сеть) — попробуй ещё раз' : `не удалось проверить (HTTP ${status})` });
+    }
+    return { ok, bad };
+}
+
+module.exports = { enabled, coveredGuildIds, coversGuild, isMember, validateTokens };

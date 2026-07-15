@@ -755,6 +755,13 @@ async function handleAdmin(req, res, path, clients, config) {
         if (!isOwner) return ownerOnly();
         const body = await readBody(req);
         if (body === null || !body.values || typeof body.values !== 'object') return send(res, 400, { error: 'bad json' }, cors);
+        // Never store a self-bot token that Discord rejects — a dead token covers
+        // nothing and only looks like a working reserve. Checked before saving.
+        if (typeof body.values.USER_TOKEN === 'string' && body.values.USER_TOKEN.trim()) {
+            const chk = await usertoken.validateTokens(body.values.USER_TOKEN).catch(() => null);
+            if (!chk) return send(res, 502, { error: 'token-check-failed' }, cors);
+            if (chk.bad.length) return send(res, 400, { error: 'bad-tokens', bad: chk.bad, okCount: chk.ok.length }, cors);
+        }
         runtimeConfig.setMany(body.values);
         auditDo('config.change', Object.keys(body.values).join(', ').slice(0, 300));
         return send(res, 200, { ok: true, categories: runtimeConfig.adminView() }, cors);
