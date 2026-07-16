@@ -16,7 +16,7 @@
 //                   server made every historical join clawback-able again.
 const { loadJSON, saveJSON } = require('./database.js');
 
-const SHOW_STALE_MS = Number(process.env.SPONSOR_SHOW_STALE_MS) || 30 * 60 * 1000;
+const showStaleMs = () => Number(process.env.SPONSOR_SHOW_STALE_MS) || 30 * 60 * 1000;
 const WRITE_THROTTLE_MS = 60 * 1000;
 
 const obj = (file) => { const r = loadJSON(file, {}); return (r && typeof r === 'object' && !Array.isArray(r)) ? r : {}; };
@@ -36,7 +36,7 @@ function stamp(gid) {
     // runs we can't reconstruct, so they're grandfathered as closed rather than
     // punished. New joins from this moment on are covered normally.
     const eras = loadEras();
-    if (!eras[id] || !prev || now - prev > SHOW_STALE_MS) {
+    if (!eras[id] || !prev || now - prev > showStaleMs()) {
         eras[id] = now;
         saveJSON('sponsorera.json', eras);
     }
@@ -48,7 +48,7 @@ function stamp(gid) {
 // Is the sponsor's ad running now? `shows` lets a caller pass a snapshot.
 function showing(gid, shows) {
     const map = shows || loadShows();
-    return (Date.now() - (Number(map?.[gid]) || 0)) <= SHOW_STALE_MS;
+    return (Date.now() - (Number(map?.[gid]) || 0)) <= showStaleMs();
 }
 
 // Start of the current advertising run, or 0 when unknown.
@@ -64,4 +64,4 @@ function joinPredatesEra(gid, joinTs, eras) {
     return Boolean(era && (Number(joinTs) || 0) < era);
 }
 
-module.exports = { SHOW_STALE_MS, stamp, showing, eraStart, joinPredatesEra, loadShows, loadEras };
+module.exports = { get SHOW_STALE_MS() { return showStaleMs(); }, stamp, showing, eraStart, joinPredatesEra, loadShows, loadEras };

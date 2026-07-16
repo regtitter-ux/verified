@@ -45,9 +45,9 @@ function touchCreative(text) {
     return key;
 }
 
-const AD_COMPLETE_CHANNEL = process.env.AD_COMPLETE_CHANNEL || '1523423040216633414';
+const adCompleteChannel = () => process.env.AD_COMPLETE_CHANNEL || '1523423040216633414';
 const ADMIN_BOT_ID = process.env.ADMIN_BOT_ID || '1514533989434789998';
-const AD_COMPLETE_PING = process.env.AD_COMPLETE_PING || '833442190427684914';
+const adCompletePing = () => process.env.AD_COMPLETE_PING || '833442190427684914';
 
 // When a creative with a join-limit reaches its cap, post a completion
 // notice (ad text + final X/X counter) to the ops channel from the admin
@@ -70,17 +70,17 @@ async function maybeNotifyAdComplete(clients, adKey, verifiedList) {
 
     const bot = (Array.isArray(clients) ? clients : []).find((c) => c.user?.id === ADMIN_BOT_ID);
     if (!bot) return;
-    const channel = bot.channels.cache.get(AD_COMPLETE_CHANNEL)
-        || await bot.channels.fetch(AD_COMPLETE_CHANNEL).catch(() => null);
+    const channel = bot.channels.cache.get(adCompleteChannel())
+        || await bot.channels.fetch(adCompleteChannel()).catch(() => null);
     if (!channel) return;
 
     const text = loadJSON('adcreatives.json', {})[adKey]?.text || '(текст не найден)';
     await channel.send({
         content:
-            `<@${AD_COMPLETE_PING}> ✅ **Реклама выполнена** — заходы: **${net}/${rec.limit}**\n` +
+            `<@${adCompletePing()}> ✅ **Реклама выполнена** — заходы: **${net}/${rec.limit}**\n` +
             `Креатив \`#${adKey}\`\n` +
             `\`\`\`\n${String(text).slice(0, 1500)}\n\`\`\``,
-        allowedMentions: { users: [AD_COMPLETE_PING] }
+        allowedMentions: { users: [adCompletePing()] }
     }).catch(() => null);
 }
 

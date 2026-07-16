@@ -4,10 +4,10 @@
 const { PermissionsBitField, ChannelType, GatewayIntentBits } = require('discord.js');
 const lots = require('./lots.js');
 
-const GUILD_ID = process.env.LOT_GUILD_ID || '1523103725609156719';
-const CATEGORY_ID = process.env.LOT_CATEGORY_ID || '1525954487649439875';
-const WIN_MS = Number(process.env.LOT_WIN_MS) || 15 * 60 * 1000; // no outbid for this long → wins
-const SLOWMODE = Number(process.env.LOT_SLOWMODE) || 10;         // seconds
+const guildId = () => process.env.LOT_GUILD_ID || '1523103725609156719';
+const categoryId = () => process.env.LOT_CATEGORY_ID || '1525954487649439875';
+const winMs = () => Number(process.env.LOT_WIN_MS) || 15 * 60 * 1000; // no outbid for this long → wins
+const slowmode = () => Number(process.env.LOT_SLOWMODE) || 10;         // seconds
 
 const F = PermissionsBitField.Flags;
 // @everyone may talk, but not: attach files, use external emoji/stickers, create
@@ -25,7 +25,7 @@ const timers = new Map(); // lotId -> setTimeout
 // parsed. In this fleet that's the admin bot — it must be on the auction server.
 function pickBot(clients) {
     return (Array.isArray(clients) ? clients : []).find((c) => {
-        try { return c.guilds?.cache?.has(GUILD_ID) && c.options?.intents?.has?.(GatewayIntentBits.MessageContent); } catch { return false; }
+        try { return c.guilds?.cache?.has(guildId()) && c.options?.intents?.has?.(GatewayIntentBits.MessageContent); } catch { return false; }
     }) || null;
 }
 function botFor(clients, lot) {
@@ -42,7 +42,7 @@ async function createLot(clients, opts = {}) {
 
     const bot = pickBot(clients);
     if (!bot) return { ok: false, error: 'no-bot-on-guild' };
-    const guild = bot.guilds.cache.get(GUILD_ID);
+    const guild = bot.guilds.cache.get(guildId());
     if (!guild) return { ok: false, error: 'no-guild' };
 
     let channel;
@@ -50,13 +50,13 @@ async function createLot(clients, opts = {}) {
         channel = await guild.channels.create({
             name: `💹﹒${stays}-stays`,
             type: ChannelType.GuildText,
-            parent: CATEGORY_ID || undefined,
-            rateLimitPerUser: SLOWMODE,
+            parent: categoryId() || undefined,
+            rateLimitPerUser: slowmode(),
             permissionOverwrites: [{ id: guild.roles.everyone.id, allow: [F.SendMessages], deny: DENY }]
         });
     } catch (e) { return { ok: false, error: 'channel-failed', detail: e.message }; }
 
-    const lot = lots.create({ stays, start, step, guildId: GUILD_ID, channelId: channel.id, botId: bot.user.id });
+    const lot = lots.create({ stays, start, step, guildId: guildId(), channelId: channel.id, botId: bot.user.id });
     const announce = lots.renderTemplate(stays, start, step).trim();
     if (announce) await channel.send(announce).catch(() => null);
     return { ok: true, lot, channelId: channel.id };
@@ -82,7 +82,7 @@ async function handleMessage(clients, message) {
             const m = await message.channel.messages.fetch(lot.lastMsgId).catch(() => null);
             if (m) await m.delete().catch(() => null);
         }
-        const closeTs = Math.floor((Date.now() + WIN_MS) / 1000);
+        const closeTs = Math.floor((Date.now() + winMs()) / 1000);
         const newMsg = await message.channel.send(
             `# Highest bid: ＄${bid}\n` +
             `**Minimal increase: ＄${lot.step}** · <@${message.author.id}>\n\n` +
@@ -97,7 +97,7 @@ async function handleMessage(clients, message) {
     }
 }
 
-function scheduleClose(clients, lotId, ms = WIN_MS) {
+function scheduleClose(clients, lotId, ms = winMs()) {
     if (timers.has(lotId)) clearTimeout(timers.get(lotId));
     timers.set(lotId, setTimeout(() => closeLot(clients, lotId).catch((e) => console.error('[LOTS] close:', e.message)), ms));
 }
@@ -128,11 +128,11 @@ function rescheduleAll(clients) {
     try {
         for (const lot of lots.activeLots()) {
             if (!lot.lastBidAt) continue;
-            const remaining = lot.lastBidAt + WIN_MS - Date.now();
+            const remaining = lot.lastBidAt + winMs() - Date.now();
             if (remaining <= 0) closeLot(clients, lot.id).catch(() => null);
             else scheduleClose(clients, lot.id, remaining);
         }
     } catch (e) { console.error('[LOTS] reschedule:', e.message); }
 }
 
-module.exports = { createLot, handleMessage, closeLot, rescheduleAll, GUILD_ID, CATEGORY_ID, WIN_MS, SLOWMODE };
+module.exports = { createLot, handleMessage, closeLot, rescheduleAll, get GUILD_ID(){return guildId();}, get CATEGORY_ID(){return categoryId();}, get WIN_MS(){return winMs();}, get SLOWMODE(){return slowmode();} };

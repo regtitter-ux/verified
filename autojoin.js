@@ -17,7 +17,8 @@ const { isMember, creditJoin } = require('./joincheck.js');
 const { touchCreative, maybeNotifyAdComplete } = require('./adcreative.js');
 const { logFunds } = require('./fundslog.js');
 const { syncHubMember } = require('./hubrole.js');
-const { payShares, REVENUE_PER_JOIN } = require('./shares.js');
+const { payShares } = require('./shares.js');
+const sharesMod = require('./shares.js');
 const { maybeAutoWithdraw } = require('./payouts.js');
 const managers = require('./managers.js');
 const campaigns = require('./campaigns.js');
@@ -85,7 +86,7 @@ async function complete(clients, e) {
     let investorOwned = false;
     try { investorOwned = investors.serverOutstanding(e.cardGuildId, loadJSON('verified.json', [])) > 0; } catch { /* never block */ }
     const camp = e.campaignId ? campaigns.loadCampaigns()[e.campaignId] : null;
-    const econ = managers.joinEconomics(camp, REVENUE_PER_JOIN);
+    const econ = managers.joinEconomics(camp, sharesMod.REVENUE_PER_JOIN);
     const credit = creditJoin(e.creatorId, e.sponsorGuildId, e.userId, e.cardGuildId, e.roleId, e.channelId, { revenue: econ.revenue, managerId: econ.managerId });
     if (credit.duplicate) {
         try { partnerlog.logEvent(e.creatorId, { type: 'grant', reason: 'dup_join', userId: e.userId, guildId: e.cardGuildId, roleId: e.roleId, sponsorGuildId: e.sponsorGuildId, srcId: `dup:${e.userId}:${e.sponsorGuildId}` }); } catch { /* never block */ }

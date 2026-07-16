@@ -75,6 +75,11 @@ const REGISTRY = [
     { cat: 'Прочее', key: 'SPONSOR_SHOW_STALE_MS', label: 'Окно «реклама показывается», мс', type: 'number', def: '1800000' }
 ];
 
+// Every listed key is read LIVE at use-time now (or re-applied on save — reserve
+// tokens, bot presence), so a plain "Сохранить" is enough for all of them. Mark
+// any future restart-only key with an explicit live:false above.
+for (const r of REGISTRY) if (r.live === undefined) r.live = true;
+
 const BY_KEY = new Map(REGISTRY.map((r) => [r.key, r]));
 const KEYS = new Set(REGISTRY.map((r) => r.key));
 
@@ -83,6 +88,12 @@ function load() {
     return (r && typeof r === 'object' && !Array.isArray(r)) ? r : {};
 }
 let overrides = load();
+
+// Snapshot the boot (Railway) env for every editable key BEFORE overlaying
+// overrides, so clearing an override live can restore the underlying Railway
+// value (or unset it) instead of leaving the last override stuck in process.env.
+const bootEnv = {};
+for (const k of KEYS) bootEnv[k] = Object.prototype.hasOwnProperty.call(process.env, k) ? process.env[k] : undefined;
 
 // Apply stored overrides onto process.env. Runs on module load — require this FIRST
 // in index.js so modules that read process.env at load time see the overrides.
@@ -106,8 +117,13 @@ function setMany(obj) {
     for (const [k, v] of Object.entries(obj || {})) {
         if (!KEYS.has(k)) continue;
         const val = v == null ? '' : String(v).trim();
-        if (val === '') { delete overrides[k]; }         // note: does NOT unset process.env until restart
-        else { overrides[k] = val; process.env[k] = val; }
+        if (val === '') {
+            // Clear the override AND revert process.env to the boot (Railway) value
+            // — or unset it — so the change is live, not stuck at the last override.
+            delete overrides[k];
+            if (bootEnv[k] === undefined) delete process.env[k];
+            else process.env[k] = bootEnv[k];
+        } else { overrides[k] = val; process.env[k] = val; }
     }
     saveJSON(FILE, overrides);
     return overrides;

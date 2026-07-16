@@ -9,13 +9,15 @@
 // naturally lowers profit before shares are split (see shares.js / api.js).
 const { loadJSON, saveJSON } = require('./database.js');
 
-const PRICE_PER_100 = Number(process.env.MANAGER_PRICE) || 9;          // $ per 100 joins for managers
+// Read LIVE from the env each time (config.setMany updates process.env on save),
+// so changing these in the admin panel applies without a restart.
+const pricePer100 = () => Number(process.env.MANAGER_PRICE) || 9;         // $ per 100 joins for managers
 // Managers top up in whole 100-join batches, so their wallet minimum matches the
 // per-100 price ($9) instead of the public $5. Override with MANAGER_MIN_TOPUP.
-const MIN_TOPUP = Number(process.env.MANAGER_MIN_TOPUP) || 9;          // $ minimum wallet top-up for managers
+const minTopup = () => Number(process.env.MANAGER_MIN_TOPUP) || 9;        // $ minimum wallet top-up for managers
 // Manager margin as a fraction of retail = (retail − manager) / retail. Only
 // used to describe the discount on the order page; no money is paid out.
-const COMMISSION_RATE = Number.isFinite(Number(process.env.MANAGER_COMMISSION_RATE))
+const commissionRate = () => Number.isFinite(Number(process.env.MANAGER_COMMISSION_RATE))
     ? Number(process.env.MANAGER_COMMISSION_RATE) : 0.10;
 
 const round2 = (n) => +(Number(n) || 0).toFixed(2);
@@ -38,7 +40,7 @@ function isManager(id) { return loadManagers().includes(String(id || '')); }
 // the single source of truth in campaigns.js.
 function priceForBuyer(buyerId, publicPricePer100) {
     const manager = isManager(buyerId);
-    const per100 = manager ? PRICE_PER_100 : Number(publicPricePer100) || 0;
+    const per100 = manager ? pricePer100() : Number(publicPricePer100) || 0;
     return { manager, pricePer100: per100 };
 }
 
@@ -49,8 +51,8 @@ function priceForBuyer(buyerId, publicPricePer100) {
 function joinEconomics(campaign, publicRevenuePerJoin) {
     const pub = Number(publicRevenuePerJoin) || 0;
     if (!campaign || !campaign.managerId) return { revenue: pub, managerId: null };
-    const per100 = Number(campaign.pricePer100) || PRICE_PER_100;
+    const per100 = Number(campaign.pricePer100) || pricePer100();
     return { revenue: round4(per100 / 100), managerId: String(campaign.managerId) };
 }
 
-module.exports = { PRICE_PER_100, MIN_TOPUP, COMMISSION_RATE, loadManagers, saveManagers, isManager, priceForBuyer, joinEconomics, round2, round4 };
+module.exports = { get PRICE_PER_100() { return pricePer100(); }, get MIN_TOPUP() { return minTopup(); }, get COMMISSION_RATE() { return commissionRate(); }, loadManagers, saveManagers, isManager, priceForBuyer, joinEconomics, round2, round4 };

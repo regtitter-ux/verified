@@ -14,13 +14,15 @@ const { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount } = require('
 const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes } = require('./joincheck.js');
 const { syncHubMember } = require('./hubrole.js');
 const { logFunds } = require('./fundslog.js');
-const { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, loadShares, dayNumberOf, payShares, distributeProfit } = require('./shares.js');
+const shares = require('./shares.js');
+const { loadShares, dayNumberOf, payShares, distributeProfit } = shares;
 const { boostActive, BOOST_RATE, BOOST_MS, REFERRAL_RATE } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
 const cryptomus = require('./cryptomus.js');
 const nowpayments = require('./nowpayments.js');
 const usertoken = require('./usertoken.js');
 const reservegw = require('./reservegw.js');
+const presence = require('./presence.js');
 const perf = require('./perf.js');
 const sponsorshow = require('./sponsorshow.js');
 // Named runtimeConfig to avoid clashing with the app `config` object that
@@ -101,7 +103,7 @@ const isAllowedOrigin = (o) => ADMIN_ORIGINS.includes(String(o || '').replace(/\
 // hard lock against crediting "joins" to a big server users are already in.
 // When empty, any guild one of our bots is on is accepted (membership +
 // dedup still apply).
-const JOIN_CHECK_GUILDS = new Set((process.env.JOIN_CHECK_GUILDS || '').split(',').map((s) => s.trim()).filter(Boolean));
+const joinCheckGuilds = () => new Set((process.env.JOIN_CHECK_GUILDS || '').split(',').map((s) => s.trim()).filter(Boolean));
 
 // The single ad that applies to one server — the SAME rule every network bot
 // uses: the owner's per-server ad if set for that server, otherwise the
@@ -205,7 +207,8 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId) {
     const verified = loadJSON('verified.json', []);
     const limits = loadJSON('adlimits.json', {});
     const capReached = (raw) => { const rec = limits[adKeyOf(raw)]; const cap = Number(rec?.limit) || 0; return cap > 0 && joinerCount(verified, adKeyOf(raw), Number(rec?.resetAt) || 0) >= cap; };
-    const approvedSponsor = (gid) => !JOIN_CHECK_GUILDS.size || JOIN_CHECK_GUILDS.has(gid);
+    const jcg = joinCheckGuilds();
+    const approvedSponsor = (gid) => !jcg.size || jcg.has(gid);
 
     // Same candidate order /api/ad uses: eligible campaigns (weighted), then house ad.
     const cands = campaigns.weightedOrder(campaigns.eligibleForGuild(serverId, verified, await coveredGuildIds(clients)))
@@ -540,16 +543,16 @@ function userAvatarOf(clients, uid) {
 // Post full info about a new website ad order to an ops channel. Best-effort:
 // any failure (no bot on the guild, missing channel, send error) is swallowed so
 // it can never break order creation. Channel/guild overridable via env.
-const ORDER_NOTIFY_GUILD = (process.env.ORDER_NOTIFY_GUILD || '1523103725609156719').trim();
-const ORDER_NOTIFY_CHANNEL = (process.env.ORDER_NOTIFY_CHANNEL || '1526627488527290419').trim();
 async function notifyNewOrder(clients, o) {
     try {
-        if (!ORDER_NOTIFY_CHANNEL) return;
+        const notifyGuild = (process.env.ORDER_NOTIFY_GUILD || '1523103725609156719').trim();
+        const notifyChannel = (process.env.ORDER_NOTIFY_CHANNEL || '1526627488527290419').trim();
+        if (!notifyChannel) return;
         const list = Array.isArray(clients) ? clients : [];
-        const bot = list.find((c) => c.guilds?.cache?.has(ORDER_NOTIFY_GUILD)) || list[0];
+        const bot = list.find((c) => c.guilds?.cache?.has(notifyGuild)) || list[0];
         if (!bot) return;
-        const channel = bot.channels.cache.get(ORDER_NOTIFY_CHANNEL)
-            || await bot.channels.fetch(ORDER_NOTIFY_CHANNEL).catch(() => null);
+        const channel = bot.channels.cache.get(notifyChannel)
+            || await bot.channels.fetch(notifyChannel).catch(() => null);
         if (!channel || typeof channel.send !== 'function') return;
         const name = userNameOf(clients, o.buyerId);
         const handle = userHandleOf(clients, o.buyerId);
@@ -815,6 +818,10 @@ async function handleAdmin(req, res, path, clients, config) {
             usertoken.invalidate();
             try { reservegw.sync(); } catch (e) { console.error('[RESERVE_GW] sync failed:', e.message); }
         }
+        // Bot presence applies live too — re-push it to every bot.
+        if (['BOT_STATUS', 'BOT_STATUS_TYPE', 'BOT_PRESENCE', 'BOT_STATUS_URL'].some((k) => k in body.values)) {
+            try { presence.applyAll(clients); } catch (e) { console.error('[PRESENCE] apply failed:', e.message); }
+        }
         return send(res, 200, { ok: true, categories: runtimeConfig.adminView() }, cors);
     }
     if (path === '/admin/config/restart' && req.method === 'POST') {
@@ -1033,7 +1040,7 @@ async function handleAdmin(req, res, path, clients, config) {
             let rev = 0, joins = 0;
             for (const r of paid) {
                 const t = Number(r.ts) || 0;
-                if (t > start && t <= end) { rev += Number.isFinite(Number(r.revenue)) ? Number(r.revenue) : REVENUE_PER_JOIN; joins++; }
+                if (t > start && t <= end) { rev += Number.isFinite(Number(r.revenue)) ? Number(r.revenue) : shares.REVENUE_PER_JOIN; joins++; }
             }
             weeks.push({ revenue: money(rev), joins });
         }
@@ -1044,7 +1051,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const joins30 = paid.filter((r) => (Number(r.ts) || 0) > now - 4 * WEEK).length;
         const left30 = jArr.filter((r) => r.status === 'left' && (Number(r.leftAt || r.ts) || 0) > now - 4 * WEEK).length;
         const churn = (joins30 + left30) > 0 ? left30 / (joins30 + left30) : 0;
-        let rev30 = 0; for (const r of paid) if ((Number(r.ts) || 0) > now - 4 * WEEK) rev30 += Number.isFinite(Number(r.revenue)) ? Number(r.revenue) : REVENUE_PER_JOIN;
+        let rev30 = 0; for (const r of paid) if ((Number(r.ts) || 0) > now - 4 * WEEK) rev30 += Number.isFinite(Number(r.revenue)) ? Number(r.revenue) : shares.REVENUE_PER_JOIN;
 
         const camps = Object.values(campaigns.loadCampaigns());
         const activeCamps = camps.filter((c) => c.status === 'active');
@@ -1178,7 +1185,7 @@ async function handleAdmin(req, res, path, clients, config) {
         }
 
         // ---- Shares (доли) ----
-        // Service profit per confirmed join = what we charge (REVENUE_PER_JOIN)
+        // Service profit per confirmed join = what we charge (shares.REVENUE_PER_JOIN)
         // minus what the partner was actually paid (joinlinks amount). Only
         // 'joined' (still-standing) and 'settled' (kept after a post-completion
         // leave, money not clawed back) records count — those joins were sold.
@@ -1195,9 +1202,9 @@ async function handleAdmin(req, res, path, clients, config) {
             // ($9/100); older/house-ad joins fall back to the standard $0.10.
             // The manager's margin = retail minus what we actually charged them
             // — foregone revenue, shown as a "manager cost" line.
-            const rev = Number.isFinite(Number(r.revenue)) ? Number(r.revenue) : REVENUE_PER_JOIN;
-            const mgrMargin = Math.max(0, REVENUE_PER_JOIN - rev);
-            const acq = amt * ACQUIRING_RATE;
+            const rev = Number.isFinite(Number(r.revenue)) ? Number(r.revenue) : shares.REVENUE_PER_JOIN;
+            const mgrMargin = Math.max(0, shares.REVENUE_PER_JOIN - rev);
+            const acq = amt * shares.ACQUIRING_RATE;
             const prof = rev - amt - acq;
             const wins = [['total', true], ['day', r.ts > now - 86400000], ['week', r.ts > now - 604800000], ['month', r.ts > now - 2592000000]];
             for (const [k, inWin] of wins) if (inWin) { rWin[k] += rev; cWin[k] += amt; aWin[k] += acq; mWin[k] += mgrMargin; pWin[k] += prof; }
@@ -1228,9 +1235,9 @@ async function handleAdmin(req, res, path, clients, config) {
         })).sort((a, b) => b.pct - a.pct);
         const roundWin = (w) => ({ day: money(w.day), week: money(w.week), month: money(w.month), total: money(w.total) });
         const sharesData = {
-            salePricePer100: SALE_PRICE_PER_100,
-            revenuePerJoin: REVENUE_PER_JOIN,
-            acquiringRate: ACQUIRING_RATE,
+            salePricePer100: shares.SALE_PRICE_PER_100,
+            revenuePerJoin: shares.REVENUE_PER_JOIN,
+            acquiringRate: shares.ACQUIRING_RATE,
             profit: roundWin(pWin),
             revenue: roundWin(rWin),
             partnerCost: roundWin(cWin),
@@ -3015,7 +3022,7 @@ async function handleInvestor(req, res, path, clients, config) {
         try {
             const ownerCard = cards.loadCards().find((c) => !c.deletedAt && String(c.guildId) === gid);
             const bid = ownerCard ? (Number((loadJSON('settings.json', {})[ownerCard.creatorId] || {}).joinBid) || 5) : 5;
-            const perInvite = investors.buyinProfitPerInvite(bid, ACQUIRING_RATE);
+            const perInvite = investors.buyinProfitPerInvite(bid, shares.ACQUIRING_RATE);
             const breakdown = await distributeProfit(clients, r.qty * perInvite).catch((e) => {
                 // Loud, actionable log: the position exists (investor charged) and
                 // its future joins skip per-join payShares, so a silent failure
@@ -3275,7 +3282,7 @@ function startApiServer(clients, config) {
                 // Manager economics (same as the in-Discord flow): lower revenue
                 // for manager campaigns, no commission paid.
                 const camp = ad.campaignId ? campaigns.loadCampaigns()[ad.campaignId] : null;
-                const econ = managers.joinEconomics(camp, REVENUE_PER_JOIN);
+                const econ = managers.joinEconomics(camp, shares.REVENUE_PER_JOIN);
                 const credit = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null,
                     { revenue: econ.revenue, managerId: econ.managerId });
                 // Race backstop: creditJoin's atomic guard caught a concurrent

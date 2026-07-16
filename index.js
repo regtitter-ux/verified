@@ -18,7 +18,8 @@ const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheck
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
-const { payShares, REVENUE_PER_JOIN } = require('./shares.js');
+const { payShares } = require('./shares.js');
+const sharesMod = require('./shares.js');
 const campaigns = require('./campaigns.js');
 const usertoken = require('./usertoken.js');
 const reservegw = require('./reservegw.js');
@@ -70,26 +71,8 @@ const clients = [];
 //   BOT_STATUS_TYPE  — playing | watching | listening | competing | streaming | custom  (default: custom)
 //   BOT_PRESENCE     — online | idle | dnd | invisible  (default: online)
 //   BOT_STATUS_URL   — stream URL, only used when BOT_STATUS_TYPE=streaming
-function applyBotPresence(c) {
-    try {
-        const text = (process.env.BOT_STATUS || '').trim();
-        const status = ['online', 'idle', 'dnd', 'invisible'].includes((process.env.BOT_PRESENCE || '').toLowerCase())
-            ? process.env.BOT_PRESENCE.toLowerCase() : 'online';
-        const typeMap = {
-            playing: ActivityType.Playing, watching: ActivityType.Watching, listening: ActivityType.Listening,
-            competing: ActivityType.Competing, streaming: ActivityType.Streaming, custom: ActivityType.Custom
-        };
-        const type = typeMap[(process.env.BOT_STATUS_TYPE || 'custom').toLowerCase()] ?? ActivityType.Custom;
-        const opts = { status, activities: [] };
-        if (text) {
-            const act = { name: text, type };
-            if (type === ActivityType.Custom) act.state = text;          // custom status renders the `state`
-            if (type === ActivityType.Streaming) act.url = process.env.BOT_STATUS_URL || 'https://twitch.tv/vemoni';
-            opts.activities = [act];
-        }
-        c.user.setPresence(opts);
-    } catch (e) { console.error('[PRESENCE]', e.message); }
-}
+const presence = require('./presence.js');
+const applyBotPresence = presence.applyOne;
 
 // Interaction de-duplication, shared across every bot in this process. Discord
 // can deliver the SAME interaction more than once when a gateway session
@@ -1530,7 +1513,7 @@ const startBot = (token) => {
                 // keeps their margin at the deal. House ads / normal buyers keep
                 // the $0.10 default.
                 const camp = pending?.campaignId ? campaigns.loadCampaigns()[pending.campaignId] : null;
-                const econ = managers.joinEconomics(camp, REVENUE_PER_JOIN);
+                const econ = managers.joinEconomics(camp, sharesMod.REVENUE_PER_JOIN);
                 // Confirmed member of the sponsor server: pay the join-check rate,
                 // reversible on leave (role + payout), see joincheck.js.
                 const credit = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId,
@@ -1684,13 +1667,13 @@ setTimeout(() => refundMigration.runOnce(clients).catch((e) => console.error('[R
 // ERA fix in sponsorshow.js prevents new ones).
 setTimeout(() => refundCampaign.runOnce(clients).catch((e) => console.error('[REFUND]', e.message)), 50 * 1000);
 
-// Uptime monitoring: alert to ALERT_CHANNEL when a bot goes offline / recovers.
-const ALERT_CHANNEL = (process.env.ALERT_CHANNEL || '').trim();
+// Uptime monitoring: alert to alertChannel() when a bot goes offline / recovers.
+const alertChannel = () => (process.env.ALERT_CHANNEL || '').trim();
 async function sendAlert(text) {
-    if (!ALERT_CHANNEL) return;
+    if (!alertChannel()) return;
     const bot = clients.find((c) => c.user?.id === config.adminBotId && c.isReady?.()) || clients.find((c) => c.isReady?.());
     if (!bot) return;
-    const ch = bot.channels.cache.get(ALERT_CHANNEL) || await bot.channels.fetch(ALERT_CHANNEL).catch(() => null);
+    const ch = bot.channels.cache.get(alertChannel()) || await bot.channels.fetch(alertChannel()).catch(() => null);
     if (ch) ch.send({ content: text }).catch(() => null);
 }
 const botOnlineState = new Map();
@@ -1706,6 +1689,6 @@ function startHealthMonitor() {
             else if (!prev && on) { botOnlineState.set(id, true); console.log(`[HEALTH] ${c.user?.tag || id} recovered`); sendAlert(`🟢 Бот \`${c.user?.tag || id}\` снова онлайн`); }
         }
     }, 60 * 1000);
-    console.log(`[HEALTH] monitor every 60s${ALERT_CHANNEL ? '' : ' (alerts OFF — set ALERT_CHANNEL)'}`);
+    console.log(`[HEALTH] monitor every 60s${alertChannel() ? '' : ' (alerts OFF — set alertChannel())'}`);
 }
 startHealthMonitor();

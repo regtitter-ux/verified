@@ -7,11 +7,11 @@
 const https = require('https');
 const crypto = require('crypto');
 
-const MERCHANT = (process.env.CRYPTOMUS_MERCHANT || '').trim();
-const API_KEY = (process.env.CRYPTOMUS_API_KEY || '').trim();
+const merchant = () => (process.env.CRYPTOMUS_MERCHANT || '').trim();
+const apiKey = () => (process.env.CRYPTOMUS_API_KEY || '').trim();
 const HOST = 'api.cryptomus.com';
 
-const enabled = () => Boolean(MERCHANT && API_KEY);
+const enabled = () => Boolean(merchant() && apiKey());
 const md5 = (s) => crypto.createHash('md5').update(s).digest('hex');
 
 function call(path, params) {
@@ -19,10 +19,10 @@ function call(path, params) {
         const body = JSON.stringify(params);
         // We sign exactly the bytes we send, so Cryptomus can verify regardless of
         // any JSON slash-escaping differences.
-        const sign = md5(Buffer.from(body).toString('base64') + API_KEY);
+        const sign = md5(Buffer.from(body).toString('base64') + apiKey());
         const req = https.request({
             host: HOST, path, method: 'POST',
-            headers: { merchant: MERCHANT, sign, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+            headers: { merchant: merchant(), sign, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
         }, (res) => {
             let data = '';
             res.on('data', (c) => { data += c; });
@@ -66,7 +66,7 @@ function verifyWebhook(body) {
         if (!body || typeof body !== 'object' || !body.sign) return false;
         const { sign, ...rest } = body;
         const json = JSON.stringify(rest).replace(/\//g, '\\/');
-        return md5(Buffer.from(json).toString('base64') + API_KEY) === sign;
+        return md5(Buffer.from(json).toString('base64') + apiKey()) === sign;
     } catch { return false; }
 }
 

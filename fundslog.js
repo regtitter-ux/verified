@@ -3,7 +3,7 @@
 // user, on which server, and in which channel the verification card lives.
 const { EmbedBuilder } = require('discord.js');
 
-const LOG_CHANNEL = process.env.FUNDS_LOG_CHANNEL || '1522955113860173854';
+const logChannel = () => process.env.FUNDS_LOG_CHANNEL || '1522955113860173854';
 const ADMIN_BOT_ID = process.env.ADMIN_BOT_ID || '1514533989434789998';
 
 const fmtMoney = (n) => '$' + (+((Number(n) || 0).toFixed(4))).toString();
@@ -27,7 +27,7 @@ async function logFunds(clients, entry) {
     try {
         const bot = clients.find((c) => c.user?.id === ADMIN_BOT_ID);
         if (!bot) return;
-        const channel = bot.channels.cache.get(LOG_CHANNEL) || await bot.channels.fetch(LOG_CHANNEL).catch(() => null);
+        const channel = bot.channels.cache.get(logChannel()) || await bot.channels.fetch(logChannel()).catch(() => null);
         if (!channel) return;
 
         const credit = entry.type === 'credit';
@@ -65,4 +65,4 @@ async function logFunds(clients, entry) {
     }
 }
 
-module.exports = { logFunds, LOG_CHANNEL };
+module.exports = { logFunds };

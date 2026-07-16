@@ -9,17 +9,17 @@
 const https = require('https');
 const crypto = require('crypto');
 
-const API_KEY = (process.env.NOWPAYMENTS_API_KEY || '').trim();
-const IPN_SECRET = (process.env.NOWPAYMENTS_IPN_SECRET || '').trim();
+const apiKey = () => (process.env.NOWPAYMENTS_API_KEY || '').trim();
+const ipnSecret = () => (process.env.NOWPAYMENTS_IPN_SECRET || '').trim();
 const HOST = 'api.nowpayments.io';
 
-const enabled = () => Boolean(API_KEY);
-const hasSecret = () => Boolean(IPN_SECRET);
+const enabled = () => Boolean(apiKey());
+const hasSecret = () => Boolean(ipnSecret());
 
 function call(path, method, params, extraHeaders) {
     return new Promise((resolve, reject) => {
         const body = params ? JSON.stringify(params) : null;
-        const headers = { 'x-api-key': API_KEY, 'Content-Type': 'application/json', ...(extraHeaders || {}) };
+        const headers = { 'x-api-key': apiKey(), 'Content-Type': 'application/json', ...(extraHeaders || {}) };
         if (body) headers['Content-Length'] = Buffer.byteLength(body);
         const req = https.request({ host: HOST, path, method, headers }, (res) => {
             let data = '';
@@ -41,7 +41,7 @@ function call(path, method, params, extraHeaders) {
 
 // Default coin the buyer is sent straight to (LTC — low minimum, cheap fees).
 // Override with NOWPAYMENTS_PAY_CURRENCY, or set it '' to let the buyer choose.
-const PAY_CURRENCY = 'NOWPAYMENTS_PAY_CURRENCY' in process.env
+const payCurrency = () => 'NOWPAYMENTS_PAY_CURRENCY' in process.env
     ? (process.env.NOWPAYMENTS_PAY_CURRENCY || '').trim().toLowerCase()
     : 'ltc';
 
@@ -54,7 +54,7 @@ async function createPayment({ amount, orderId, currency = 'usd', callbackUrl, r
         order_id: String(orderId),
         order_description: 'Vemoni balance top-up'
     };
-    if (PAY_CURRENCY) params.pay_currency = PAY_CURRENCY;
+    if (payCurrency()) params.pay_currency = payCurrency();
     if (callbackUrl) params.ipn_callback_url = callbackUrl;
     if (returnUrl) { params.success_url = returnUrl; params.cancel_url = returnUrl; }
     const r = await call('/v1/invoice', 'POST', params);
@@ -87,8 +87,8 @@ function sortDeep(obj) {
 }
 function verifyWebhook(bodyObj, signature) {
     try {
-        if (!IPN_SECRET || !signature || !bodyObj || typeof bodyObj !== 'object') return false;
-        const hmac = crypto.createHmac('sha512', IPN_SECRET).update(JSON.stringify(sortDeep(bodyObj))).digest('hex');
+        if (!ipnSecret() || !signature || !bodyObj || typeof bodyObj !== 'object') return false;
+        const hmac = crypto.createHmac('sha512', ipnSecret()).update(JSON.stringify(sortDeep(bodyObj))).digest('hex');
         return crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(String(signature)));
     } catch { return false; }
 }
@@ -102,7 +102,7 @@ function verifyWebhook(bodyObj, signature) {
 const payoutEmail = () => (process.env.NOWPAYMENTS_EMAIL || '').trim();
 const payoutPassword = () => (process.env.NOWPAYMENTS_PASSWORD || '').trim();
 const payoutCurrency = () => (process.env.NOWPAYMENTS_PAYOUT_CURRENCY || 'ltc').trim().toLowerCase();
-const payoutEnabled = () => Boolean(API_KEY && payoutEmail() && payoutPassword());
+const payoutEnabled = () => Boolean(apiKey() && payoutEmail() && payoutPassword());
 
 let _jwt = { at: 0, token: '' };
 async function authJwt() {

@@ -14,12 +14,12 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { adKeyOf, joinerCount } = require('./adcreative.js');
 const cryptopay = require('./cryptopay.js');
 
-const PRICE_PER_100 = Number(process.env.JOIN_SALE_PRICE) || 10; // $ per 100 verified joins
-const MIN_JOINS = Number(process.env.MIN_ORDER_JOINS) || 1;
+const pricePer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10; // $ per 100 verified joins (live: applies on Save)
+const minJoins = () => Number(process.env.MIN_ORDER_JOINS) || 1;
 const round2 = (n) => +(Number(n) || 0).toFixed(2);
 const newId = () => crypto.randomBytes(9).toString('hex');
 
-function priceFor(joins) { return round2((Number(joins) || 0) * PRICE_PER_100 / 100); }
+function priceFor(joins) { return round2((Number(joins) || 0) * pricePer100() / 100); }
 
 function loadCampaigns() {
     const c = loadJSON('campaigns.json', {});
@@ -381,7 +381,7 @@ function retention(campaign, verifiedList, joinlinks, now = Date.now()) {
 }
 
 module.exports = {
-    PRICE_PER_100, MIN_JOINS, priceFor, round2, newId,
+    get PRICE_PER_100() { return pricePer100(); }, get MIN_JOINS() { return minJoins(); }, priceFor, round2, newId,
     loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, linkProgress, publicView, pickForGuild, eligibleForGuild, weightedOrder, botPresent, fleetGuildIds, autoPauseUncovered,
     isInvoicePaid, reconcile, startCampaignSweep, retention
 };

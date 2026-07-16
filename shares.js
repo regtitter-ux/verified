@@ -13,11 +13,11 @@
 const { loadJSON, saveJSON } = require('./database.js');
 const { maybeAutoWithdraw } = require('./payouts.js');
 
-const SALE_PRICE_PER_100 = Number(process.env.JOIN_SALE_PRICE) || 10;
-const REVENUE_PER_JOIN = SALE_PRICE_PER_100 / 100;         // $ earned per confirmed join
+const salePer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10;
+const revenuePerJoin = () => salePer100() / 100;         // $ earned per confirmed join (live: applies on Save)
 // Crypto Pay acquiring fee (~3%) charged on top of every partner payout —
 // a real cost that must come out of profit before it's split by shares.
-const ACQUIRING_RATE = Number.isFinite(Number(process.env.ACQUIRING_RATE)) ? Number(process.env.ACQUIRING_RATE) : 0.03;
+const acquiringRate = () => Number.isFinite(Number(process.env.ACQUIRING_RATE)) ? Number(process.env.ACQUIRING_RATE) : 0.03;
 const DEFAULT_HOLDER = process.env.SHARES_DEFAULT_HOLDER || '833442190427684914';
 const KEEP_DAYS = 40;                                       // daily buckets kept for the dashboard windows
 
@@ -55,8 +55,8 @@ async function payShares(clients, partnerAmount, opts = {}) {
     // sales simply bring less revenue ($9/100 instead of $10/100), so profit
     // (and the share split) is naturally lower — no separate commission.
     const amt = Number(partnerAmount) || 0;
-    const revenue = Number.isFinite(Number(opts.revenuePerJoin)) ? Number(opts.revenuePerJoin) : REVENUE_PER_JOIN;
-    return distributeProfit(clients, revenue - amt - amt * ACQUIRING_RATE, opts.nowMs);
+    const revenue = Number.isFinite(Number(opts.revenuePerJoin)) ? Number(opts.revenuePerJoin) : revenuePerJoin();
+    return distributeProfit(clients, revenue - amt - amt * acquiringRate(), opts.nowMs);
 }
 
 // Split a lump of service profit across shareholders by percentage (the core of
@@ -137,4 +137,4 @@ function clawbackProfit(perUid, nowMs) {
     return total;
 }
 
-module.exports = { SALE_PRICE_PER_100, REVENUE_PER_JOIN, ACQUIRING_RATE, DEFAULT_HOLDER, loadShares, payShares, distributeProfit, clawbackProfit, dayNumberOf };
+module.exports = { get SALE_PRICE_PER_100(){return salePer100();}, get REVENUE_PER_JOIN(){return revenuePerJoin();}, get ACQUIRING_RATE(){return acquiringRate();}, DEFAULT_HOLDER, loadShares, payShares, distributeProfit, clawbackProfit, dayNumberOf };

@@ -6,7 +6,7 @@
 //   • local rolling snapshots on the volume (fast restore after a bad write);
 //   • off-site copies posted (gzipped) to a private Discord channel, so a
 //     total volume loss is still recoverable.
-// Configure BACKUP_CHANNEL (a channel the admin bot can post to). Interval and
+// Configure backupChannel() (a channel the admin bot can post to). Interval and
 // retention are env-tunable.
 const fs = require('fs');
 const path = require('path');
@@ -14,7 +14,7 @@ const zlib = require('zlib');
 const { DATA_DIR } = require('./database.js');
 
 const ADMIN_BOT_ID = (process.env.ADMIN_BOT_ID || '1514533989434789998').trim();
-const BACKUP_CHANNEL = (process.env.BACKUP_CHANNEL || '').trim();
+const backupChannel = () => (process.env.BACKUP_CHANNEL || '').trim();
 const INTERVAL_MS = Number(process.env.BACKUP_INTERVAL_MS) || 6 * 3600 * 1000; // every 6h
 const KEEP_LOCAL = Number(process.env.BACKUP_KEEP_LOCAL) || 24;                 // ~6 days at 6h
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
@@ -59,11 +59,11 @@ function snapshotLocal() {
 
 // Post a gzipped bundle to the backup channel (off-site copy).
 async function toDiscord(clients) {
-    if (!BACKUP_CHANNEL) return { ok: false, reason: 'no-channel' };
+    if (!backupChannel()) return { ok: false, reason: 'no-channel' };
     const bot = (Array.isArray(clients) ? clients : []).find((c) => c.user?.id === ADMIN_BOT_ID)
         || (Array.isArray(clients) ? clients : [])[0];
     if (!bot) return { ok: false, reason: 'no-bot' };
-    const channel = bot.channels.cache.get(BACKUP_CHANNEL) || await bot.channels.fetch(BACKUP_CHANNEL).catch(() => null);
+    const channel = bot.channels.cache.get(backupChannel()) || await bot.channels.fetch(backupChannel()).catch(() => null);
     if (!channel) return { ok: false, reason: 'no-channel' };
     try {
         const gz = zlib.gzipSync(Buffer.from(JSON.stringify(bundle())));
@@ -86,7 +86,7 @@ function startBackupSweep(clients) {
     const tick = () => runOnce(clients).catch((e) => console.error('[BACKUP] sweep error:', e.message));
     setInterval(tick, INTERVAL_MS);
     setTimeout(tick, 2 * 60 * 1000); // first backup a couple minutes after boot
-    console.log(`[BACKUP] every ${Math.round(INTERVAL_MS / 3600000)}h · local keep ${KEEP_LOCAL}${BACKUP_CHANNEL ? ' · off-site ON' : ' · off-site OFF (set BACKUP_CHANNEL)'}`);
+    console.log(`[BACKUP] every ${Math.round(INTERVAL_MS / 3600000)}h · local keep ${KEEP_LOCAL}${backupChannel() ? ' · off-site ON' : ' · off-site OFF (set backupChannel())'}`);
 }
 
-module.exports = { snapshotLocal, toDiscord, runOnce, getLastRun, startBackupSweep, dataFiles, BACKUP_DIR, BACKUP_CHANNEL };
+module.exports = { snapshotLocal, toDiscord, runOnce, getLastRun, startBackupSweep, dataFiles, BACKUP_DIR, get BACKUP_CHANNEL() { return backupChannel(); } };

@@ -19,31 +19,31 @@ const shares = require('./shares.js');
 // If a server loses the bot or its last active verification card, its undelivered
 // invites are refunded to investors at the $9/100 buy price — but only after this
 // grace period, in case the server comes back. Set INVEST_REFUND_GRACE_HOURS.
-const GRACE_MS = (Number(process.env.INVEST_REFUND_GRACE_HOURS) || 24) * 3600000;
+const graceMs = () => (Number(process.env.INVEST_REFUND_GRACE_HOURS) || 24) * 3600000;
 
 const round2 = (n) => +((Number(n) || 0).toFixed(2));
 const round4 = (n) => +((Number(n) || 0).toFixed(4));
 
-const BUY_PER_100 = Number(process.env.INVEST_BUY_PER_100) || 9;     // $ investor pays per 100
-const SELL_PER_100 = Number(process.env.JOIN_SALE_PRICE) || 10;      // $ service resells per 100
-const RETURN_RATE = Number.isFinite(Number(process.env.INVEST_RETURN_RATE)) ? Number(process.env.INVEST_RETURN_RATE) : 0.10;
-const BUY_PER_INVITE = round4(BUY_PER_100 / 100);                    // $0.09
-const RET_PER_INVITE = round4(BUY_PER_INVITE * (1 + RETURN_RATE));   // $0.099
+const buyPer100 = () => Number(process.env.INVEST_BUY_PER_100) || 9;     // $ investor pays per 100 (live: applies on Save)
+const sellPer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10;      // $ service resells per 100
+const returnRate = () => Number.isFinite(Number(process.env.INVEST_RETURN_RATE)) ? Number(process.env.INVEST_RETURN_RATE) : 0.10;
+const buyPerInvite = () => round4(buyPer100() / 100);                    // $0.09
+const retPerInvite = () => round4(buyPerInvite() * (1 + returnRate()));   // $0.099
 // Dedicated minimum for the investment account; falls back to the shared
 // MIN_TOPUP, then $5. Set INVEST_MIN_TOPUP in Railway to change it.
-const MIN_TOPUP = Number(process.env.INVEST_MIN_TOPUP) || Number(process.env.MIN_TOPUP) || 5;
-const MIN_BUY = Number(process.env.INVEST_MIN_INVITES) || 100;
+const minTopup = () => Number(process.env.INVEST_MIN_TOPUP) || Number(process.env.MIN_TOPUP) || 5;
+const minBuy = () => Number(process.env.INVEST_MIN_INVITES) || 100;
 // A buy-in must cover at least this many days of the server's sales, so an
 // investor can't buy a tiny slice of a fast server. Set INVEST_MIN_DAYS in Railway.
-const MIN_DAYS = Number(process.env.INVEST_MIN_DAYS) || 30;
+const minDays = () => Number(process.env.INVEST_MIN_DAYS) || 30;
 // A server can't be bought beyond this many days of its sales (~6 months) — so
 // investors don't lock up more invites than the server can realistically sell in
 // a reasonable horizon. Set INVEST_MAX_DAYS in Railway.
-const MAX_DAYS = Number(process.env.INVEST_MAX_DAYS) || 180;
+const maxDays = () => Number(process.env.INVEST_MAX_DAYS) || 180;
 // A server auto-appears in the investor list once it sells at least this many
 // verified invites per day; it drops off (for everyone but existing holders)
 // when it falls below. Set INVEST_MIN_DAILY in Railway.
-const MIN_DAILY = Number(process.env.INVEST_MIN_DAILY) || 10;
+const minDaily = () => Number(process.env.INVEST_MIN_DAILY) || 10;
 
 // A server's sales rate — verified invites per day, averaged over the last 7 days.
 function serverDailyRate(serverId, verified, now = Date.now()) {
@@ -437,8 +437,8 @@ function serversFor(userId, verified, now = Date.now()) {
 }
 
 module.exports = {
-    BUY_PER_100, SELL_PER_100, RETURN_RATE, BUY_PER_INVITE, RET_PER_INVITE, MIN_TOPUP, MIN_BUY, MIN_DAYS, MIN_DAILY,
-    serverMinInvites, serverMaxInvites, MAX_DAYS, serverDailyRate, isServerInvestable, occupancyOf, serverOutstanding, buyinProfitPerInvite,
+    get BUY_PER_100(){return buyPer100();}, get SELL_PER_100(){return sellPer100();}, get RETURN_RATE(){return returnRate();}, get BUY_PER_INVITE(){return buyPerInvite();}, get RET_PER_INVITE(){return retPerInvite();}, get MIN_TOPUP(){return minTopup();}, get MIN_BUY(){return minBuy();}, get MIN_DAYS(){return minDays();}, get MIN_DAILY(){return minDaily();},
+    serverMinInvites, serverMaxInvites, get MAX_DAYS(){return maxDays();}, serverDailyRate, isServerInvestable, occupancyOf, serverOutstanding, buyinProfitPerInvite,
     serverBroken, refundServer, sweepBrokenServers, startInvestSweep,
     accountOf, addTopup, reconcileTopups, recentTopups, buy, recordBuyinCredits, withdraw, serversFor,
     loadEnabledServers, saveEnabledServers, isServerEnabled, addEnabledServer, removeEnabledServer, manualTopup

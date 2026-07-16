@@ -7,7 +7,7 @@
 // Docs: https://help.send.tg/en/articles/10279948-crypto-pay-api
 const https = require('https');
 
-const TOKEN = (process.env.CRYPTO_PAY_TOKEN || '').trim(); // trim stray whitespace/newlines from the env var
+const token = () => (process.env.CRYPTO_PAY_TOKEN || '').trim(); // trim stray whitespace/newlines (live: applies on Save)
 // Only explicit truthy values enable testnet — note "0"/"false" are non-empty
 // strings and would otherwise read as truthy.
 const TESTNET = /^(1|true|yes|on)$/i.test((process.env.CRYPTO_PAY_TESTNET || '').trim());
@@ -15,7 +15,7 @@ const HOST = TESTNET ? 'testnet-pay.crypt.bot' : 'pay.crypt.bot';
 
 // Auto-payout is only active when a token is configured; otherwise the bot keeps
 // the manual staff-completed payout flow.
-const enabled = () => Boolean(TOKEN);
+const enabled = () => Boolean(token());
 
 function call(method, params = {}) {
     return new Promise((resolve, reject) => {
@@ -25,7 +25,7 @@ function call(method, params = {}) {
             path: `/api/${method}`,
             method: 'POST',
             headers: {
-                'Crypto-Pay-API-Token': TOKEN,
+                'Crypto-Pay-API-Token': token(),
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(body)
             }
