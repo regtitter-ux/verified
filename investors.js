@@ -30,7 +30,7 @@ const returnRate = () => Number.isFinite(Number(process.env.INVEST_RETURN_RATE))
 const buyPerInvite = () => round4(buyPer100() / 100);                    // $0.09
 const retPerInvite = () => round4(buyPerInvite() * (1 + returnRate()));   // $0.099
 // Dedicated minimum for the investment account; falls back to the shared
-// MIN_TOPUP, then $5. Set INVEST_MIN_TOPUP in Railway to change it.
+// minTopup(), then $5. Set INVEST_MIN_TOPUP in Railway to change it.
 const minTopup = () => Number(process.env.INVEST_MIN_TOPUP) || Number(process.env.MIN_TOPUP) || 5;
 const minBuy = () => Number(process.env.INVEST_MIN_INVITES) || 100;
 // A buy-in must cover at least this many days of the server's sales, so an
@@ -53,19 +53,19 @@ function serverDailyRate(serverId, verified, now = Date.now()) {
     }
     return week / 7;
 }
-// Minimum invites to buy on a server = daily rate × MIN_DAYS (floor MIN_BUY).
+// Minimum invites to buy on a server = daily rate × minDays() (floor minBuy()).
 function serverMinInvites(serverId, verified) {
-    return Math.max(MIN_BUY, Math.ceil(serverDailyRate(serverId, verified) * MIN_DAYS));
+    return Math.max(minBuy(), Math.ceil(serverDailyRate(serverId, verified) * minDays()));
 }
-// Maximum total outstanding invites on a server = daily rate × MAX_DAYS (~6 months),
+// Maximum total outstanding invites on a server = daily rate × maxDays() (~6 months),
 // never below the minimum so a slow server is still buyable.
 function serverMaxInvites(serverId, verified) {
-    return Math.max(serverMinInvites(serverId, verified), Math.ceil(serverDailyRate(serverId, verified) * MAX_DAYS));
+    return Math.max(serverMinInvites(serverId, verified), Math.ceil(serverDailyRate(serverId, verified) * maxDays()));
 }
-// Is a server open for buy-in right now? Auto: daily rate ≥ MIN_DAILY. The owner
+// Is a server open for buy-in right now? Auto: daily rate ≥ minDaily(). The owner
 // whitelist can also force a below-threshold server open.
 function isServerInvestable(serverId, verified) {
-    return serverDailyRate(serverId, verified) >= MIN_DAILY || isServerEnabled(serverId);
+    return serverDailyRate(serverId, verified) >= minDaily() || isServerEnabled(serverId);
 }
 
 function load() { const r = loadJSON('investors.json', {}); return (r && typeof r === 'object' && !Array.isArray(r)) ? r : {}; }
@@ -171,9 +171,9 @@ function serverOutstanding(serverId, verified) {
 // the server's actual partner payout rate ($/100). Over the full lifecycle:
 // resale revenue − partner payout − acquiring − the investor's profit.
 function buyinProfitPerInvite(partnerPer100 = 5, acquiringRate = 0.03) {
-    const sell = SELL_PER_100 / 100;
+    const sell = sellPer100() / 100;
     const partner = (Number(partnerPer100) || 5) / 100;
-    const investorProfit = BUY_PER_INVITE * RETURN_RATE;
+    const investorProfit = buyPerInvite() * returnRate();
     return Math.max(0, sell - partner - partner * acquiringRate - investorProfit);
 }
 
@@ -182,21 +182,21 @@ function accountOf(userId, verified) {
     const all = load();
     const u = all[userId] || { topups: [], positions: [], withdrawn: 0 };
     const topupsPaid = (u.topups || []).filter((t) => t.status === 'paid').reduce((a, t) => a + (Number(t.amount) || 0), 0);
-    const invested = (u.positions || []).reduce((a, p) => a + (Number(p.qty) || 0) * BUY_PER_INVITE, 0);
+    const invested = (u.positions || []).reduce((a, p) => a + (Number(p.qty) || 0) * buyPerInvite(), 0);
 
     let owned = 0, sold = 0, returns = 0;
     const byServer = {};
     for (const p of (u.positions || [])) { (byServer[p.serverId] ||= []).push(p); owned += Number(p.qty) || 0; }
     for (const serverId of Object.keys(byServer)) {
         const fills = allocateServer(serverId, all, verified);
-        for (const p of byServer[serverId]) { const n = (fills.get(p.id) || []).length; sold += n; returns += n * RET_PER_INVITE; }
+        for (const p of byServer[serverId]) { const n = (fills.get(p.id) || []).length; sold += n; returns += n * retPerInvite(); }
     }
     const withdrawn = Number(u.withdrawn) || 0;
     const available = round2(topupsPaid - invested + returns - withdrawn);
     return {
         available: Math.max(0, available),
         invested: round2(invested), returned: round2(returns), withdrawn: round2(withdrawn),
-        profit: round2(returns - sold * BUY_PER_INVITE),
+        profit: round2(returns - sold * buyPerInvite()),
         owned, sold, outstanding: owned - sold
     };
 }
@@ -251,12 +251,12 @@ function buy(userId, serverId, qty, verified) {
     const maxQty = serverMaxInvites(serverId, verified);
     const remaining = Math.max(0, maxQty - occ.totalOutstanding);
     if (qty > remaining) return { ok: false, error: 'max-qty', max: maxQty, remaining };
-    const cost = round2(qty * BUY_PER_INVITE);
+    const cost = round2(qty * buyPerInvite());
     const acc = accountOf(userId, verified);
     if (acc.available < cost) return { ok: false, error: 'insufficient', need: cost, have: acc.available };
     const all = load(); const u = ensure(all, userId);
     const posId = crypto.randomBytes(8).toString('hex');
-    u.positions.push({ id: posId, serverId: String(serverId), qty, price: BUY_PER_INVITE, boughtAt: Date.now() });
+    u.positions.push({ id: posId, serverId: String(serverId), qty, price: buyPerInvite(), boughtAt: Date.now() });
     save(all);
     return { ok: true, cost, qty, positionId: posId };
 }
@@ -353,7 +353,7 @@ function sweepBrokenServers(clients, verifiedList) {
         if (out <= 0) { if (broken[serverId]) { delete broken[serverId]; changed = true; } continue; }
         if (serverBroken(serverId, clients)) {
             if (!broken[serverId]) { broken[serverId] = now; changed = true; }
-            else if (now - broken[serverId] >= GRACE_MS) {
+            else if (now - broken[serverId] >= graceMs()) {
                 const r = refundServer(serverId, verified);
                 console.log(`[INVEST] refunded ${r.refundedInvites} undelivered invites on broken server ${serverId} to ${r.investors} investor(s)`);
                 delete broken[serverId]; changed = true;
@@ -369,7 +369,7 @@ function startInvestSweep(clients) {
     const tick = () => { try { sweepBrokenServers(clients); } catch (e) { console.error('[INVEST] sweep error:', e.message); } };
     setInterval(tick, every);
     setTimeout(tick, 120 * 1000);
-    console.log(`[INVEST] broken-server refund sweep every ${Math.round(every / 60000)}m (grace ${Math.round(GRACE_MS / 3600000)}h)`);
+    console.log(`[INVEST] broken-server refund sweep every ${Math.round(every / 60000)}m (grace ${Math.round(graceMs() / 3600000)}h)`);
 }
 
 // Server list with per-server sold-invite throughput + this investor's position.
@@ -395,7 +395,7 @@ function serversFor(userId, verified, now = Date.now()) {
     for (const serverId of serverIds) {
         const times = byServer[serverId] || [];
         const flow = win(times);
-        const investable = (flow.week / 7) >= MIN_DAILY || enabled.has(serverId);
+        const investable = (flow.week / 7) >= minDaily() || enabled.has(serverId);
         // Allocate once per server (reusing the already-scanned join times) and
         // share the result with the occupancy check below — no verified.json
         // rescans inside this loop.
@@ -407,9 +407,9 @@ function serversFor(userId, verified, now = Date.now()) {
             const ew = win(soldTimes);
             mine = {
                 owned, sold, outstanding: owned - sold,
-                invested: round2(owned * BUY_PER_INVITE),
-                earned: round2(sold * RET_PER_INVITE),
-                earnedWin: { hour: round2(ew.hour * RET_PER_INVITE), day: round2(ew.day * RET_PER_INVITE), week: round2(ew.week * RET_PER_INVITE) }
+                invested: round2(owned * buyPerInvite()),
+                earned: round2(sold * retPerInvite()),
+                earnedWin: { hour: round2(ew.hour * retPerInvite()), day: round2(ew.day * retPerInvite()), week: round2(ew.week * retPerInvite()) }
             };
         }
         // One investor per server: locked for you if someone else still holds
@@ -422,14 +422,14 @@ function serversFor(userId, verified, now = Date.now()) {
         if (!investable && !mine) continue;
         const brokenSince = broken[serverId] || 0;
         const rate = flow.week / 7;
-        const minInvites = Math.max(MIN_BUY, Math.ceil(rate * MIN_DAYS));
-        const maxInvites = Math.max(minInvites, Math.ceil(rate * MAX_DAYS));
+        const minInvites = Math.max(minBuy(), Math.ceil(rate * minDays()));
+        const maxInvites = Math.max(minInvites, Math.ceil(rate * maxDays()));
         out.push({
             serverId, flow, mine, enabled: enabled.has(serverId), investable,
-            minInvites, maxInvites, maxDays: MAX_DAYS,
+            minInvites, maxInvites, maxDays: maxDays(),
             maxBuyable: Math.max(0, maxInvites - occ.totalOutstanding),
             occupied: lockedForYou, occupiedByYou, occupiedEtaSec: lockedForYou ? occ.etaSec : null,
-            brokenSince, refundEtaSec: brokenSince ? Math.max(0, Math.ceil((GRACE_MS - (now - brokenSince)) / 1000)) : null
+            brokenSince, refundEtaSec: brokenSince ? Math.max(0, Math.ceil((graceMs() - (now - brokenSince)) / 1000)) : null
         });
     }
     out.sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0) || b.flow.week - a.flow.week || b.flow.total - a.flow.total);
