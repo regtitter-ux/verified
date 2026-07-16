@@ -40,17 +40,27 @@ async function coveredGuildIds(clients) {
 
 // Where each campaign sits in the FIFO delivery queue right now, and whether it's
 // actually being shown. Returns a fn campaign → { state, position, total, ... }:
-//   showing — its sponsor's ad was displayed within QUEUE_SHOWING_MS (real signal).
+//   showing — it is the FRONT of the FIFO queue that's actually running now.
 //   waiting — deliverable but an earlier order is still ahead of it (position/total).
 //   no_bot  — active but no bot/reserve covers its server, so it can't run.
 //   paused  — manually paused.
 //   idle    — active but not deliverable for another reason (per-link cap / just done).
 //   null    — not active (complete/cancelled/invalid — shown by the status chip).
+//
+// "showing" is strict-FIFO, NOT just "sponsor stamped recently". The stamp alone
+// over-reports: because a user already in the front sponsors is shown the NEXT
+// eligible ad (you can't advertise a server someone's already in), several
+// sponsors get stamped at once, so many orders would falsely read "showing"
+// while, by the queue, only the front one is really the ad being served. So we
+// mark as "showing" only the FRONT-MOST deliverable order that is itself stamped
+// recently; everything behind it is "waiting", even if its own sponsor was
+// stamped by such a skip.
 const QUEUE_SHOWING_MS = Number(process.env.QUEUE_SHOWING_MS) || 5 * 60 * 1000;
 function queueResolver(camps, verified, covered) {
     const now = Date.now();
     const shows = sponsorshow.loadShows();
     const key = (c) => Number(c.paidAt) || Number(c.createdAt) || 0;
+    const stampedRecently = (c) => { const last = Number(shows[c.sponsorGuildId]) || 0; return last > 0 && (now - last) <= QUEUE_SHOWING_MS; };
     const deliverable = [];
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active' || c.paused || c.autoPaused) continue;
@@ -63,6 +73,9 @@ function queueResolver(camps, verified, covered) {
     deliverable.sort((a, b) => key(a) - key(b) || String(a.id).localeCompare(String(b.id)));
     const pos = new Map(deliverable.map((c, i) => [c.id, i + 1]));
     const total = deliverable.length;
+    // The single order that's genuinely "showing now": the earliest-queued
+    // deliverable one whose ad actually ran recently. null on a quiet network.
+    const showingId = (deliverable.find(stampedRecently) || {}).id || null;
     return (c) => {
         if (!c || c.status !== 'active') return null;
         if (c.autoPaused) return { state: 'verifier_off' };
@@ -70,7 +83,7 @@ function queueResolver(camps, verified, covered) {
         if (!covered.has(c.sponsorGuildId)) return { state: 'no_bot' };
         if (!pos.has(c.id)) return { state: 'idle' };
         const last = Number(shows[c.sponsorGuildId]) || 0;
-        const showing = last > 0 && (now - last) <= QUEUE_SHOWING_MS;
+        const showing = c.id === showingId;
         return { state: showing ? 'showing' : 'waiting', position: pos.get(c.id), total, lastShownSec: last ? Math.round((now - last) / 1000) : null };
     };
 }
