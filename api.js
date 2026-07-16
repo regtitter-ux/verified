@@ -2796,14 +2796,33 @@ async function handlePartner(req, res, path, clients, config) {
         const verified = loadJSON('verified.json', []);
         const fleet = await coveredGuildIds(clients); // bots + reserve (selfbot) sponsors
         const camps = campaigns.loadCampaigns();
+        const shows = sponsorshow.loadShows();
+        const now = Date.now();
+        const stampedRecently = (sgid) => { const last = Number(shows[sgid]) || 0; return last > 0 && (now - last) <= QUEUE_SHOWING_MS; };
         const servers = partnerGuildIds().map((gid) => {
             const prio = priorityByGuild[gid] || null;
             const hiddenSet = new Set(Array.isArray(hiddenByGuild[gid]) ? hiddenByGuild[gid] : []);
-            let prioValid = false;
-            const ads = campaigns.eligibleForGuild(gid, verified, fleet)
+            const eligible = campaigns.eligibleForGuild(gid, verified, fleet);
+            const prioValid = eligible.some((e) => e.id === prio);
+            // The ACTUAL serve order on this server: strict FIFO by paidAt, minus
+            // the partner's hidden ads, with their pinned priority moved to the
+            // front — exactly what the in-Discord / API ad picker does. Hidden ads
+            // aren't served, so they get no queue position. This is the queue the
+            // partner sees, and the priority pin is what reorders it.
+            let served = campaigns.weightedOrder(eligible).filter((e) => !hiddenSet.has(e.id));
+            if (prioValid && !hiddenSet.has(prio)) {
+                const i = served.findIndex((e) => e.id === prio);
+                if (i > 0) { const [p] = served.splice(i, 1); served.unshift(p); }
+            }
+            const posOf = new Map(served.map((e, i) => [e.id, i + 1]));
+            const queueTotal = served.length;
+            // "showing now" on this server = the front-most served ad whose sponsor
+            // actually ran recently (network-wide stamp). null on a quiet network.
+            const showingId = (served.find((e) => stampedRecently(e.sponsorGuildId)) || {}).id || null;
+            const ads = eligible
                 .map((e) => {
-                    const isPriority = e.id === prio;
-                    if (isPriority) prioValid = true;
+                    const isPriority = e.id === prio && prioValid;
+                    const isHidden = hiddenSet.has(e.id);
                     const purchased = Number(camps[e.id]?.purchased) || e.remaining;
                     return {
                         campaignId: e.id,
@@ -2814,10 +2833,14 @@ async function handlePartner(req, res, path, clients, config) {
                         purchased,
                         delivered: Math.max(0, purchased - e.remaining),
                         isPriority,
-                        isHidden: hiddenSet.has(e.id)
+                        isHidden,
+                        queuePos: isHidden ? null : (posOf.get(e.id) || null),
+                        queueTotal,
+                        showing: e.id === showingId
                     };
                 })
-                .sort((a, b) => b.remaining - a.remaining);
+                // Show in serve order (queue position); hidden ads sink to the bottom.
+                .sort((a, b) => (a.isHidden - b.isHidden) || ((a.queuePos || 1e9) - (b.queuePos || 1e9)));
             return {
                 guildId: gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid),
                 priorityCampaign: prioValid ? prio : null, ads
