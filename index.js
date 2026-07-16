@@ -34,21 +34,10 @@ const { logFunds } = require('./fundslog.js');
 const partnerlog = require('./partnerlog.js');
 const logincodes = require('./logincodes.js');
 
-// A "Join" link button for the sponsor invite shown in an ad. Verification
-// replies are ephemeral, and Discord never unfurls invite links on ephemeral
-// messages (no native server card / join button) — so we surface a real Join
-// button instead. Returns a component row, or null when the ad carries no
-// Discord invite (plain-text ad / fallback). Takes the raw invite first, then
-// the rendered text, and rebuilds a canonical https URL the button accepts.
-function joinButtonRow(...sources) {
-    for (const src of sources) {
-        const code = extractInviteCodes(src)[0];
-        if (code) {
-            return new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setLabel('Join').setStyle(ButtonStyle.Link).setURL(`https://discord.gg/${code}`)
-            );
-        }
-    }
+// The "Join" link button under the ad is disabled by request — the ad text
+// already carries the invite link. Returns null so the verification replies show
+// no button. (Kept as a no-op so both call sites stay unchanged.)
+function joinButtonRow() {
     return null;
 }
 
