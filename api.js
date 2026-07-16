@@ -372,6 +372,7 @@ function enrichCards(clients, records) {
             guildId: c.guildId,
             guildName: guildNameOf(clients, c.guildId),
             guildIcon: guildIconOf(clients, c.guildId),
+            memberCount: guildMembersOf(clients, c.guildId),
             channelName: channelNameOf(clients, c.channelId),
             creatorId: c.creatorId || null,
             creatorName: userNameOf(clients, c.creatorId),
