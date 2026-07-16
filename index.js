@@ -24,6 +24,7 @@ const usertoken = require('./usertoken.js');
 const reservegw = require('./reservegw.js');
 const perf = require('./perf.js');
 const sponsorshow = require('./sponsorshow.js');
+const autojoin = require('./autojoin.js');
 const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
@@ -1391,6 +1392,18 @@ const startBot = (token) => {
             // Funnel metric #1: first click ("started verification") for this card.
             try { cards.trackClick(guild.id, roleId, creatorId, user.id); } catch (e) { /* stats must never break verification */ }
 
+            // Remember this first-click so the join can be credited even if the
+            // user joins the sponsor but never clicks again (autojoin.js sweeps it).
+            if (latest && latest.sponsorGuildId && roleId) {
+                try {
+                    autojoin.record({
+                        userId: user.id, cardGuildId: guild.id, roleId, creatorId,
+                        sponsorGuildId: latest.sponsorGuildId, campaignId: latest.campaignId || '',
+                        adRaw: latest.raw || '', channelId: interaction.channelId || null
+                    });
+                } catch (e) { /* recording must never break verification */ }
+            }
+
             const firstJoinRow = joinButtonRow(latest?.raw, responseText);
             return interaction.editReply({ content: responseText, components: firstJoinRow ? [firstJoinRow] : [] }).catch(() => null);
         }
@@ -1641,6 +1654,10 @@ function startCoverageSweep() {
     console.log(`[COVERAGE] verifier-coverage sweep every ${Math.round(every / 60000)}m`);
 }
 startCoverageSweep();
+
+// Auto-credit joins from users who first-clicked, joined the sponsor, but never
+// clicked "verify" a second time.
+autojoin.startAutoJoinSweep(clients);
 
 // Journal ads-on/off stretches so the throughput estimate can skip the downtime.
 perf.startPerfSampler();
