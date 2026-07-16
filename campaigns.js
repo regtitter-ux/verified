@@ -145,6 +145,8 @@ function publicView(campaign, verifiedList) {
         price: campaign.price,
         status: campaign.status,
         paused: Boolean(campaign.paused),
+        autoPaused: Boolean(campaign.autoPaused),
+        autoPauseReason: campaign.autoPaused ? (campaign.autoPauseReason || 'verifier-offline') : '',
         linkLimit: lp.limit,
         linkDelivered: lp.delivered,
         limitReached: lp.reached,
@@ -182,7 +184,7 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds) {
     const list = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
     const eligible = [];
     for (const c of Object.values(camps)) {
-        if (!c || c.status !== 'active' || c.paused) continue;
+        if (!c || c.status !== 'active' || c.paused || c.autoPaused) continue;
         if (c.sponsorGuildId === displayGuildId) continue;                 // never on itself
         if (Array.isArray(c.disabledGuilds) && c.disabledGuilds.includes(displayGuildId)) continue;
         if (botGuildIds && !botGuildIds.has(c.sponsorGuildId)) continue;   // no bot on buyer's server
@@ -236,7 +238,9 @@ async function notifyBuyer(clients, campaign, kind) {
     const messages = {
         started: `✅ Payment received — your campaign is live!\nServer: ${server}\nJoins ordered: **${campaign.purchased}**. Track progress in your dashboard.`,
         complete: `🎉 Campaign complete!\nServer: ${server}\nJoins delivered: **${campaign.purchased}/${campaign.purchased}**. Thanks for your order!`,
-        invalid: `⚠️ Campaign stopped: the invite link is no longer valid.\nServer: ${server}\nUpdate the invite and contact support to resume delivery.`
+        invalid: `⚠️ Campaign stopped: the invite link is no longer valid.\nServer: ${server}\nUpdate the invite and contact support to resume delivery.`,
+        autopaused: `⏸️ Campaign paused: we can no longer verify joins on your server (our checker was removed/banned there, or lost access).\nServer: ${server}\nAdd our bot back — it resumes automatically once access is restored. No charges happen while paused.`,
+        autoresumed: `▶️ Campaign resumed — access to your server is back and joins are being verified again.\nServer: ${server}`
     };
     const msg = messages[kind];
     if (!msg) return;
@@ -246,6 +250,38 @@ async function notifyBuyer(clients, campaign, kind) {
         const ok = await u.send({ content: msg }).then(() => true).catch(() => false);
         if (ok) return;
     }
+}
+
+// Auto-pause any active campaign whose sponsor server we can no longer verify
+// joins on — our checker (a network bot OR the reserve selfbot) was kicked,
+// banned, or otherwise lost access. `covered` is the set of sponsor guilds still
+// reachable (bot ∪ reserve). Auto-resumes when access returns (but never overrides
+// a manual pause). A GRACE period debounces transient blips (a bot reconnecting, a
+// momentary cache/REST miss) so a short hiccup can't flap campaigns on and off.
+async function autoPauseUncovered(clients, covered, graceMs) {
+    const grace = Number.isFinite(graceMs) ? graceMs : (Number(process.env.COVERAGE_GRACE_MS) || 10 * 60 * 1000);
+    if (!covered || typeof covered.has !== 'function') return { paused: 0, resumed: 0 };
+    const camps = loadCampaigns();
+    const now = Date.now();
+    let changed = false;
+    const paused = [], resumed = [];
+    for (const c of Object.values(camps)) {
+        if (!c || c.status !== 'active') continue;
+        if (covered.has(String(c.sponsorGuildId))) {
+            if (c.uncoveredSince) { c.uncoveredSince = 0; changed = true; }
+            if (c.autoPaused) { c.autoPaused = false; c.autoPauseReason = ''; c.autoResumedAt = now; changed = true; resumed.push(c); }
+        } else {
+            if (!c.uncoveredSince) { c.uncoveredSince = now; changed = true; }          // start the grace timer
+            else if (!c.autoPaused && now - c.uncoveredSince >= grace) {
+                c.autoPaused = true; c.autoPauseReason = 'verifier-offline'; c.autoPausedAt = now; changed = true; paused.push(c);
+                console.error(`[COVERAGE] auto-paused ${c.id} — no verifier on sponsor ${c.sponsorGuildId} for ${Math.round((now - c.uncoveredSince) / 60000)}m`);
+            }
+        }
+    }
+    if (changed) saveCampaigns(camps);
+    for (const c of paused) notifyBuyer(clients, c, 'autopaused').catch(() => null);
+    for (const c of resumed) notifyBuyer(clients, c, 'autoresumed').catch(() => null);
+    return { paused: paused.length, resumed: resumed.length };
 }
 
 const inviteCodeOf = (invite) => { const m = String(invite || '').match(/([a-z0-9-]{2,32})\/?$/i); return m ? m[1] : ''; };
@@ -346,6 +382,6 @@ function retention(campaign, verifiedList, joinlinks, now = Date.now()) {
 
 module.exports = {
     PRICE_PER_100, MIN_JOINS, priceFor, round2, newId,
-    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, linkProgress, publicView, pickForGuild, eligibleForGuild, weightedOrder, botPresent, fleetGuildIds,
+    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, linkProgress, publicView, pickForGuild, eligibleForGuild, weightedOrder, botPresent, fleetGuildIds, autoPauseUncovered,
     isInvoicePaid, reconcile, startCampaignSweep, retention
 };

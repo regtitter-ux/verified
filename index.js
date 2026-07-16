@@ -1624,6 +1624,24 @@ reservegw.start();
 // Settle (or refund) LTC auto-payouts NOWPayments has finished/rejected.
 startLtcPayoutSweep(clients);
 
+// Auto-pause campaigns whose sponsor we can no longer verify joins on (bot kicked/
+// banned, selfbot removed/banned, etc.), and auto-resume when access returns.
+function startCoverageSweep() {
+    const every = Number(process.env.COVERAGE_SWEEP_MS) || 3 * 60 * 1000;
+    const tick = async () => {
+        try {
+            const covered = campaigns.fleetGuildIds(clients);
+            if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) covered.add(g); } catch { /* keep bots-only */ } }
+            const r = await campaigns.autoPauseUncovered(clients, covered);
+            if (r.paused || r.resumed) console.log(`[COVERAGE] sweep — auto-paused ${r.paused}, resumed ${r.resumed}`);
+        } catch (e) { console.error('[COVERAGE] sweep error:', e.message); }
+    };
+    setInterval(tick, every);
+    setTimeout(tick, 90 * 1000);   // after the fleet's guild caches have filled
+    console.log(`[COVERAGE] verifier-coverage sweep every ${Math.round(every / 60000)}m`);
+}
+startCoverageSweep();
+
 // Journal ads-on/off stretches so the throughput estimate can skip the downtime.
 perf.startPerfSampler();
 

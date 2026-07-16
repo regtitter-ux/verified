@@ -51,7 +51,7 @@ function queueResolver(camps, verified, covered) {
     const key = (c) => Number(c.paidAt) || Number(c.createdAt) || 0;
     const deliverable = [];
     for (const c of Object.values(camps)) {
-        if (!c || c.status !== 'active' || c.paused) continue;
+        if (!c || c.status !== 'active' || c.paused || c.autoPaused) continue;
         if (!covered.has(c.sponsorGuildId)) continue;
         const del = campaigns.delivered(c, verified, camps);
         if ((Number(c.purchased) || 0) - del <= 0) continue;
@@ -63,6 +63,7 @@ function queueResolver(camps, verified, covered) {
     const total = deliverable.length;
     return (c) => {
         if (!c || c.status !== 'active') return null;
+        if (c.autoPaused) return { state: 'verifier_off' };
         if (c.paused) return { state: 'paused' };
         if (!covered.has(c.sponsorGuildId)) return { state: 'no_bot' };
         if (!pos.has(c.id)) return { state: 'idle' };
@@ -2520,6 +2521,8 @@ async function handleBuyer(req, res, path, clients, config) {
         // invalidated campaign back to active (works even if the invite string is
         // unchanged — the previously-dead link now resolves). Force a re-check.
         if (c.status === 'invalid') { c.status = 'active'; c.invalidAt = 0; c.inviteCheckedAt = Date.now(); dirty = true; }
+        // New link is verified covered above → clear any coverage auto-pause.
+        if (c.autoPaused || c.uncoveredSince) { c.autoPaused = false; c.autoPauseReason = ''; c.uncoveredSince = 0; dirty = true; }
         // Optional per-link join cap. `limit` > 0 arms a cap; empty/0 clears it (the
         // campaign runs to its purchased total). Either way we (re)start the window
         // from the current delivered count, so saving here also RESUMES a campaign
