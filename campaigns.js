@@ -174,10 +174,9 @@ function botPresent(campaign, botGuildIds) {
 
 // Every campaign showable on a display guild: active, not paused, not
 // self-targeted, not opted-out of this guild, not yet delivered, and whose own
-// server has a network bot (so the join can be verified). Each carries its
-// `remaining` (unmet joins) as the selection weight. Callers pick from this —
-// weighted-random for a single ad, or in weighted order to skip sponsors the
-// verifying user is already a member of.
+// server has a network bot (so the join can be verified). Each carries `remaining`
+// (unmet joins) and `paidAt` (queue position). Callers order these with
+// weightedOrder (now FIFO by paidAt) and layer priority/hide/membership on top.
 function eligibleForGuild(displayGuildId, verifiedList, botGuildIds) {
     const camps = loadCampaigns();
     const list = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
@@ -191,34 +190,33 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds) {
         const remaining = c.purchased - del;
         if (remaining <= 0) continue;                                      // already done
         if (linkProgress(c, del).reached) continue;                        // per-link cap hit → stopped until resumed
-        eligible.push({ id: c.id, invite: c.invite, sponsorGuildId: c.sponsorGuildId, remaining });
+        eligible.push({ id: c.id, invite: c.invite, sponsorGuildId: c.sponsorGuildId, remaining, paidAt: Number(c.paidAt) || Number(c.createdAt) || 0 });
     }
     return eligible;
 }
 
-// A weighted-random ORDER of eligible campaigns (Efraimidis–Spirakis reservoir:
-// key = random^(1/weight), sort desc). Lets a caller try candidates in a fair,
-// remaining-weighted order — e.g. to pick the first sponsor the user isn't on.
+// The ORDER eligible campaigns are tried in — strict FIFO: the earliest-paid
+// order is served first and stays first until it's fully delivered, so the queue
+// actually drains instead of every new order stealing exposure (weighted-random
+// spread attention across all orders at once, which never let the backlog clear).
+// This only sets the base order; the caller still layers the partner/admin
+// controls on top (hide removes a campaign, a pinned "priority" campaign is moved
+// to the front) and skips sponsors the user already joined — none of that changes.
+// Ties (same paidAt) fall back to id for a stable order.
 function weightedOrder(eligible) {
     return (Array.isArray(eligible) ? eligible : [])
-        .map((e) => ({ e, key: Math.pow(Math.random() || 1e-12, 1 / Math.max(1e-9, e.remaining)) }))
-        .sort((a, b) => b.key - a.key)
-        .map((x) => x.e);
+        .slice()
+        .sort((a, b) => (a.paidAt || 0) - (b.paidAt || 0) || String(a.id).localeCompare(String(b.id)));
 }
 
-// Pick a campaign to show on a display guild, WEIGHTED BY REMAINING JOINS so
-// bigger unmet orders get more exposure while smaller ones still finish — no
-// single order hogs, no congestion. Returns { invite, campaignId,
+// Pick a campaign to show on a display guild — the FIRST in the queue (earliest
+// paid) so orders finish in the order they came in. Returns { invite, campaignId,
 // sponsorGuildId } or null. (User-membership-aware selection lives in the
 // verification handler, which uses eligibleForGuild + weightedOrder.)
 function pickForGuild(displayGuildId, verifiedList, botGuildIds) {
-    const eligible = eligibleForGuild(displayGuildId, verifiedList, botGuildIds);
-    const total = eligible.reduce((s, e) => s + e.remaining, 0);
-    if (!eligible.length || total <= 0) return null;
-    let r = Math.random() * total;
-    for (const e of eligible) { r -= e.remaining; if (r <= 0) return { invite: e.invite, campaignId: e.id, sponsorGuildId: e.sponsorGuildId }; }
-    const e = eligible[eligible.length - 1];
-    return { invite: e.invite, campaignId: e.id, sponsorGuildId: e.sponsorGuildId };
+    const eligible = weightedOrder(eligibleForGuild(displayGuildId, verifiedList, botGuildIds));
+    const e = eligible[0];
+    return e ? { invite: e.invite, campaignId: e.id, sponsorGuildId: e.sponsorGuildId } : null;
 }
 
 // Is a CryptoBot invoice paid? Best-effort; false on any error.
