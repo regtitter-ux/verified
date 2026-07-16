@@ -35,6 +35,42 @@ async function coveredGuildIds(clients) {
     if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) set.add(g); } catch { /* ignore */ } }
     return set;
 }
+
+// Where each campaign sits in the FIFO delivery queue right now, and whether it's
+// actually being shown. Returns a fn campaign → { state, position, total, ... }:
+//   showing — its sponsor's ad was displayed within QUEUE_SHOWING_MS (real signal).
+//   waiting — deliverable but an earlier order is still ahead of it (position/total).
+//   no_bot  — active but no bot/reserve covers its server, so it can't run.
+//   paused  — manually paused.
+//   idle    — active but not deliverable for another reason (per-link cap / just done).
+//   null    — not active (complete/cancelled/invalid — shown by the status chip).
+const QUEUE_SHOWING_MS = Number(process.env.QUEUE_SHOWING_MS) || 5 * 60 * 1000;
+function queueResolver(camps, verified, covered) {
+    const now = Date.now();
+    const shows = sponsorshow.loadShows();
+    const key = (c) => Number(c.paidAt) || Number(c.createdAt) || 0;
+    const deliverable = [];
+    for (const c of Object.values(camps)) {
+        if (!c || c.status !== 'active' || c.paused) continue;
+        if (!covered.has(c.sponsorGuildId)) continue;
+        const del = campaigns.delivered(c, verified, camps);
+        if ((Number(c.purchased) || 0) - del <= 0) continue;
+        if (campaigns.linkProgress(c, del).reached) continue;
+        deliverable.push(c);
+    }
+    deliverable.sort((a, b) => key(a) - key(b) || String(a.id).localeCompare(String(b.id)));
+    const pos = new Map(deliverable.map((c, i) => [c.id, i + 1]));
+    const total = deliverable.length;
+    return (c) => {
+        if (!c || c.status !== 'active') return null;
+        if (c.paused) return { state: 'paused' };
+        if (!covered.has(c.sponsorGuildId)) return { state: 'no_bot' };
+        if (!pos.has(c.id)) return { state: 'idle' };
+        const last = Number(shows[c.sponsorGuildId]) || 0;
+        const showing = last > 0 && (now - last) <= QUEUE_SHOWING_MS;
+        return { state: showing ? 'showing' : 'waiting', position: pos.get(c.id), total, lastShownSec: last ? Math.round((now - last) / 1000) : null };
+    };
+}
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
 const feed = require('./feed.js');
@@ -2181,6 +2217,8 @@ async function handleBuyer(req, res, path, clients, config) {
     const sess = buyerSessionOf(req);
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
     const buyerId = sess.userId;
+    // Owner or an assigned admin may view and manage ANY buyer's campaigns.
+    const isAdminBuyer = buyerId === adminAuth.OWNER_ID || Boolean(adminAuth.roleOf(buyerId));
 
     if (path === '/order/config' && req.method === 'GET') {
         const isMgr = managers.isManager(buyerId);
@@ -2349,10 +2387,39 @@ async function handleBuyer(req, res, path, clients, config) {
         // fallback) — so a reserve-covered campaign doesn't show a false
         // "won't run without a bot" warning, without revealing the reserve.
         const covered = await coveredGuildIds(clients);
+        const queueOf = queueResolver(camps, verified, covered);
         const mine = Object.values(camps).filter((c) => c.buyerId === buyerId && c.status !== 'pending_payment')
             .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-            .map((c) => ({ ...campaigns.publicView(c, verified), botPresent: campaigns.botPresent(c, covered), retention: campaigns.retention(c, verified, joinlinks) }));
+            .map((c) => ({ ...campaigns.publicView(c, verified), botPresent: campaigns.botPresent(c, covered), retention: campaigns.retention(c, verified, joinlinks), queue: queueOf(c) }));
         return send(res, 200, { campaigns: mine }, cors);
+    }
+
+    // Admin/owner: every buyer's campaigns. ?scope=active (queue order) | done.
+    if (path === '/order/all-campaigns' && req.method === 'GET') {
+        if (!isAdminBuyer) return send(res, 403, { error: 'admin only' }, cors);
+        await campaigns.reconcile(clients).catch(() => null);
+        const scope = new URL(req.url, 'http://x').searchParams.get('scope') === 'done' ? 'done' : 'active';
+        const camps = campaigns.loadCampaigns();
+        const verified = loadJSON('verified.json', []);
+        const joinlinks = loadJSON('joinlinks.json', []);
+        const covered = await coveredGuildIds(clients);
+        const queueOf = queueResolver(camps, verified, covered);
+        const wanted = scope === 'done'
+            ? (c) => c.status !== 'active' && c.status !== 'pending_payment'
+            : (c) => c.status === 'active';
+        const fifoKey = (c) => Number(c.paidAt) || Number(c.createdAt) || 0;
+        const list = Object.values(camps).filter((c) => c && wanted(c))
+            .sort((a, b) => scope === 'done'
+                ? (Number(b.completedAt) || Number(b.createdAt) || 0) - (Number(a.completedAt) || Number(a.createdAt) || 0)
+                : fifoKey(a) - fifoKey(b) || String(a.id).localeCompare(String(b.id)))   // active → real queue order
+            .map((c) => ({
+                ...campaigns.publicView(c, verified),
+                botPresent: campaigns.botPresent(c, covered),
+                retention: campaigns.retention(c, verified, joinlinks),
+                queue: queueOf(c),
+                admin: true, buyerId: c.buyerId, buyerName: userNameOf(clients, c.buyerId) || null
+            }));
+        return send(res, 200, { campaigns: list }, cors);
     }
 
     // Per-server delivery breakdown for one campaign.
@@ -2360,7 +2427,7 @@ async function handleBuyer(req, res, path, clients, config) {
         const id = path.slice('/order/campaigns/'.length, -('/servers'.length));
         const camps = campaigns.loadCampaigns();
         const c = camps[id];
-        if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
+        if (!c || (c.buyerId !== buyerId && !isAdminBuyer)) return send(res, 404, { error: 'not found' }, cors);
         const keys = campaigns.campaignAdKeys(c);
         const verified = loadJSON('verified.json', []);
         const perGuild = {};
@@ -2379,13 +2446,14 @@ async function handleBuyer(req, res, path, clients, config) {
         const id = path.slice('/order/campaigns/'.length, -('/pause'.length));
         const camps = campaigns.loadCampaigns();
         const c = camps[id];
-        if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
+        if (!c || (c.buyerId !== buyerId && !isAdminBuyer)) return send(res, 404, { error: 'not found' }, cors);
         // Only a running campaign can be paused/resumed — pausing a complete or
         // invalid one would show a misleading "active, not paused" state.
         if (c.status !== 'active') return send(res, 400, { error: 'not-active' }, cors);
         const body = await readBody(req);
         c.paused = Boolean(body?.paused);
         campaigns.saveCampaigns(camps);
+        if (c.buyerId !== buyerId) audit.logAction(buyerId, 'order.pause', `${id} ${c.paused ? 'pause' : 'resume'} (owner ${c.buyerId})`);
         return send(res, 200, { ok: true, paused: c.paused }, cors);
     }
 
@@ -2394,7 +2462,7 @@ async function handleBuyer(req, res, path, clients, config) {
         const id = path.slice('/order/campaigns/'.length, -('/server'.length));
         const camps = campaigns.loadCampaigns();
         const c = camps[id];
-        if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
+        if (!c || (c.buyerId !== buyerId && !isAdminBuyer)) return send(res, 404, { error: 'not found' }, cors);
         const body = await readBody(req);
         const gid = String(body?.gid || '');
         if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
@@ -2414,7 +2482,7 @@ async function handleBuyer(req, res, path, clients, config) {
         const id = path.slice('/order/campaigns/'.length, -('/invite'.length));
         const camps = campaigns.loadCampaigns();
         const c = camps[id];
-        if (!c || c.buyerId !== buyerId) return send(res, 404, { error: 'not found' }, cors);
+        if (!c || (c.buyerId !== buyerId && !isAdminBuyer)) return send(res, 404, { error: 'not found' }, cors);
         // Allow the swap for 'active' AND 'invalid' — swapping to a working invite
         // is exactly how a buyer self-recovers a campaign the sweep killed on a
         // dead/temporarily-revoked invite. (complete/pending stay closed.)
@@ -2463,6 +2531,7 @@ async function handleBuyer(req, res, path, clients, config) {
         c.linkBaseline = curDel;
         dirty = true;
         if (dirty) campaigns.saveCampaigns(camps);
+        if (c.buyerId !== buyerId) audit.logAction(buyerId, 'order.invite', `${id} → ${c.invite} (owner ${c.buyerId})`);
         return send(res, 200, { ok: true, campaign: campaigns.publicView(camps[id], verified) }, cors);
     }
 
