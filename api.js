@@ -769,8 +769,8 @@ async function handleAdmin(req, res, path, clients, config) {
                 userId: b.userId, name: b.username || userNameOf(clients, b.userId) || null, amount: b.amount, ts: b.ts
             }))
         }));
-        // The launch-message template is owner-only — don't expose it to admins.
-        return send(res, 200, { lots: view, guildId: lotmon.GUILD_ID, winMs: lotmon.WIN_MS, template: isOwner ? lots.getTemplate() : null }, cors);
+        // The launch-message template + channel name are owner-only — don't expose to admins.
+        return send(res, 200, { lots: view, guildId: lotmon.GUILD_ID, winMs: lotmon.WIN_MS, template: isOwner ? lots.getTemplate() : null, channelName: isOwner ? lots.getChannelName() : null }, cors);
     }
     if (path === '/admin/lots/template' && req.method === 'PUT') {
         if (!isOwner) return ownerOnly();
@@ -779,6 +779,14 @@ async function handleAdmin(req, res, path, clients, config) {
         const template = lots.setTemplate(body.text);
         auditDo('lots.template', `${String(template).length} chars`);
         return send(res, 200, { ok: true, template }, cors);
+    }
+    if (path === '/admin/lots/channel-name' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const channelName = lots.setChannelName(body.text);
+        auditDo('lots.channelName', channelName);
+        return send(res, 200, { ok: true, channelName }, cors);
     }
     if (path === '/admin/lots' && req.method === 'POST') {
         const body = await readBody(req);

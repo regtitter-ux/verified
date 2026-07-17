@@ -48,7 +48,7 @@ async function createLot(clients, opts = {}) {
     let channel;
     try {
         channel = await guild.channels.create({
-            name: `💹﹒${stays}-stays`,
+            name: lots.renderChannelName(stays),
             type: ChannelType.GuildText,
             parent: categoryId() || undefined,
             rateLimitPerUser: slowmode(),

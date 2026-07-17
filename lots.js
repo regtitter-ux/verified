@@ -21,6 +21,16 @@ function renderTemplate(stays, start, step) {
     return getTemplate().replace(/\{stays\}/g, String(stays)).replace(/\{sb\}/g, String(start)).replace(/\{ob\}/g, String(step));
 }
 
+// Owner-editable name of the channel the bot opens for a lot. Same {stays}
+// placeholder as the message = number of stays. Discord itself lowercases and
+// swaps spaces for dashes on text channels, so what you type is a hint, not exact.
+const DEFAULT_CHANNEL_NAME = '💹﹒{stays}-stays';
+function getChannelName() { const n = load().channelName; return (typeof n === 'string' && n.trim()) ? n : DEFAULT_CHANNEL_NAME; }
+function setChannelName(text) { const db = load(); db.channelName = (text == null ? '' : String(text)).slice(0, 100); save(db); return getChannelName(); }
+function renderChannelName(stays) {
+    return getChannelName().replace(/\{stays\}/g, String(stays)).slice(0, 100).trim() || `${stays}-stays`;
+}
+
 function list() { return load().lots.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)); }
 function byId(id) { return load().lots.find((l) => l.id === id) || null; }
 function activeByChannel(channelId) { return load().lots.find((l) => l.channelId === String(channelId) && l.status === 'active') || null; }
@@ -64,4 +74,4 @@ function addBid(id, bid) {
     return l;
 }
 
-module.exports = { load, save, list, byId, activeByChannel, activeLots, create, update, addBid, getTemplate, setTemplate, renderTemplate, DEFAULT_TEMPLATE };
+module.exports = { load, save, list, byId, activeByChannel, activeLots, create, update, addBid, getTemplate, setTemplate, renderTemplate, DEFAULT_TEMPLATE, getChannelName, setChannelName, renderChannelName, DEFAULT_CHANNEL_NAME };
