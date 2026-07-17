@@ -14,7 +14,7 @@ function save(o) { saveJSON('lots.json', o); }
 const DEFAULT_TEMPLATE =
     '# 💹 Lot: {stays} stays\n' +
     '**Starting price: ＄{sb}** · **minimal increase: ＄{ob}**\n\n' +
-    'Post your bid as a number in the chat. If no one outbids it for 15 minutes, it wins and the lot closes.';
+    'Click **💰 Place a bid** below and enter your amount. If no one outbids it for 15 minutes, it wins and the lot closes.';
 function getTemplate() { const t = load().template; return (typeof t === 'string' && t.trim()) ? t : DEFAULT_TEMPLATE; }
 function setTemplate(text) { const db = load(); db.template = (text == null ? '' : String(text)).slice(0, 2000); save(db); return getTemplate(); }
 function renderTemplate(stays, start, step) {

@@ -580,6 +580,15 @@ const startBot = (token) => {
         // can act twice — e.g. post the /verify card more than once.
         if (alreadyHandled(interaction.id)) return;
 
+        // Auction-lot bidding: button opens a modal, modal submit places the bid.
+        // Needs no privileged intent, so it runs on whichever bot posted the lot.
+        if (interaction.isButton() && interaction.customId.startsWith(lotmon.BID_BUTTON + ':')) {
+            return lotmon.openBidModal(interaction).catch((e) => console.error('[LOTS] bid modal:', e.message));
+        }
+        if (interaction.isModalSubmit() && interaction.customId.startsWith(lotmon.BID_MODAL + ':')) {
+            return lotmon.handleBidModal(clients, interaction).catch((e) => console.error('[LOTS] bid submit:', e.message));
+        }
+
         // /bal — ephemeral balance + payment details (optional id: owner may view others)
         if (interaction.isChatInputCommand() && interaction.commandName === 'bal') {
             const idParam = (interaction.options.getString('id') || '').trim();
