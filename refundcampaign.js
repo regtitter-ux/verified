@@ -22,6 +22,7 @@
 // record is flipped off 'left', so a re-run can't double-pay.
 const { loadJSON, saveJSON } = require('./database.js');
 const { EmbedBuilder } = require('discord.js');
+const poster = require('./poster.js');
 const partnerlog = require('./partnerlog.js');
 
 const MARKER = 'refundCompletedCampaignClawbacks_v1';
@@ -115,9 +116,7 @@ function markDone(marks, detail) {
 
 async function postSummary(clients, records, total, perPartner) {
     if (!records) return;
-    const bot = (Array.isArray(clients) ? clients : []).find((c) => c.user?.id === ADMIN_BOT_ID);
-    if (!bot) return;
-    const channel = bot.channels.cache.get(LOG_CHANNEL) || await bot.channels.fetch(LOG_CHANNEL).catch(() => null);
+    const channel = await poster.posterChannel(clients, LOG_CHANNEL);
     if (!channel) return;
     const top = Object.entries(perPartner).sort((a, b) => b[1] - a[1]).slice(0, 15)
         .map(([uid, amt]) => `<@${uid}> — +$${amt.toFixed(2)}`).join('\n') || '—';

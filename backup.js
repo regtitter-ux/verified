@@ -12,8 +12,8 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const { DATA_DIR } = require('./database.js');
+const poster = require('./poster.js');
 
-const ADMIN_BOT_ID = (process.env.ADMIN_BOT_ID || '1514533989434789998').trim();
 const backupChannel = () => (process.env.BACKUP_CHANNEL || '').trim();
 const INTERVAL_MS = Number(process.env.BACKUP_INTERVAL_MS) || 6 * 3600 * 1000; // every 6h
 const KEEP_LOCAL = Number(process.env.BACKUP_KEEP_LOCAL) || 24;                 // ~6 days at 6h
@@ -60,10 +60,7 @@ function snapshotLocal() {
 // Post a gzipped bundle to the backup channel (off-site copy).
 async function toDiscord(clients) {
     if (!backupChannel()) return { ok: false, reason: 'no-channel' };
-    const bot = (Array.isArray(clients) ? clients : []).find((c) => c.user?.id === ADMIN_BOT_ID)
-        || (Array.isArray(clients) ? clients : [])[0];
-    if (!bot) return { ok: false, reason: 'no-bot' };
-    const channel = bot.channels.cache.get(backupChannel()) || await bot.channels.fetch(backupChannel()).catch(() => null);
+    const channel = await poster.posterChannel(clients, backupChannel());
     if (!channel) return { ok: false, reason: 'no-channel' };
     try {
         const gz = zlib.gzipSync(Buffer.from(JSON.stringify(bundle())));

@@ -11,6 +11,7 @@
 // revoke stale roles without needing the GuildMembers intent to enumerate
 // role holders.
 const { loadJSON, saveJSON } = require('./database.js');
+const poster = require('./poster.js');
 
 const HUB_GUILD_ID = process.env.HUB_GUILD_ID || '1521868035088978073';
 const HUB_ROLE_ID = process.env.HUB_ROLE_ID || '1523062132214730813';
@@ -26,8 +27,11 @@ function hasActiveVerification(userId) {
     return (Array.isArray(verified) ? verified : []).some((u) => u.id === userId && u.roleId);
 }
 
+// Any random ready bot that's on the hub guild can manage the hub role — not
+// tied to the admin bot (it may be down). Needs Manage Roles + a higher role,
+// which the caller re-checks via role.editable before acting.
 function adminBot(clients) {
-    return (Array.isArray(clients) ? clients : []).find((c) => c.user?.id === ADMIN_BOT_ID);
+    return poster.guildBot(clients, HUB_GUILD_ID);
 }
 
 function loadTracked() {

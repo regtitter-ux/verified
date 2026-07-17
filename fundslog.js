@@ -2,9 +2,9 @@
 // posted by the admin bot to a dedicated channel, with who was paid, for which
 // user, on which server, and in which channel the verification card lives.
 const { EmbedBuilder } = require('discord.js');
+const poster = require('./poster.js');
 
 const logChannel = () => process.env.FUNDS_LOG_CHANNEL || '1522955113860173854';
-const ADMIN_BOT_ID = process.env.ADMIN_BOT_ID || '1514533989434789998';
 
 const fmtMoney = (n) => '$' + (+((Number(n) || 0).toFixed(4))).toString();
 
@@ -25,9 +25,7 @@ function channelName(clients, cid) {
 // server whose join is being reversed — distinct from guildId (the card server).
 async function logFunds(clients, entry) {
     try {
-        const bot = clients.find((c) => c.user?.id === ADMIN_BOT_ID);
-        if (!bot) return;
-        const channel = bot.channels.cache.get(logChannel()) || await bot.channels.fetch(logChannel()).catch(() => null);
+        const channel = await poster.posterChannel(clients, logChannel());
         if (!channel) return;
 
         const credit = entry.type === 'credit';

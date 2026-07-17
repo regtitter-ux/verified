@@ -9,6 +9,7 @@
 //     themselves only carry the short key, not the whole ad body.
 const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
+const poster = require('./poster.js');
 
 // 12 hex chars = 48 bits — plenty for our scale (millions of creatives
 // would still have negligible collision probability).
@@ -46,7 +47,6 @@ function touchCreative(text) {
 }
 
 const adCompleteChannel = () => process.env.AD_COMPLETE_CHANNEL || '1523423040216633414';
-const ADMIN_BOT_ID = process.env.ADMIN_BOT_ID || '1514533989434789998';
 const adCompletePing = () => process.env.AD_COMPLETE_PING || '833442190427684914';
 
 // When a creative with a join-limit reaches its cap, post a completion
@@ -68,10 +68,7 @@ async function maybeNotifyAdComplete(clients, adKey, verifiedList) {
     rec.notifiedAt = Date.now();
     saveJSON('adlimits.json', limits);
 
-    const bot = (Array.isArray(clients) ? clients : []).find((c) => c.user?.id === ADMIN_BOT_ID);
-    if (!bot) return;
-    const channel = bot.channels.cache.get(adCompleteChannel())
-        || await bot.channels.fetch(adCompleteChannel()).catch(() => null);
+    const channel = await poster.posterChannel(clients, adCompleteChannel());
     if (!channel) return;
 
     const text = loadJSON('adcreatives.json', {})[adKey]?.text || '(текст не найден)';

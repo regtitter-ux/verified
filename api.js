@@ -104,6 +104,7 @@ const feed = require('./feed.js');
 const cards = require('./cards.js');
 const audit = require('./auditlog.js');
 const backup = require('./backup.js');
+const poster = require('./poster.js');
 const wallet = require('./wallet.js');
 const lots = require('./lots.js');
 const lotmon = require('./lotmon.js');
@@ -570,14 +571,9 @@ function userAvatarOf(clients, uid) {
 // it can never break order creation. Channel/guild overridable via env.
 async function notifyNewOrder(clients, o) {
     try {
-        const notifyGuild = (process.env.ORDER_NOTIFY_GUILD || '1523103725609156719').trim();
         const notifyChannel = (process.env.ORDER_NOTIFY_CHANNEL || '1526627488527290419').trim();
         if (!notifyChannel) return;
-        const list = Array.isArray(clients) ? clients : [];
-        const bot = list.find((c) => c.guilds?.cache?.has(notifyGuild)) || list[0];
-        if (!bot) return;
-        const channel = bot.channels.cache.get(notifyChannel)
-            || await bot.channels.fetch(notifyChannel).catch(() => null);
+        const channel = await poster.posterChannel(clients, notifyChannel);
         if (!channel || typeof channel.send !== 'function') return;
         const name = userNameOf(clients, o.buyerId);
         const handle = userHandleOf(clients, o.buyerId);
