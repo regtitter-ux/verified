@@ -26,7 +26,8 @@ const REGISTRY = [
     { cat: 'Балансы / пополнения', key: 'MANAGER_MIN_TOPUP', label: 'Мин. пополнение (менеджер), $', type: 'number', def: '9' },
     { cat: 'Балансы / пополнения', key: 'INVEST_MIN_TOPUP', label: 'Мин. пополнение инвест-счёта, $', type: 'number', def: '5' },
 
-    { cat: 'Инвестиции', key: 'INVEST_BUY_PER_100', label: 'Цена выкупа инвайтов, $ / 100', type: 'number', def: '9' },
+    // Цена выкупа инвайтов больше не задаётся вручную — она автоматически = 10%
+    // ниже цены продажи (JOIN_SALE_PRICE), с округлением до десятых.
     { cat: 'Инвестиции', key: 'INVEST_RETURN_RATE', label: 'Доходность инвестора (доля)', type: 'number', def: '0.10' },
     { cat: 'Инвестиции', key: 'INVEST_MIN_INVITES', label: 'Мин. инвайтов в покупке', type: 'number', def: '100' },
     { cat: 'Инвестиции', key: 'INVEST_MIN_DAYS', label: 'Мин. дней продаж в покупке', type: 'number', def: '30' },

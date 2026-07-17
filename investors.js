@@ -24,8 +24,13 @@ const graceMs = () => (Number(process.env.INVEST_REFUND_GRACE_HOURS) || 24) * 36
 const round2 = (n) => +((Number(n) || 0).toFixed(2));
 const round4 = (n) => +((Number(n) || 0).toFixed(4));
 
-const buyPer100 = () => Number(process.env.INVEST_BUY_PER_100) || 9;     // $ investor pays per 100 (live: applies on Save)
-const sellPer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10;      // $ service resells per 100
+const roundTenth = (n) => Math.round((Number(n) || 0) * 10) / 10;
+const sellPer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10;      // $ service resells per 100 (the retail join price)
+// Investor buy-in price is DERIVED from the sell price: exactly 10% below it,
+// rounded to the nearest 10¢. So raising/lowering JOIN_SALE_PRICE moves the buy
+// price with it (keeps the 9:10 ratio) instead of leaving investors on a stale
+// fixed price. (Was a separate INVEST_BUY_PER_100 env var — now ignored.)
+const buyPer100 = () => roundTenth(sellPer100() * 0.9);                  // $ investor pays per 100
 const returnRate = () => Number.isFinite(Number(process.env.INVEST_RETURN_RATE)) ? Number(process.env.INVEST_RETURN_RATE) : 0.10;
 const buyPerInvite = () => round4(buyPer100() / 100);                    // $0.09
 const retPerInvite = () => round4(buyPerInvite() * (1 + returnRate()));   // $0.099

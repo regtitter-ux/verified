@@ -3187,8 +3187,13 @@ function startApiServer(clients, config) {
             if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
 
             // Public: home-page server feed (owner-managed via /admin/feed).
-            // Read-only, no credentials → open to any origin.
-            if (req.method === 'GET' && p === '/feed') return send(res, 200, { servers: feed.loadFeed() }, { 'Access-Control-Allow-Origin': '*' });
+            // Read-only, no credentials → open to any origin. Carries the live retail
+            // join price so static marketing pages show the current number, not a
+            // hardcoded one.
+            if (req.method === 'GET' && p === '/feed') return send(res, 200, { servers: feed.loadFeed(), pricePer100: campaigns.PRICE_PER_100 }, { 'Access-Control-Allow-Origin': '*' });
+
+            // Public: just the live pricing (retail join price) for marketing pages.
+            if (req.method === 'GET' && p === '/pricing') return send(res, 200, { pricePer100: campaigns.PRICE_PER_100, pricePerJoin: campaigns.PRICE_PER_100 / 100 }, { 'Access-Control-Allow-Origin': '*' });
 
             // Public: live "new member joined a sponsor" feed for the buyers page.
             // Recent CONFIRMED joins → the sponsor server that gained a member and
