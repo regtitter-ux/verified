@@ -1304,7 +1304,12 @@ const startBot = (token) => {
                         ordered = ordered.filter((c) => !hiddenHere.includes(c.id));
                         if (before > 0 && ordered.length === 0) allHiddenHere = true;   // partner hid every available ad here
                     }
-                    const prioId = pctl.priorityByGuild?.[guild.id];
+                    // Priority pin: the partner's own per-server pin wins; where the
+                    // partner set none, a service admin/manager's GLOBAL pin (set from
+                    // the orders page) applies. Either way it only moves the campaign to
+                    // the front — the loop below still skips it if unshowable.
+                    const globalPrioId = (() => { const sc = loadJSON('siteconfig.json', {}); const v = sc && sc.adminPriorityCampaignId; return (typeof v === 'string' && v) ? v : null; })();
+                    const prioId = pctl.priorityByGuild?.[guild.id] || globalPrioId;
                     if (prioId) {
                         const pi = ordered.findIndex((c) => c.id === prioId);
                         if (pi > 0) { const [pc] = ordered.splice(pi, 1); ordered.unshift(pc); }

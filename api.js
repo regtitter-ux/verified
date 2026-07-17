@@ -55,6 +55,11 @@ async function coveredGuildIds(clients) {
 // mark as "showing" only the FRONT-MOST deliverable order that is itself stamped
 // recently; everything behind it is "waiting", even if its own sponsor was
 // stamped by such a skip.
+// The service admin/manager's GLOBAL priority pin (one campaign, set from the
+// orders page). Stored in siteconfig; null when unset. Partner per-server pins
+// still override it in the actual delivery (index.js).
+const adminPriorityId = () => { const sc = loadJSON('siteconfig.json', {}); const v = sc && sc.adminPriorityCampaignId; return (typeof v === 'string' && v) ? v : null; };
+
 const QUEUE_SHOWING_MS = Number(process.env.QUEUE_SHOWING_MS) || 5 * 60 * 1000;
 function queueResolver(camps, verified, covered) {
     const now = Date.now();
@@ -71,6 +76,12 @@ function queueResolver(camps, verified, covered) {
         deliverable.push(c);
     }
     deliverable.sort((a, b) => key(a) - key(b) || String(a.id).localeCompare(String(b.id)));
+    // A service admin/manager can pin ONE campaign to the front network-wide (set
+    // from the orders page). It leads the queue everywhere the partner hasn't set
+    // their own per-server pin (partner pin wins, but that's per-guild and not
+    // reflected in this global view).
+    const pinId = adminPriorityId();
+    if (pinId) { const i = deliverable.findIndex((c) => c.id === pinId); if (i > 0) { const [p] = deliverable.splice(i, 1); deliverable.unshift(p); } }
     const pos = new Map(deliverable.map((c, i) => [c.id, i + 1]));
     const total = deliverable.length;
     // The single order that's genuinely "showing now": the earliest-queued
@@ -2259,6 +2270,7 @@ async function handleBuyer(req, res, path, clients, config) {
             minJoins: campaigns.MIN_JOINS,
             cryptoEnabled: cryptopay.enabled(),
             isOwner: buyerId === adminAuth.OWNER_ID,
+            isAdmin: Boolean(adminAuth.roleOf(buyerId)),
             isManager: isMgr,
             botInviteUrl: process.env.BOT_INVITE_URL || 'https://discord.com/oauth2/authorize?client_id=1522609323090509905&permissions=268435456&scope=bot'
         }, cors);
@@ -2424,9 +2436,11 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, { campaigns: mine }, cors);
     }
 
-    // Admin/owner: every buyer's campaigns. ?scope=active (queue order) | done.
+    // Admin/owner/manager: every buyer's campaigns. ?scope=active (queue order) | done.
+    // Managers get the same two "all orders" views as admins — that's where the
+    // service-side priority pin is set.
     if (path === '/order/all-campaigns' && req.method === 'GET') {
-        if (!isAdminBuyer) return send(res, 403, { error: 'admin only' }, cors);
+        if (!isAdminBuyer && !managers.isManager(buyerId)) return send(res, 403, { error: 'staff only' }, cors);
         await campaigns.reconcile(clients).catch(() => null);
         const scope = new URL(req.url, 'http://x').searchParams.get('scope') === 'done' ? 'done' : 'active';
         const camps = campaigns.loadCampaigns();
@@ -2434,22 +2448,52 @@ async function handleBuyer(req, res, path, clients, config) {
         const joinlinks = loadJSON('joinlinks.json', []);
         const covered = await coveredGuildIds(clients);
         const queueOf = queueResolver(camps, verified, covered);
+        const pinId = adminPriorityId();
         const wanted = scope === 'done'
             ? (c) => c.status !== 'active' && c.status !== 'pending_payment'
             : (c) => c.status === 'active';
         const fifoKey = (c) => Number(c.paidAt) || Number(c.createdAt) || 0;
         const list = Object.values(camps).filter((c) => c && wanted(c))
-            .sort((a, b) => scope === 'done'
-                ? (Number(b.completedAt) || Number(b.createdAt) || 0) - (Number(a.completedAt) || Number(a.createdAt) || 0)
-                : fifoKey(a) - fifoKey(b) || String(a.id).localeCompare(String(b.id)))   // active → real queue order
+            .sort((a, b) => {
+                if (scope !== 'done') { // pinned first, then real queue (FIFO) order
+                    const ap = a.id === pinId ? 0 : 1, bp = b.id === pinId ? 0 : 1;
+                    if (ap !== bp) return ap - bp;
+                    return fifoKey(a) - fifoKey(b) || String(a.id).localeCompare(String(b.id));
+                }
+                return (Number(b.completedAt) || Number(b.createdAt) || 0) - (Number(a.completedAt) || Number(a.createdAt) || 0);
+            })
             .map((c) => ({
                 ...campaigns.publicView(c, verified),
                 botPresent: campaigns.botPresent(c, covered),
                 retention: campaigns.retention(c, verified, joinlinks),
                 queue: queueOf(c),
-                admin: true, buyerId: c.buyerId, buyerName: userNameOf(clients, c.buyerId) || null
+                admin: true, pinned: c.id === pinId, buyerId: c.buyerId, buyerName: userNameOf(clients, c.buyerId) || null
             }));
-        return send(res, 200, { campaigns: list }, cors);
+        return send(res, 200, { campaigns: list, adminPriorityCampaignId: pinId }, cors);
+    }
+
+    // Service admin/manager: set (or clear) the GLOBAL priority pin. Body:
+    // { campaignId } — empty clears. One campaign pinned network-wide; it leads the
+    // queue wherever a partner hasn't set their own per-server pin (partner wins).
+    if (path === '/order/priority' && req.method === 'PUT') {
+        if (!isAdminBuyer && !managers.isManager(buyerId)) return send(res, 403, { error: 'staff only' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const cid = String(body?.campaignId || '').trim();
+        const cfg = loadJSON('siteconfig.json', {});
+        if (!cid) {
+            delete cfg.adminPriorityCampaignId;
+            saveJSON('siteconfig.json', cfg);
+            audit.logAction(buyerId, 'order.priority', 'cleared');
+            return send(res, 200, { ok: true, adminPriorityCampaignId: null }, cors);
+        }
+        const camps = campaigns.loadCampaigns();
+        const c = camps[cid];
+        if (!c || c.status !== 'active') return send(res, 400, { error: 'not-active' }, cors);
+        cfg.adminPriorityCampaignId = cid;
+        saveJSON('siteconfig.json', cfg);
+        audit.logAction(buyerId, 'order.priority', `${cid} (buyer ${c.buyerId})`);
+        return send(res, 200, { ok: true, adminPriorityCampaignId: cid }, cors);
     }
 
     // Per-server delivery breakdown for one campaign.
