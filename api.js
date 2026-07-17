@@ -2420,7 +2420,7 @@ async function handleBuyer(req, res, path, clients, config) {
     // My campaigns (reconcile first: purges dead legacy unpaid campaigns and
     // completes finished ones).
     if (path === '/order/campaigns' && req.method === 'GET') {
-        await campaigns.reconcile(clients).catch(() => null);
+        campaigns.reconcile(clients).catch(() => null); // fire-and-forget: don't block the list load on sequential invite re-checks (the 60s background sweep keeps statuses fresh)
         const camps = campaigns.loadCampaigns();
         const verified = loadJSON('verified.json', []);
         const joinlinks = loadJSON('joinlinks.json', []);
@@ -2441,7 +2441,7 @@ async function handleBuyer(req, res, path, clients, config) {
     // service-side priority pin is set.
     if (path === '/order/all-campaigns' && req.method === 'GET') {
         if (!isAdminBuyer && !managers.isManager(buyerId)) return send(res, 403, { error: 'staff only' }, cors);
-        await campaigns.reconcile(clients).catch(() => null);
+        campaigns.reconcile(clients).catch(() => null); // fire-and-forget: don't block the list load on sequential invite re-checks (the 60s background sweep keeps statuses fresh)
         const scope = new URL(req.url, 'http://x').searchParams.get('scope') === 'done' ? 'done' : 'active';
         const camps = campaigns.loadCampaigns();
         const verified = loadJSON('verified.json', []);
