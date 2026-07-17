@@ -306,14 +306,17 @@ async function autoPayViaLtc(clients, userId, amount, _seen, eligibleForReferral
     const wd = (batch && Array.isArray(batch.withdrawals) && batch.withdrawals[0]) || null;
     if (!wd && !(batch && batch.id)) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'LTC payout was not accepted'); }
 
-    // NOWPayments holds every batch until it's 2FA-verified and auto-rejects it
-    // after an hour — verify right away when the TOTP secret is configured. A
-    // failure here isn't fatal: the batch simply expires and the sweep refunds.
+    // Per-batch verification is DISABLED on this NOWPayments account (arranged with
+    // their support), so a created batch processes on its own — no verify call is
+    // needed. The verify path is kept only as a fallback: if a TOTP secret is set
+    // again (2FA re-enabled), we verify right away, since with 2FA on an unverified
+    // batch expires in an hour. Either way the sweep below settles or refunds, so a
+    // partner's balance is never silently lost.
     if (batch && batch.id && nowpayments.has2fa()) {
         const v = await nowpayments.verifyPayout(batch.id);
         if (!v.ok) console.error(`[LTC_PAYOUT] 2FA verify failed for batch ${batch.id}: ${v.reason}`);
     } else if (batch && batch.id) {
-        console.warn(`[LTC_PAYOUT] batch ${batch.id} created but no NOWPAYMENTS_2FA_SECRET — confirm it in the dashboard within 1h or it will be rejected`);
+        console.log(`[LTC_PAYOUT] batch ${batch.id} submitted — per-batch verification is disabled on the account, it processes automatically`);
     }
 
     const settings = loadJSON('settings.json');

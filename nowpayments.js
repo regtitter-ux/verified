@@ -96,9 +96,12 @@ function verifyWebhook(bodyObj, signature) {
 // ---- Payouts (mass-payout API) ----
 // Sending money out needs the account LOGIN (a short-lived JWT) on top of the API
 // key. Read live from the env so a change in the admin panel applies on save.
-// NOTE: NOWPayments gates payouts behind (a) address whitelisting and (b) 2FA
-// verification per batch — both must be disabled by their support for payouts to
-// go through unattended, otherwise the batch just sits WAITING.
+// NOTE: NOWPayments gates payouts behind (a) address whitelisting and (b) per-batch
+// verification. For unattended payouts either the account's support disables the
+// per-batch verification entirely (current setup — a created batch just processes),
+// OR 2FA (authenticator) stays on and we auto-verify each batch with the TOTP
+// secret. With 2FA OFF and verification still required, the code arrives by email
+// and CANNOT be automated — the batch would sit WAITING and expire in an hour.
 const payoutEmail = () => (process.env.NOWPAYMENTS_EMAIL || '').trim();
 const payoutPassword = () => (process.env.NOWPAYMENTS_PASSWORD || '').trim();
 const payoutCurrency = () => (process.env.NOWPAYMENTS_PAYOUT_CURRENCY || 'ltc').trim().toLowerCase();
