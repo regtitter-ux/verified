@@ -371,9 +371,11 @@ async function finalizeLeavers(clients, leaverIds) {
     // active verification" — hub-role reconciliation runs after the save so
     // it reads the fresh state.
     if (verifiedChanged) {
+        // A clawback removed a verification → the PARTNER's (card owner's) daily
+        // count may have dropped below the threshold, so re-check their hub role.
         const touched = new Set();
         for (const rec of Array.isArray(list) ? list : []) {
-            if (idSet.has(rec.id) && rec.userId) touched.add(rec.userId);
+            if (idSet.has(rec.id) && rec.creatorId) touched.add(rec.creatorId);
         }
         for (const uid of touched) {
             await syncHubMember(clients, uid).catch(() => null);

@@ -3396,7 +3396,7 @@ function startApiServer(clients, config) {
                 if (match.none) {
                     recordApiVerified({ creatorId: userId, memberId, serverId, noAd: true });
                     try { partnerlog.logEvent(userId, { type: 'grant', reason: 'no_ad', userId: memberId, guildId: serverId, roleId: 'api', srcId: `v:${memberId}:${serverId}:api` }); } catch { /* never block */ }
-                    syncHubMember(clients, memberId).catch(() => null);
+                    syncHubMember(clients, userId).catch(() => null); // partner (card owner)
                     return send(res, 200, { joined: true, credited: false, ad: false });
                 }
                 if (match.notMember) return send(res, 403, { joined: false });
@@ -3441,7 +3441,7 @@ function startApiServer(clients, config) {
                 try { investorOwnedJoin = investors.serverOutstanding(serverId, loadJSON('verified.json', [])) > 0; } catch { /* never block verification */ }
                 if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
                 const fresh = recordApiVerified({ creatorId: userId, memberId, serverId, adKey });
-                syncHubMember(clients, memberId).catch(() => null);
+                syncHubMember(clients, userId).catch(() => null); // partner (card owner)
                 await logFunds(clients, {
                     type: 'credit', creatorId: userId, userId: memberId, guildId: serverId,
                     amount, sponsorGuildId: sponsor.guildId,

@@ -79,7 +79,7 @@ async function complete(clients, e) {
             if (m && role && role.editable && !m.roles.cache.has(e.roleId)) await m.roles.add(role).catch(() => null);
         }
     }
-    if (!e.viaExtra) syncHubMember(clients, e.userId).catch(() => null);
+    if (!e.viaExtra) syncHubMember(clients, e.creatorId).catch(() => null); // hub role tracks the PARTNER (card owner)
 
     // Pay the partner (idempotent, reversible on leave).
     if (dup) {

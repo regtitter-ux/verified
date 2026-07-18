@@ -1,9 +1,10 @@
 // Hub role sync.
 //
-// A "current user of the service" role on one central guild — automatically
-// granted to anyone who has an active verification card on any server in the
-// network, and stripped when they no longer have one. Runs exclusively on the
-// admin bot (it's the fleet instance already sitting on the hub guild).
+// A PARTNER role on one central guild — granted only to a user who currently
+// owns an active (non-deleted) verification card that has had at least
+// HUBROLE_MIN_PER_DAY verifications in the last 24h, and stripped otherwise.
+// (It used to go to anyone who'd ever verified anywhere, which handed it out to
+// everyone — this restricts it to active partners.)
 //
 // Uses `guild.members.fetch(userId)` (single-member REST fetch, works without
 // any privileged intent) plus a local `hubroleusers.json` set that tracks
@@ -15,16 +16,42 @@ const poster = require('./poster.js');
 
 const HUB_GUILD_ID = process.env.HUB_GUILD_ID || '1521868035088978073';
 const HUB_ROLE_ID = process.env.HUB_ROLE_ID || '1523062132214730813';
-const ADMIN_BOT_ID = process.env.ADMIN_BOT_ID || '1514533989434789998';
+const MIN_PER_DAY = () => Number(process.env.HUBROLE_MIN_PER_DAY) || 1;   // min verifications/24h to qualify
+const DAY_MS = 24 * 3600 * 1000;
 
 const enabled = () => Boolean(HUB_GUILD_ID) && Boolean(HUB_ROLE_ID);
 
-// Anyone with at least one verified.json entry that still carries a roleId
-// counts as an active user. Records are removed on sponsor-leave clawback,
-// so "in verified.json" is a live signal, not a historical one.
-function hasActiveVerification(userId) {
-    const verified = loadJSON('verified.json', []);
-    return (Array.isArray(verified) ? verified : []).some((u) => u.id === userId && u.roleId);
+// The (guildId|roleId) keys of every LIVE (non-deleted) verification card a user
+// owns — including old role ids from a "Сбросить роль" so historical verifs still
+// match. Empty set = the user owns no active card.
+function liveCardKeys(uid) {
+    const keys = new Set();
+    for (const c of loadJSON('cards.json', [])) {
+        if (!c || c.deletedAt || String(c.creatorId || '') !== uid) continue;
+        const roles = [c.roleId || null, ...(Array.isArray(c.roleHistory) ? c.roleHistory : [])];
+        for (const r of roles) keys.add(`${c.guildId}|${r || ''}`);
+    }
+    return keys;
+}
+
+// A user qualifies for the hub role iff they own a live verification card AND
+// that card has had at least MIN_PER_DAY real verifications in the last 24h.
+// Extra-ad bonus joins (viaExtra) are NOT counted — they aren't card verifications.
+function isActivePartner(userId) {
+    const uid = String(userId || '');
+    if (!uid) return false;
+    const keys = liveCardKeys(uid);
+    if (!keys.size) return false;                       // no active card
+    const from = Date.now() - DAY_MS;
+    const min = MIN_PER_DAY();
+    let n = 0;
+    for (const u of loadJSON('verified.json', [])) {
+        if (!u || u.viaExtra || String(u.creatorId || '') !== uid) continue;
+        if ((Number(u.timestamp) || 0) <= from) continue;
+        if (!keys.has(`${u.guildId}|${u.roleId || ''}`)) continue;
+        if (++n >= min) return true;
+    }
+    return false;
 }
 
 // Any random ready bot that's on the hub guild can manage the hub role — not
@@ -56,7 +83,7 @@ async function syncHubMember(clients, userId) {
     const member = await guild.members.fetch(userId).catch(() => null);
     if (!member) return; // not on the hub guild — nothing to grant/revoke
 
-    const should = hasActiveVerification(userId);
+    const should = isActivePartner(userId);
     const has = member.roles.cache.has(HUB_ROLE_ID);
     const tracked = loadTracked();
     let trackedDirty = false;
@@ -73,20 +100,20 @@ async function syncHubMember(clients, userId) {
     if (trackedDirty) saveTracked(tracked);
 }
 
-// Periodic reconciliation: syncs every user we currently track (so we can
-// revoke stale roles) plus every user with a live verified.json entry (so
-// new joiners on the hub get the role). Idempotent — safe to run often.
+// Periodic reconciliation: candidates are every PARTNER who owns a live card
+// (grant if they qualify) plus everyone we've tracked as granted (revoke if they
+// no longer qualify — this is what strips the role from everyone it was wrongly
+// handed to). Idempotent — safe to run often.
 async function reconcileHubRoles(clients) {
     if (!enabled()) return;
     const bot = adminBot(clients);
     if (!bot) return;
 
-    const verified = loadJSON('verified.json', []);
-    const should = new Set();
-    for (const u of Array.isArray(verified) ? verified : []) {
-        if (u.id && u.roleId) should.add(u.id);
+    const owners = new Set();
+    for (const c of loadJSON('cards.json', [])) {
+        if (c && !c.deletedAt && c.creatorId) owners.add(String(c.creatorId));
     }
-    const all = new Set([...should, ...loadTracked()]);
+    const all = new Set([...owners, ...loadTracked()]);
     for (const uid of all) {
         await syncHubMember(clients, uid).catch(() => null);
     }
@@ -103,5 +130,5 @@ function startHubRoleSync(clients) {
 
 module.exports = {
     HUB_GUILD_ID, HUB_ROLE_ID,
-    hasActiveVerification, syncHubMember, reconcileHubRoles, startHubRoleSync
+    isActivePartner, syncHubMember, reconcileHubRoles, startHubRoleSync
 };

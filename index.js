@@ -1546,10 +1546,9 @@ const startBot = (token) => {
             // ping the ops channel with the ad text and the final counter.
             if (adKey) maybeNotifyAdComplete(clients, adKey, updated).catch(() => null);
 
-            // The user now has an active verification anywhere in the network
-            // — grant the hub-guild role via the admin bot (no-op if they're
-            // not on the hub or the admin bot isn't available).
-            syncHubMember(clients, user.id).catch(() => null);
+            // A verification just landed on this partner's card → re-check the
+            // PARTNER's (card owner's) hub-role eligibility (active card + ≥1/day).
+            syncHubMember(clients, creatorId).catch(() => null);
 
             // Monetization applies only to /v3 cards (which encode a roleId in the
             // button); legacy !v3 cards without a role never accrue balance.
