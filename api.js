@@ -2722,14 +2722,39 @@ async function handlePartner(req, res, path, clients, config) {
             return { ...mini, withdrawn, earned, active, server: [...g.servers].join(', ') || null, funnel: g.funnel };
         }));
         list.sort((a, b) => (b.earned - a.earned) || (b.funnel.checked.week - a.funnel.checked.week));
+        const myReferrer = /^\d{17,20}$/.test(String(s.referrer || ''))
+            ? { id: String(s.referrer), ...(await userMiniLive(clients, s.referrer)) }
+            : null;
         return send(res, 200, {
             count: refs.length,
             activeCount: list.filter((r) => r.active).length,
             totalEarned: money(list.reduce((a, r) => a + r.earned, 0)),
             pending: money(s.refBonusAccrued),
             rate: REFERRAL_RATE,
-            referrals: list
+            referrals: list,
+            myReferrer   // who referred THIS user (null if none set yet)
         }, cors);
+    }
+
+    // Set the user's own referrer (who referred them) — the web equivalent of the
+    // /bal "Referrer" button. One-time: can't change once set, can't be yourself.
+    // The referrer earns 10% of this user's withdrawals; the user gets the boost.
+    if (path === '/partner/referrer' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const referrerId = String(body?.referrerId || '').trim();
+        const settings = loadJSON('settings.json');
+        if (settings[userId]?.referrer) return send(res, 400, { error: 'already-set' }, cors);
+        if (!/^\d{17,20}$/.test(referrerId)) return send(res, 400, { error: 'bad-id' }, cors);
+        if (referrerId === String(userId)) return send(res, 400, { error: 'self' }, cors);
+        if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
+        settings[userId].referrer = referrerId;
+        settings[userId].referrerAt = Date.now();
+        if (!settings[referrerId]) settings[referrerId] = { advText: '', serverAds: {}, partners: [] };
+        if (!Array.isArray(settings[referrerId].referrals)) settings[referrerId].referrals = [];
+        if (!settings[referrerId].referrals.includes(userId)) settings[referrerId].referrals.push(userId);
+        saveJSON('settings.json', settings);
+        return send(res, 200, { ok: true, referrer: { id: referrerId, ...(await userMiniLive(clients, referrerId)) } }, cors);
     }
 
     if (path === '/partner/me' && req.method === 'GET') {
