@@ -2515,14 +2515,25 @@ async function handleBuyer(req, res, path, clients, config) {
         if (!c || (c.buyerId !== buyerId && !isAdminBuyer)) return send(res, 404, { error: 'not found' }, cors);
         const keys = campaigns.campaignAdKeys(c);
         const verified = loadJSON('verified.json', []);
-        const perGuild = {};
+        const perGuild = {};   // gid -> { paid:Set, extra:Set }
         for (const u of Array.isArray(verified) ? verified : []) {
             if (!keys.has(u.adKey) || (c.paidAt && u.timestamp < c.paidAt)) continue;
-            (perGuild[u.guildId] ||= new Set()).add(u.id);
+            const g = (perGuild[u.guildId] ||= { paid: new Set(), extra: new Set() });
+            (u.viaExtra ? g.extra : g.paid).add(u.id);
         }
-        const servers = Object.entries(perGuild)
-            .map(([gid, set]) => ({ gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), count: set.size, disabled: (c.disabledGuilds || []).includes(gid) }))
-            .sort((a, b) => b.count - a.count);
+        let servers = Object.entries(perGuild)
+            .map(([gid, g]) => {
+                // `count` = PAID joins (partner was paid). Admin also sees how many
+                // came via the EXTRA bonus ad (users delivered here ONLY through the
+                // extra button — a paid join for the same user counts as paid).
+                const extraOnly = [...g.extra].filter((uid) => !g.paid.has(uid)).length;
+                const row = { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), count: g.paid.size, disabled: (c.disabledGuilds || []).includes(gid) };
+                if (isAdminBuyer) row.extra = extraOnly;
+                return row;
+            });
+        // Non-admins (buyer / partner / manager) don't see extra-only servers.
+        if (!isAdminBuyer) servers = servers.filter((s) => s.count > 0);
+        servers.sort((a, b) => b.count - a.count || ((b.extra || 0) - (a.extra || 0)));
         return send(res, 200, { servers }, cors);
     }
 
