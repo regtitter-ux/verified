@@ -26,6 +26,7 @@ const reservegw = require('./reservegw.js');
 const perf = require('./perf.js');
 const sponsorshow = require('./sponsorshow.js');
 const autojoin = require('./autojoin.js');
+const extraad = require('./extraad.js');
 const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
@@ -41,6 +42,33 @@ const logincodes = require('./logincodes.js');
 // no button. (Kept as a no-op so both call sites stay unchanged.)
 function joinButtonRow() {
     return null;
+}
+
+// Build the "EXTRA GWS" bonus-ad link button for a verification response: find the
+// next eligible campaign the user isn't in (other than `excludeSponsorGuildId`),
+// stamp its sponsor as advertised, record the join intent (so the autojoin sweep
+// credits it if they go through), and return the button row — or null when there's
+// no extra ad. `placement` is 'pre' (under the ad) or 'post' (under the success).
+async function buildExtraRow(clients, guild, creatorId, userId, excludeSponsorGuildId, placement, channelId) {
+    try {
+        const fleet = campaigns.fleetGuildIds(clients);
+        if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) fleet.add(g); } catch { /* ignore */ } }
+        const extra = await extraad.pick(guild, userId, excludeSponsorGuildId, {
+            fleet, isMember,
+            resolveSponsor: (invite) => resolveSponsorPresence(clients, invite),
+            creatorId
+        });
+        if (!extra) return null;
+        try { sponsorshow.stamp(extra.sponsorGuildId); } catch { /* stamping must never break verification */ }
+        try {
+            autojoin.record({
+                userId, cardGuildId: guild.id, roleId: extraad.roleFor(extra.campaignId),
+                creatorId, sponsorGuildId: extra.sponsorGuildId, campaignId: extra.campaignId,
+                adRaw: extra.raw, channelId: channelId || null, viaExtra: true, placement
+            });
+        } catch { /* recording must never break verification */ }
+        return extraad.row(extra.url);
+    } catch { return null; }
 }
 
 // Global safety net: a stray rejection or throw (background sweeps, Discord
@@ -1402,7 +1430,10 @@ const startBot = (token) => {
             }
 
             const firstJoinRow = joinButtonRow(latest?.raw, responseText);
-            return interaction.editReply({ content: responseText, components: firstJoinRow ? [firstJoinRow] : [] }).catch(() => null);
+            // Bonus "EXTRA GWS" ad — the next eligible campaign after the main one.
+            const extraRow = await buildExtraRow(clients, guild, creatorId, user.id, latest?.sponsorGuildId, 'pre', interaction.channelId);
+            const firstComponents = [firstJoinRow, extraRow].filter(Boolean);
+            return interaction.editReply({ content: responseText, components: firstComponents }).catch(() => null);
         }
 
         const pending = pendingVerification.get(pendingKey);
@@ -1437,7 +1468,10 @@ const startBot = (token) => {
             }
         }
 
-        await interaction.editReply({ content: '✅ Success! Access granted' }).catch(() => null);
+        // Same bonus "EXTRA GWS" ad under the success message (excluding the sponsor
+        // they just joined). 'post' = shown after verification.
+        const successExtraRow = await buildExtraRow(clients, guild, creatorId, user.id, sponsor?.guildId || pending?.sponsorGuildId, 'post', interaction.channelId).catch(() => null);
+        await interaction.editReply({ content: '✅ Success! Access granted', components: successExtraRow ? [successExtraRow] : [] }).catch(() => null);
 
         try {
             if (verifiedRole?.editable) await member.roles.add(verifiedRole).catch(() => null);

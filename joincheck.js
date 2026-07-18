@@ -158,6 +158,7 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
     if (extra && typeof extra === 'object') {
         if (Number.isFinite(Number(extra.revenue))) rec.revenue = round4(Number(extra.revenue));
         if (extra.managerId) rec.managerId = String(extra.managerId);
+        if (extra.extraPlacement) rec.extraPlacement = String(extra.extraPlacement); // 'pre' | 'post' — extra-ad button
     }
     arr.push(rec);
     saveJSON('joinlinks.json', arr);

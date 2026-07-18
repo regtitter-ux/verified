@@ -60,14 +60,17 @@ async function complete(clients, e) {
         const v = loadJSON('verified.json', []);
         const arr = Array.isArray(v) ? v : [];
         const rec = { id: e.userId, guildId: e.cardGuildId, roleId: e.roleId || null, creatorId: e.creatorId, timestamp: Date.now(), viaAutoJoin: true };
+        if (e.viaExtra) rec.viaExtra = true;   // bonus-ad delivery, isolated from card stats
         if (adKey) rec.adKey = adKey; else rec.noAd = true;
         arr.push(rec);
         saveJSON('verified.json', arr);
         if (adKey) maybeNotifyAdComplete(clients, adKey, arr).catch(() => null);
     }
 
-    // Grant the card role (best-effort — the credit is the point, access is a bonus).
-    if (e.roleId && e.cardGuildId) {
+    // Grant the card role (best-effort — the credit is the point, access is a
+    // bonus). Skipped for the EXTRA bonus ad: it has no role requirement and its
+    // roleId is a sentinel ('extra:<campaignId>'), not a real Discord role.
+    if (!e.viaExtra && e.roleId && e.cardGuildId) {
         const bot = (Array.isArray(clients) ? clients : []).find((c) => c.guilds?.cache?.has(e.cardGuildId));
         const g = bot?.guilds.cache.get(e.cardGuildId);
         if (g) {
@@ -76,7 +79,7 @@ async function complete(clients, e) {
             if (m && role && role.editable && !m.roles.cache.has(e.roleId)) await m.roles.add(role).catch(() => null);
         }
     }
-    syncHubMember(clients, e.userId).catch(() => null);
+    if (!e.viaExtra) syncHubMember(clients, e.userId).catch(() => null);
 
     // Pay the partner (idempotent, reversible on leave).
     if (dup) {
@@ -87,7 +90,7 @@ async function complete(clients, e) {
     try { investorOwned = investors.serverOutstanding(e.cardGuildId, loadJSON('verified.json', [])) > 0; } catch { /* never block */ }
     const camp = e.campaignId ? campaigns.loadCampaigns()[e.campaignId] : null;
     const econ = managers.joinEconomics(camp, sharesMod.REVENUE_PER_JOIN);
-    const credit = creditJoin(e.creatorId, e.sponsorGuildId, e.userId, e.cardGuildId, e.roleId, e.channelId, { revenue: econ.revenue, managerId: econ.managerId });
+    const credit = creditJoin(e.creatorId, e.sponsorGuildId, e.userId, e.cardGuildId, e.roleId, e.channelId, { revenue: econ.revenue, managerId: econ.managerId, extraPlacement: e.viaExtra ? (e.placement || 'pre') : undefined });
     if (credit.duplicate) {
         try { partnerlog.logEvent(e.creatorId, { type: 'grant', reason: 'dup_join', userId: e.userId, guildId: e.cardGuildId, roleId: e.roleId, sponsorGuildId: e.sponsorGuildId, srcId: `dup:${e.userId}:${e.sponsorGuildId}` }); } catch { /* never block */ }
         return;

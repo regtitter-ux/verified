@@ -105,6 +105,7 @@ const cards = require('./cards.js');
 const audit = require('./auditlog.js');
 const backup = require('./backup.js');
 const poster = require('./poster.js');
+const extraad = require('./extraad.js');
 const wallet = require('./wallet.js');
 const lots = require('./lots.js');
 const lotmon = require('./lotmon.js');
@@ -2042,7 +2043,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const { list, avgVerifySeconds } = enrichCards(clients, cards.loadCards());
         const active = list.filter((c) => !c.deletedAt).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
         const deleted = list.filter((c) => c.deletedAt).sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
-        return send(res, 200, { cards: active, deletedCards: deleted, avgVerifySeconds }, cors);
+        return send(res, 200, { cards: active, deletedCards: deleted, avgVerifySeconds, extra: extraad.stats() }, cors);
     }
     if (path === '/admin/cards/register' && req.method === 'POST') {
         if (!isOwner) return ownerOnly();
