@@ -1487,7 +1487,7 @@ async function handleAdmin(req, res, path, clients, config) {
                 totalPaid: money(totalPaid)
             },
             shares: sharesData,
-            cryptoBalance: await cryptoUsdtBalance(),
+            nowpaymentsBalance: await nowpaymentsBalanceUsd(),
             adCreatives,
             noJoinCheckAds
         }, cors);
