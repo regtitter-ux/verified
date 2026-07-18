@@ -44,30 +44,55 @@ function joinButtonRow() {
     return null;
 }
 
-// Build the "EXTRA GWS" bonus-ad link button for a verification response: find the
-// next eligible campaign the user isn't in (other than `excludeSponsorGuildId`),
-// stamp its sponsor as advertised, record the join intent (so the autojoin sweep
-// credits it if they go through), and return the button row — or null when there's
-// no extra ad. `placement` is 'pre' (under the ad) or 'post' (under the success).
+// Short-lived membership cache for AD SELECTION only (deciding which ad to show
+// and skipping a server the user is already in). This is the hot path's main cost
+// — `isMember` force-fetches Discord every call, and the main loop + the extra-ad
+// pick + repeat clicks would otherwise re-check the same (user, guild) many times.
+// The CREDITING path keeps the accurate force `isMember`, so nothing is mis-paid;
+// a slightly stale selection read at worst shows one extra/fewer ad for <60s.
+const _memberCache = new Map();   // "guildId:userId" -> { at, val }
+const MEMBER_CACHE_MS = Number(process.env.MEMBER_CACHE_MS) || 60000;
+async function isMemberCached(bot, guildId, userId) {
+    const key = `${guildId}:${userId}`;
+    const c = _memberCache.get(key);
+    if (c && Date.now() - c.at < MEMBER_CACHE_MS) return c.val;
+    const val = await isMember(bot, guildId, userId).catch(() => null);
+    if (val === true || val === false) {                     // never cache a transient null
+        if (_memberCache.size > 5000) _memberCache.clear();  // simple unbounded-growth guard
+        _memberCache.set(key, { at: Date.now(), val });
+    }
+    return val;
+}
+
+// Given an already-resolved extra pick { campaignId, raw, sponsorGuildId, url },
+// stamp its sponsor, record the join intent (so the autojoin sweep credits it if
+// they go through) and return the bonus-ad button row. No network calls.
+function attachExtraRow(guild, creatorId, userId, extra, placement, channelId) {
+    if (!extra || !extra.url) return null;
+    try { sponsorshow.stamp(extra.sponsorGuildId); } catch { /* stamping must never break verification */ }
+    try {
+        autojoin.record({
+            userId, cardGuildId: guild.id, roleId: extraad.roleFor(extra.campaignId),
+            creatorId, sponsorGuildId: extra.sponsorGuildId, campaignId: extra.campaignId,
+            adRaw: extra.raw, channelId: channelId || null, viaExtra: true, placement
+        });
+    } catch { /* recording must never break verification */ }
+    return extraad.row(extra.url);
+}
+
+// Find + attach the "EXTRA GWS" bonus-ad button when we DON'T already have a pick
+// (the success / retry branches — the first click reuses its main selection pass).
+// Uses the cached membership check so it's cheap.
 async function buildExtraRow(clients, guild, creatorId, userId, excludeSponsorGuildId, placement, channelId) {
     try {
         const fleet = campaigns.fleetGuildIds(clients);
         if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) fleet.add(g); } catch { /* ignore */ } }
         const extra = await extraad.pick(guild, userId, excludeSponsorGuildId, {
-            fleet, isMember,
+            fleet, isMember: isMemberCached,
             resolveSponsor: (invite) => resolveSponsorPresence(clients, invite),
             creatorId
         });
-        if (!extra) return null;
-        try { sponsorshow.stamp(extra.sponsorGuildId); } catch { /* stamping must never break verification */ }
-        try {
-            autojoin.record({
-                userId, cardGuildId: guild.id, roleId: extraad.roleFor(extra.campaignId),
-                creatorId, sponsorGuildId: extra.sponsorGuildId, campaignId: extra.campaignId,
-                adRaw: extra.raw, channelId: channelId || null, viaExtra: true, placement
-            });
-        } catch { /* recording must never break verification */ }
-        return extraad.row(extra.url);
+        return attachExtraRow(guild, creatorId, userId, extra, placement, channelId);
     } catch { return null; }
 }
 
@@ -1293,6 +1318,7 @@ const startBot = (token) => {
             // already-joined never suppresses another available one. Ad-free is
             // only reached when NO eligible campaign is showable.
             let campaignPicked = false;
+            let firstExtra = null;   // the "EXTRA GWS" bonus ad, reused from the main selection pass (no extra network calls)
             if (!adsOff) {
                 try {
                     // Resolve a candidate's sponsor (network) → { text, raw, sp }
@@ -1342,19 +1368,27 @@ const startBot = (token) => {
                         const pi = ordered.findIndex((c) => c.id === prioId);
                         if (pi > 0) { const [pc] = ordered.splice(pi, 1); ordered.unshift(pc); }
                     }
-                    let chosen = null, tentative = null, checks = 0;
+                    // One pass collects the showable candidates (resolved, not a
+                    // known member) in queue order, so we pick BOTH the main ad and
+                    // the "EXTRA GWS" bonus ad from it — no second network scan.
+                    // Cached membership keeps the whole loop cheap.
+                    let checks = 0;
+                    const cands = [];   // { cand, ad, definite }
                     for (const cand of ordered) {
                         if (capReached(cand.invite)) { sawCapped = true; continue; } // cheap, no network → unbounded
-                        if (checks >= 8) break;                            // bound the network calls
+                        if (checks >= 10) break;                           // bound the network calls
                         checks++;
                         const ad = await resolveCand(cand);
                         if (!ad) continue;                                 // unresolvable / self → try next
-                        const m = await isMember(ad.sp.bot, ad.sp.guildId, user.id).catch(() => null);
+                        const m = await isMemberCached(ad.sp.bot, ad.sp.guildId, user.id);
                         if (m === true) { sawMember = true; continue; }    // already a member → try next
-                        if (m === false) { chosen = { cand, ad }; break; } // not a member → ideal
-                        if (!tentative) tentative = { cand, ad };          // uncertain → fallback
+                        cands.push({ cand, ad, definite: m === false });   // not a member (or uncertain) → showable
+                        if (cands.filter((c) => c.definite).length >= 2) break; // enough for main + extra
                     }
-                    const pick = chosen || tentative;
+                    // main = first definite non-member, else first uncertain (unchanged).
+                    const pick = cands.find((c) => c.definite) || cands[0] || null;
+                    // extra = next showable that's a different campaign AND sponsor.
+                    const extraPickC = pick ? cands.find((c) => c.cand.id !== pick.cand.id && c.ad.sp.guildId !== pick.ad.sp.guildId) : null;
                     if (pick) {
                         // Carry the resolved sponsor guild so click 2 can re-find
                         // the bot WITHOUT re-resolving the invite (which could fail
@@ -1364,6 +1398,8 @@ const startBot = (token) => {
                         // Stamp "ad live" for the leave-clawback opt-out (joincheck.js).
                         try { sponsorshow.stamp(pick.ad.sp.guildId); } catch { /* stamping must never break verification */ }
                     }
+                    // Carry the bonus ad picked in the SAME pass — no second scan.
+                    if (extraPickC) firstExtra = { campaignId: extraPickC.cand.id, raw: extraPickC.ad.raw, sponsorGuildId: extraPickC.ad.sp.guildId, url: extraad.inviteUrl(extraPickC.ad.raw) };
                 } catch (e) { /* never let campaign selection break verification */ }
             }
 
@@ -1375,7 +1411,7 @@ const startBot = (token) => {
                 const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
                 if (!sp || sp.guildId === guild.id) {
                     latest = null;
-                } else if (await isMember(sp.bot, sp.guildId, user.id).catch(() => null) === true) {
+                } else if (await isMemberCached(sp.bot, sp.guildId, user.id) === true) {
                     // User is already a member of the house ad's sponsor — showing
                     // it can't drive a real join and would pay the partner for a
                     // pre-existing member. Same rule campaigns already follow.
@@ -1414,11 +1450,17 @@ const startBot = (token) => {
             // the join isn't re-selected into an ad-free verification.
             setTimeout(() => pendingVerification.delete(pendingKey), 30 * 60 * 1000);
 
-            // Funnel metric #1: first click ("started verification") for this card.
-            try { cards.trackClick(guild.id, roleId, creatorId, user.id); } catch (e) { /* stats must never break verification */ }
+            // Bonus "EXTRA GWS" ad — reuse the pick from the main selection pass
+            // above (no second network scan). record + stamp happen inside.
+            const firstJoinRow = joinButtonRow(latest?.raw, responseText);
+            const extraRow = attachExtraRow(guild, creatorId, user.id, firstExtra, 'pre', interaction.channelId);
+            const firstComponents = [firstJoinRow, extraRow].filter(Boolean);
 
-            // Remember this first-click so the join can be credited even if the
-            // user joins the sponsor but never clicks again (autojoin.js sweeps it).
+            // Send the reply FIRST, then do the local bookkeeping (funnel click +
+            // autojoin record) off the response path so they don't add to the
+            // "thinking" time.
+            const firstReply = interaction.editReply({ content: responseText, components: firstComponents }).catch(() => null);
+            try { cards.trackClick(guild.id, roleId, creatorId, user.id); } catch (e) { /* stats must never break verification */ }
             if (latest && latest.sponsorGuildId && roleId) {
                 try {
                     autojoin.record({
@@ -1428,12 +1470,7 @@ const startBot = (token) => {
                     });
                 } catch (e) { /* recording must never break verification */ }
             }
-
-            const firstJoinRow = joinButtonRow(latest?.raw, responseText);
-            // Bonus "EXTRA GWS" ad — the next eligible campaign after the main one.
-            const extraRow = await buildExtraRow(clients, guild, creatorId, user.id, latest?.sponsorGuildId, 'pre', interaction.channelId);
-            const firstComponents = [firstJoinRow, extraRow].filter(Boolean);
-            return interaction.editReply({ content: responseText, components: firstComponents }).catch(() => null);
+            return firstReply;
         }
 
         const pending = pendingVerification.get(pendingKey);
