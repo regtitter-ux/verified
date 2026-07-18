@@ -141,10 +141,13 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
     const settings = loadJSON('settings.json');
     if (!settings[creatorId]) settings[creatorId] = { advText: '', serverAds: {}, partners: [] };
     const s = settings[creatorId];
+    // noPay = record the join (joinlink + dup guard) WITHOUT paying the partner —
+    // used by the EXTRA bonus ad, which delivers to the buyer but doesn't credit
+    // the partner. Amount is 0 and the balance is untouched.
+    const noPay = Boolean(extra && extra.noPay);
     // Boosted referral rate acts as a floor while active (see referral.js).
-    const perJoin = round2(boostedRate(s, getJoinBid(s)) / 100);
-    s.balance = round2((Number(s.balance) || 0) + perJoin);
-    saveJSON('settings.json', settings);
+    const perJoin = noPay ? 0 : round2(boostedRate(s, getJoinBid(s)) / 100);
+    if (!noPay) { s.balance = round2((Number(s.balance) || 0) + perJoin); saveJSON('settings.json', settings); }
 
     const id = newId();
     const rec = {

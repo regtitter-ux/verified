@@ -90,11 +90,15 @@ async function complete(clients, e) {
     try { investorOwned = investors.serverOutstanding(e.cardGuildId, loadJSON('verified.json', [])) > 0; } catch { /* never block */ }
     const camp = e.campaignId ? campaigns.loadCampaigns()[e.campaignId] : null;
     const econ = managers.joinEconomics(camp, sharesMod.REVENUE_PER_JOIN);
-    const credit = creditJoin(e.creatorId, e.sponsorGuildId, e.userId, e.cardGuildId, e.roleId, e.channelId, { revenue: econ.revenue, managerId: econ.managerId, extraPlacement: e.viaExtra ? (e.placement || 'pre') : undefined });
+    const credit = creditJoin(e.creatorId, e.sponsorGuildId, e.userId, e.cardGuildId, e.roleId, e.channelId, { revenue: econ.revenue, managerId: econ.managerId, extraPlacement: e.viaExtra ? (e.placement || 'pre') : undefined, noPay: e.viaExtra });
     if (credit.duplicate) {
         try { partnerlog.logEvent(e.creatorId, { type: 'grant', reason: 'dup_join', userId: e.userId, guildId: e.cardGuildId, roleId: e.roleId, sponsorGuildId: e.sponsorGuildId, srcId: `dup:${e.userId}:${e.sponsorGuildId}` }); } catch { /* never block */ }
         return;
     }
+    // EXTRA bonus ad: the campaign delivery + a $0 joinlink (for the stat and for
+    // reversing the delivery on leave) are recorded, but the PARTNER IS NOT PAID
+    // for it — no balance credit, no shares, no funds-log entry.
+    if (e.viaExtra) { console.log(`[AUTOJOIN] extra-ad delivery ${e.userId} on sponsor ${e.sponsorGuildId} (no partner credit)`); return; }
     const amount = credit.amount;
     try { partnerlog.logEvent(e.creatorId, { type: 'grant', reason: 'paid', amount, userId: e.userId, guildId: e.cardGuildId, roleId: e.roleId, sponsorGuildId: e.sponsorGuildId, srcId: credit.linkId }); } catch { /* never block */ }
     await logFunds(clients, { type: 'credit', creatorId: e.creatorId, userId: e.userId, guildId: e.cardGuildId, channelId: e.channelId, amount, sponsorGuildId: e.sponsorGuildId, reason: 'Join auto-verified — first click + confirmed join (no second click)' });
