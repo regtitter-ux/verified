@@ -273,6 +273,18 @@ async function cryptoUsdtBalance() {
     return val;
 }
 
+// NOWPayments custody balance (USD), cached — NOWPayments rate-limits hard, and
+// balance moves slowly. Keeps the last good value on a transient fetch failure.
+let _npBalCache = { at: 0, val: null };
+async function nowpaymentsBalanceUsd() {
+    if (!nowpayments.enabled()) return null;
+    const now = Date.now();
+    if (now - _npBalCache.at < 5 * 60 * 1000) return _npBalCache.val;
+    const val = await nowpayments.balanceUsd().catch(() => null);
+    _npBalCache = { at: now, val: val != null ? val : _npBalCache.val };
+    return _npBalCache.val;
+}
+
 const getBid = (s) => (Number.isFinite(Number(s?.bid)) ? Number(s.bid) : 1); // $ per 100 clicks
 const money = (n) => +(Number(n) || 0).toFixed(2);
 const blankUser = () => ({ advText: '', serverAds: {}, partners: [] });
@@ -1039,7 +1051,9 @@ async function handleAdmin(req, res, path, clients, config) {
             const perJoin = (Number(c.purchased) > 0) ? (Number(c.price) || 0) / c.purchased : 0;
             prepaidUndelivered += rem * perJoin;
         }
-        const cryptoBal = await cryptoUsdtBalance();
+        // Solvency is measured against the NOWPayments custody balance — that's
+        // where partner payouts actually come from now (LTC auto-payouts).
+        const npBal = await nowpaymentsBalanceUsd();
         return send(res, 200, {
             owed: money(owed), accountsOwed,
             negative: money(negative), accountsNeg,
@@ -1048,8 +1062,8 @@ async function handleAdmin(req, res, path, clients, config) {
             adSales: sales.salesWindows(),
             walletsHeld: wallet.totalHeld(),
             prepaidUndelivered: money(prepaidUndelivered),
-            cryptoBalance: cryptoBal, solvency: cryptoBal != null ? money(cryptoBal - owed) : null,
-            solvent: cryptoBal != null ? cryptoBal >= owed : null
+            nowpaymentsBalance: npBal, solvency: npBal != null ? money(npBal - owed) : null,
+            solvent: npBal != null ? npBal >= owed : null
         }, cors);
     }
 

@@ -189,8 +189,28 @@ const PAYOUT_DEAD = new Set(['FAILED', 'REJECTED', 'EXPIRED']);
 const isPayoutDone = (s) => PAYOUT_DONE.has(String(s || '').toUpperCase());
 const isPayoutDead = (s) => PAYOUT_DEAD.has(String(s || '').toUpperCase());
 
+// Total AVAILABLE custody balance across all coins, in USD. Best-effort: each
+// non-zero coin balance is converted to USD via the estimate endpoint (stable-
+// coins counted ~1:1). Excludes pendingAmount (still settling). Null when the API
+// is unreachable. NOWPayments rate-limits hard, so callers MUST cache this.
+async function balanceUsd() {
+    if (!enabled()) return null;
+    const bal = await call('/v1/balance', 'GET', null).catch(() => null);
+    if (!bal || typeof bal !== 'object') return null;
+    let usd = 0;
+    for (const [coin, info] of Object.entries(bal)) {
+        const amt = Number(info && info.amount) || 0;
+        if (amt <= 0) continue;
+        const c = String(coin).toLowerCase();
+        if (c === 'usd' || c.startsWith('usdt') || c.startsWith('usdc') || c.startsWith('dai') || c.startsWith('busd')) { usd += amt; continue; }
+        const est = await call(`/v1/estimate?amount=${amt}&currency_from=${encodeURIComponent(c)}&currency_to=usd`, 'GET', null).catch(() => null);
+        usd += Number(est && est.estimated_amount) || 0;
+    }
+    return Math.round(usd * 100) / 100;
+}
+
 module.exports = {
     enabled, hasSecret, createPayment, paymentInfo, paymentStatus, isPaidStatus, verifyWebhook,
     payoutEnabled, payoutCurrency, estimatePayout, createPayout, payoutInfo, isPayoutDone, isPayoutDead,
-    has2fa, verifyPayout, totp
+    has2fa, verifyPayout, totp, balanceUsd
 };
