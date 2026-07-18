@@ -2062,6 +2062,21 @@ async function handleAdmin(req, res, path, clients, config) {
         if (!isOwner) return ownerOnly();
         return send(res, 200, { scan: cards.getScanState() }, cors);
     }
+    // guildId -> { ownerId, messageId } for one active card on each server, so the
+    // admin panel can deep-link a server name to its owner's partner cabinet at
+    // that card. When a server has several active cards, a pseudo-random one is
+    // kept (deterministic, but not always the same first one).
+    if (path === '/admin/guild-cards' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const byGuild = {};
+        for (const c of cards.loadCards()) {
+            if (!c || c.deletedAt || !c.guildId || !c.creatorId || !c.messageId) continue;
+            (byGuild[c.guildId] ||= []).push({ ownerId: String(c.creatorId), messageId: String(c.messageId) });
+        }
+        const map = {};
+        for (const [gid, list] of Object.entries(byGuild)) map[gid] = list[Math.floor(Math.random() * list.length)]; // random active card
+        return send(res, 200, { guildCards: map }, cors);
+    }
     if ((path === '/admin/cards/fix' || path === '/admin/cards/republish' || path === '/admin/cards/delete' || path === '/admin/cards/restore') && req.method === 'POST') {
         if (!isOwner) return ownerOnly();
         const body = await readBody(req);
@@ -2662,7 +2677,15 @@ async function handlePartner(req, res, path, clients, config) {
 
     const sess = buyerSessionOf(req);
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
-    const userId = sess.userId;
+    const actorId = sess.userId;
+    const actorIsAdmin = actorId === adminAuth.OWNER_ID || Boolean(adminAuth.roleOf(actorId));
+    // Admin "view / edit as another partner": ?as=<userId> makes EVERY partner
+    // endpoint below operate on that user (their data AND their edits), exactly as
+    // if the admin were signed in as them. Only a real admin may use it; a normal
+    // user's ?as= is ignored.
+    const asParam = (() => { try { return (new URL(req.url, 'http://x').searchParams.get('as') || '').trim(); } catch { return ''; } })();
+    const actingAs = (actorIsAdmin && /^\d{17,20}$/.test(asParam) && asParam !== actorId) ? asParam : null;
+    const userId = actingAs || actorId;
 
     // Partner activity log for this partner, with filters (by server, by
     // verifying user, by type/reason, by period, sort order).
@@ -2799,6 +2822,9 @@ async function handlePartner(req, res, path, clients, config) {
 
         return send(res, 200, {
             userId,
+            // Admin acting-as: who's being viewed/edited (null in a normal session).
+            actingAs: actingAs ? { id: actingAs, ...userMiniOf(clients, actingAs) } : null,
+            canActAs: actorIsAdmin,
             balance: money(s.balance),
             requisites: (s.requisites || '').trim(),
             joinRate: boosted ? Math.max(baseJoin, BOOST_RATE) : baseJoin,
