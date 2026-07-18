@@ -1464,7 +1464,11 @@ const startBot = (token) => {
                 const content = joined === null
                     ? '⏳ Не удалось проверить, что ты на сервере — попробуй ещё раз через минуту.'
                     : (pending.adText || 'Please join the server first, then click again.');
-                return interaction.editReply({ content, components: retryJoinRow ? [retryJoinRow] : [] }).catch(() => null);
+                // Keep the bonus "EXTRA GWS" ad on repeat "please join" prompts too,
+                // excluding the sponsor they're being asked to join. Still 'pre'.
+                const retryExtraRow = await buildExtraRow(clients, guild, creatorId, user.id, sponsor.guildId, 'pre', interaction.channelId).catch(() => null);
+                const retryComponents = [retryJoinRow, retryExtraRow].filter(Boolean);
+                return interaction.editReply({ content, components: retryComponents }).catch(() => null);
             }
         }
 
