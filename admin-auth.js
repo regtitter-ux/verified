@@ -135,19 +135,28 @@ async function _exchangeOauthUser(code) {
         });
         if (Array.isArray(guilds)) {
             const admin = guilds.filter((g) => g.owner || (BigInt(g.permissions || 0) & 8n) === 8n);
-            _userGuilds.set(me.id, { guilds: admin, ts: Date.now() });
+            setUserGuilds(me.id, admin);
         }
     } catch (_) { /* keep login working even if the guilds scope was declined */ }
     return me.id;
 }
 
-// Admin guilds captured at login (for the DMALL server picker). 1h TTL.
+// Admin guilds captured at login (for the DMALL server picker). Persisted to disk
+// (userguilds.json) so they survive server restarts/redeploys — the OAuth login
+// only happens occasionally, so an in-memory-only cache would be empty most of
+// the time. Kept for the session lifetime; overwritten on each login.
 const _userGuilds = new Map(); // uid -> { guilds:[...], ts }
+function _loadUG() { const r = loadJSON('userguilds.json', {}); return r && typeof r === 'object' && !Array.isArray(r) ? r : {}; }
+function setUserGuilds(uid, guilds) {
+    const entry = { guilds, ts: Date.now() };
+    _userGuilds.set(uid, entry);
+    try { const all = _loadUG(); all[uid] = entry; saveJSON('userguilds.json', all); } catch (_) {}
+}
 function getUserGuilds(uid) {
-    const hit = _userGuilds.get(uid);
-    if (!hit) return [];
-    if (Date.now() - hit.ts > 60 * 60 * 1000) { _userGuilds.delete(uid); return []; }
-    return hit.guilds;
+    let hit = _userGuilds.get(uid);
+    if (!hit) { const all = _loadUG(); hit = all[String(uid)]; if (hit) _userGuilds.set(uid, hit); }
+    if (!hit || Date.now() - hit.ts > SESSION_TTL_MS) return [];
+    return hit.guilds || [];
 }
 
 async function resolveOauthUser(code) {
