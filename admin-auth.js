@@ -66,7 +66,7 @@ function oauthAuthorizeUrl(state) {
         client_id: DISCORD_CLIENT_ID,
         redirect_uri: OAUTH_REDIRECT,
         response_type: 'code',
-        scope: 'identify',
+        scope: 'identify guilds',
         state
     });
     return `https://discord.com/api/oauth2/authorize?${params.toString()}`;
@@ -126,7 +126,28 @@ async function _exchangeOauthUser(code) {
         headers: { Authorization: `Bearer ${access}` }
     });
     if (!me.id) throw new Error('no user id');
+    // Also pull the user's admin guilds (for the DMALL server picker). Best-effort:
+    // never fail the login if this call errors.
+    try {
+        const guilds = await discordRequest({
+            method: 'GET', path: '/users/@me/guilds?with_counts=true',
+            headers: { Authorization: `Bearer ${access}` }
+        });
+        if (Array.isArray(guilds)) {
+            const admin = guilds.filter((g) => g.owner || (BigInt(g.permissions || 0) & 8n) === 8n);
+            _userGuilds.set(me.id, { guilds: admin, ts: Date.now() });
+        }
+    } catch (_) { /* keep login working even if the guilds scope was declined */ }
     return me.id;
+}
+
+// Admin guilds captured at login (for the DMALL server picker). 1h TTL.
+const _userGuilds = new Map(); // uid -> { guilds:[...], ts }
+function getUserGuilds(uid) {
+    const hit = _userGuilds.get(uid);
+    if (!hit) return [];
+    if (Date.now() - hit.ts > 60 * 60 * 1000) { _userGuilds.delete(uid); return []; }
+    return hit.guilds;
 }
 
 async function resolveOauthUser(code) {
@@ -265,5 +286,6 @@ module.exports = {
     oauthAuthorizeUrl, resolveOauthUser, issueState, verifyState,
     issueSession, verifySession, readSessionCookie, sessionCookieHeader,
     issueBuyerSession, verifyBuyerSession, readBuyerCookie, buyerCookieHeader,
-    roleOf, loadAdmins, saveAdmins
+    roleOf, loadAdmins, saveAdmins,
+    getUserGuilds
 };

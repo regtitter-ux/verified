@@ -2302,6 +2302,21 @@ async function handleBuyer(req, res, path, clients, config) {
         }, cors);
     }
 
+    // The buyer's admin guilds (captured at OAuth login) for the DMALL server
+    // picker. `bot` reflects whether a network bot is already in the guild.
+    if (path === '/order/servers' && req.method === 'GET') {
+        const cdn = (kind, id, hash, size) => hash ? `https://cdn.discordapp.com/${kind}/${id}/${hash}.${String(hash).startsWith('a_') ? 'gif' : 'png'}?size=${size}` : '';
+        const list = (adminAuth.getUserGuilds(buyerId) || []).map((g) => ({
+            id: g.id,
+            name: g.name,
+            avatar: cdn('icons', g.id, g.icon, 128),
+            banner: cdn('banners', g.id, g.banner, 480),
+            online: g.approximate_presence_count != null ? g.approximate_presence_count : (g.approximate_member_count != null ? g.approximate_member_count : null),
+            bot: (Array.isArray(clients) ? clients : []).some((c) => c && c.guilds && c.guilds.cache && c.guilds.cache.has(g.id))
+        }));
+        return send(res, 200, { servers: list }, cors);
+    }
+
     // Owner-only: list / add / remove sales managers.
     if (path === '/order/managers' && req.method === 'GET') {
         if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
