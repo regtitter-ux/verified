@@ -2314,6 +2314,7 @@ async function handleBuyer(req, res, path, clients, config) {
             online: g.approximate_presence_count != null ? g.approximate_presence_count : (g.approximate_member_count != null ? g.approximate_member_count : null),
             bot: (Array.isArray(clients) ? clients : []).some((c) => c && c.guilds && c.guilds.cache && c.guilds.cache.has(g.id))
         }));
+        list.sort((a, b) => (b.bot ? 1 : 0) - (a.bot ? 1 : 0) || ((b.online || 0) - (a.online || 0))); // bot-present first
         return send(res, 200, { servers: list }, cors);
     }
 
