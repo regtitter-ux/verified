@@ -407,6 +407,7 @@ function enrichCards(clients, records) {
             customDescription: Boolean(c.description),
             link: (c.guildId && c.channelId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
             createdAt: c.createdAt || 0,
+            autoResetMs: c.autoResetMs || 0,
             avgVerifySeconds,
             deletedAt: c.deletedAt || 0,
             deletedBy: c.deletedBy || null,
@@ -3092,6 +3093,23 @@ async function handlePartner(req, res, path, clients, config) {
         if (body.description !== undefined) patch.description = String(body.description).slice(0, 4000);
         const r = await cards.edit(clients, mid, patch).catch((e) => ({ ok: false, error: e.message }));
         return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card } : { error: r.error || 'failed' }, cors);
+    }
+    // Auto-reset the card's role on a cooldown (days + hours). Empty/0 disables it;
+    // the countdown restarts from now whenever this is saved.
+    if (path === '/partner/cards/autoreset' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const mid = String(body?.messageId || '');
+        if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
+        if (!ownCard(mid)) return send(res, 403, { error: 'not-your-card' }, cors);
+        const days = Math.max(0, Math.floor(Number(body?.days) || 0));
+        const hours = Math.max(0, Math.floor(Number(body?.hours) || 0));
+        let ms = (days * 24 + hours) * 3600 * 1000;
+        const MAX_MS = 365 * 24 * 3600 * 1000;
+        if (ms > MAX_MS) ms = MAX_MS;
+        const rec = cards.setAutoReset(mid, ms);
+        if (!rec) return send(res, 400, { error: 'not-tracked' }, cors);
+        return send(res, 200, { ok: true, autoResetMs: rec.autoResetMs || 0 }, cors);
     }
 
     if (path === '/partner/requisites' && req.method === 'PUT') {

@@ -606,7 +606,35 @@ async function handleMessageDelete(clients, message) {
     markDeleted(id, deletedBy);
 }
 
+// ---- Auto-reset: periodically reset a card's verification role on a cooldown.
+// The cooldown counts from the moment the setting was last changed (autoResetNext
+// is stamped then) and again after every auto-reset. 0/empty disables it.
+function setAutoReset(messageId, ms) {
+    const card = getCard(messageId);
+    if (!card) return null;
+    const on = Number(ms) > 0;
+    return addCard({ ...card, autoResetMs: on ? Math.floor(Number(ms)) : 0, autoResetNext: on ? Date.now() + Math.floor(Number(ms)) : 0 });
+}
+async function tickAutoReset(clients) {
+    const now = Date.now();
+    for (const c of loadCards()) {
+        if (c.deletedAt || !c.autoResetMs || c.autoResetMs <= 0) continue;
+        if (!c.autoResetNext || c.autoResetNext > now) continue;
+        try { await resetRole(clients, c.messageId); }
+        catch (e) { console.warn('[CARDS] auto-reset failed', c.messageId, e && e.message); }
+        // Reschedule regardless of outcome so a broken card can't hot-loop.
+        const cur = getCard(c.messageId);
+        if (cur && cur.autoResetMs > 0) addCard({ ...cur, autoResetNext: Date.now() + cur.autoResetMs });
+    }
+}
+function startAutoReset(clients) {
+    const every = Number(process.env.AUTO_RESET_TICK_MS) || 60 * 1000;
+    setInterval(() => tickAutoReset(clients).catch(() => null), every);
+    console.log(`[CARDS] auto-reset tick every ${Math.round(every / 1000)}s`);
+}
+
 module.exports = {
+    setAutoReset, tickAutoReset, startAutoReset,
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate, DEFAULT_DESCRIPTION,
     PERSONALIZED_BOT_ID, FAQ_TEXT, buildFaqView,

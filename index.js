@@ -1682,6 +1682,7 @@ campaigns.startCampaignSweep(clients);
 // Verification cards: detect ones deleted from their channel and move them to
 // the "deleted" list (keeping their stats).
 cards.startCardSweep(clients);
+cards.startAutoReset(clients);
 
 // Investors: refund undelivered invites when a server loses its bot / last card.
 investors.startInvestSweep(clients);
