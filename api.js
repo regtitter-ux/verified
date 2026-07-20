@@ -641,6 +641,9 @@ function userMiniOf(clients, uid) {
 // users, so force-fetch once and cache the result for an hour (null → the
 // frontend derives a banner from the avatar colour).
 const _bannerCache = new Map();
+// Buyers with a wallet reconciliation currently running in the background, so a
+// new /wallet poll doesn't stack another set of slow gateway calls on top.
+const _walletReconciling = new Set();
 async function userBannerOf(clients, uid) {
     uid = String(uid);
     const hit = _bannerCache.get(uid);
@@ -2375,22 +2378,37 @@ async function handleBuyer(req, res, path, clients, config) {
 
     // Wallet: balance + recent top-ups (reconciles pending top-ups first).
     if (path === '/order/wallet' && req.method === 'GET') {
-        await wallet.reconcileTopups(buyerId, campaigns.isInvoicePaid).catch(() => null);
-        // Webhook fallback: re-check any pending web-checkout top-ups against the gateway.
-        if (nowpayments.enabled()) {
-            for (const t of wallet.pendingByProvider(buyerId, 'nowpayments')) {
-                if (!t.paymentId) continue;
-                const info = await nowpayments.paymentInfo(t.paymentId).catch(() => null);
-                if (info && String(info.order_id) === String(t.orderId) && nowpayments.isPaidStatus(info.payment_status)) {
-                    wallet.settlePending(buyerId, { orderId: t.orderId });
-                }
-            }
-        }
-        if (cryptomus.enabled()) {
-            for (const t of wallet.pendingByProvider(buyerId, 'cryptomus')) {
-                const st = await cryptomus.paymentStatus(t.orderId).catch(() => null);
-                if (cryptomus.isPaidStatus(st)) wallet.settlePending(buyerId, { orderId: t.orderId });
-            }
+        // Reconcile pending top-ups against the payment gateways in the BACKGROUND.
+        // These are slow external HTTP calls (CryptoBot / NOWPayments / Cryptomus)
+        // and must never block the balance response — otherwise the whole cabinet
+        // stalls and, since this response also carries the payment-enabled flags,
+        // top-up falsely shows "unavailable" for the first seconds after a load.
+        // Settlements still land via the gateway webhooks; this is just a fallback,
+        // so a payment made right now appears on the next poll (every 15s). Skipped
+        // when a reconcile for this buyer is already running.
+        if (!_walletReconciling.has(buyerId)) {
+            _walletReconciling.add(buyerId);
+            (async () => {
+                try {
+                    await wallet.reconcileTopups(buyerId, campaigns.isInvoicePaid).catch(() => null);
+                    if (nowpayments.enabled()) {
+                        for (const t of wallet.pendingByProvider(buyerId, 'nowpayments')) {
+                            if (!t.paymentId) continue;
+                            const info = await nowpayments.paymentInfo(t.paymentId).catch(() => null);
+                            if (info && String(info.order_id) === String(t.orderId) && nowpayments.isPaidStatus(info.payment_status)) {
+                                wallet.settlePending(buyerId, { orderId: t.orderId });
+                            }
+                        }
+                    }
+                    if (cryptomus.enabled()) {
+                        for (const t of wallet.pendingByProvider(buyerId, 'cryptomus')) {
+                            const st = await cryptomus.paymentStatus(t.orderId).catch(() => null);
+                            if (cryptomus.isPaidStatus(st)) wallet.settlePending(buyerId, { orderId: t.orderId });
+                        }
+                    }
+                } catch (_) { /* background best-effort */ }
+                finally { _walletReconciling.delete(buyerId); }
+            })();
         }
         const minTopup = managers.isManager(buyerId) ? managers.MIN_TOPUP : wallet.MIN_TOPUP;
         return send(res, 200, {
