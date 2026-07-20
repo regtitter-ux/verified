@@ -100,6 +100,7 @@ function queueResolver(camps, verified, covered) {
 }
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
+const dmaccess = require('./dmaccess.js');
 const feed = require('./feed.js');
 const cards = require('./cards.js');
 const audit = require('./auditlog.js');
@@ -2277,7 +2278,7 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         return send(res, 200, sess
-            ? { authed: true, ...userMiniOf(clients, sess.userId), banner: await userBannerOf(clients, sess.userId), isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }
+            ? { authed: true, ...userMiniOf(clients, sess.userId), banner: await userBannerOf(clients, sess.userId), isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), dmall: dmaccess.isDmall(sess.userId) }
             : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
@@ -2338,6 +2339,23 @@ async function handleBuyer(req, res, path, clients, config) {
         const next = body?.remove ? list.filter((x) => x !== uid) : [...list, uid];
         audit.logAction(buyerId, body?.remove ? 'manager.remove' : 'manager.add', uid);
         return send(res, 200, { ok: true, managers: managers.saveManagers(next) }, cors);
+    }
+
+    // Owner-only: list / add / remove users granted access to the DMALL console.
+    if (path === '/order/dmall-access' && req.method === 'GET') {
+        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        return send(res, 200, { users: dmaccess.loadAccess() }, cors);
+    }
+    if (path === '/order/dmall-access' && req.method === 'PUT') {
+        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const uid = String(body?.userId || '');
+        if (!/^\d{17,20}$/.test(uid)) return send(res, 400, { error: 'bad user id' }, cors);
+        const list = dmaccess.loadAccess();
+        const next = body?.remove ? list.filter((x) => x !== uid) : [...list, uid];
+        audit.logAction(buyerId, body?.remove ? 'dmall.remove' : 'dmall.add', uid);
+        return send(res, 200, { ok: true, users: dmaccess.saveAccess(next) }, cors);
     }
 
     // Wallet: balance + recent top-ups (reconciles pending top-ups first).
