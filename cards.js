@@ -633,44 +633,38 @@ function startAutoReset(clients) {
     console.log(`[CARDS] auto-reset tick every ${Math.round(every / 1000)}s`);
 }
 
-// ---- "Always at bottom": when a member posts in the card's channel, delete the
-// card's message and re-send it so the card stays the last message in the chat.
-// Detection runs on the admin bot's MessageCreate (the only bot with the message
-// intent); the repost is done by whichever fleet bot actually owns the card.
+// ---- "Always at bottom": keep the card the last message in its channel. Rather
+// than subscribe to the gateway (which would fire on every message in every guild
+// a bot is in — the intent can't be scoped to one channel), we poll ONLY the
+// channels that host a sticky card: fetch the channel's newest message and, if
+// it isn't the card, delete the card and re-send it. No message intent needed —
+// any bot that owns the card can do it over REST.
 function setAlwaysBottom(messageId, on) {
     const card = getCard(messageId);
     if (!card) return null;
     return addCard({ ...card, alwaysBottom: !!on });
 }
-const stickyTimers = new Map();   // channelId -> pending repost timeout
-const stickyBusy = new Set();     // channelId currently reposting (avoid overlap)
-const STICKY_DELAY = Number(process.env.STICKY_BOTTOM_MS) || 1200; // coalesce bursts
-function stickyCardsInChannel(channelId) {
-    return loadCards().filter((c) => !c.deletedAt && c.alwaysBottom && c.channelId === channelId);
-}
-// Called for every non-bot message the admin bot sees. Cheap when nothing sticky
-// is in that channel. Coalesces message bursts into a single repost.
-function handleChannelActivity(clients, message) {
+let stickyTickBusy = false;
+async function tickAlwaysBottom(clients) {
+    if (stickyTickBusy) return;      // don't overlap a slow sweep with the next tick
+    stickyTickBusy = true;
     try {
-        const channelId = message && (message.channelId || message.channel?.id);
-        if (!channelId) return;
-        if (message.author && message.author.bot) return;
-        if (!stickyCardsInChannel(channelId).length) return;
-        if (stickyTimers.has(channelId)) clearTimeout(stickyTimers.get(channelId));
-        stickyTimers.set(channelId, setTimeout(() => {
-            stickyTimers.delete(channelId);
-            stickyBump(clients, channelId).catch(() => null);
-        }, STICKY_DELAY));
-    } catch (_) { /* never break message handling */ }
-}
-async function stickyBump(clients, channelId) {
-    if (stickyBusy.has(channelId)) return;
-    stickyBusy.add(channelId);
-    try {
-        for (const card of stickyCardsInChannel(channelId)) {
+        for (const card of loadCards()) {
+            if (card.deletedAt || !card.alwaysBottom) continue;
+            const loc = await locate(clients, card.channelId, card.messageId);
+            if (!loc || !loc.client) continue;   // gone/unreachable — the sweep handles deletion
+            // Only repost when the card is no longer the newest message.
+            const latest = await loc.channel.messages.fetch({ limit: 1 }).catch(() => null);
+            const newestId = latest && latest.first() ? latest.first().id : null;
+            if (!newestId || newestId === card.messageId) continue;
             await stickyRepost(clients, card.messageId).catch(() => null);
         }
-    } finally { stickyBusy.delete(channelId); }
+    } finally { stickyTickBusy = false; }
+}
+function startAlwaysBottom(clients) {
+    const every = Number(process.env.STICKY_BOTTOM_MS) || 4000;
+    setInterval(() => tickAlwaysBottom(clients).catch(() => null), every);
+    console.log(`[CARDS] always-at-bottom poll every ${Math.round(every / 1000)}s`);
 }
 // Re-send the card as a fresh message and delete the old one, preserving every
 // tracked field (owner, role, description, alwaysBottom, auto-reset, createdAt…).
@@ -694,7 +688,7 @@ async function stickyRepost(clients, messageId) {
 
 module.exports = {
     setAutoReset, tickAutoReset, startAutoReset,
-    setAlwaysBottom, handleChannelActivity,
+    setAlwaysBottom, tickAlwaysBottom, startAlwaysBottom,
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate, DEFAULT_DESCRIPTION,
     PERSONALIZED_BOT_ID, FAQ_TEXT, buildFaqView,
