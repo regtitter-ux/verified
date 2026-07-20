@@ -3246,9 +3246,19 @@ async function handlePartner(req, res, path, clients, config) {
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const settings = loadJSON('settings.json');
         if (!settings[userId]) settings[userId] = blankUser();
-        settings[userId].requisites = String(body?.requisites ?? '').trim().slice(0, 1000);
+        const reqStr = String(body?.requisites ?? '').trim().slice(0, 1000);
+        settings[userId].requisites = reqStr;
+        // Developer cabinet sends ltcAuto: when the requisites is a valid Litecoin
+        // address, switch on LTC auto-payout to it automatically; otherwise off.
+        let autoLtc = Boolean(settings[userId].autoLtc);
+        if (body?.ltcAuto) {
+            const isLtc = /^(ltc1[a-z0-9]{20,70}|[LM3][a-km-zA-HJ-NP-Z1-9]{25,40})$/.test(reqStr);
+            settings[userId].autoLtc = isLtc;
+            if (isLtc) settings[userId].ltcAddress = reqStr;
+            autoLtc = isLtc;
+        }
         saveJSON('settings.json', settings);
-        return send(res, 200, { ok: true, requisites: settings[userId].requisites }, cors);
+        return send(res, 200, { ok: true, requisites: settings[userId].requisites, autoLtc, ltcAddress: settings[userId].ltcAddress || null }, cors);
     }
 
     return send(res, 404, { error: 'unknown endpoint' }, cors);
