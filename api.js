@@ -2897,6 +2897,10 @@ async function handlePartner(req, res, path, clients, config) {
         const sumAmt = (arr) => r2(arr.reduce((a, r) => a + (Number(r.amount) || 0), 0));
         const standing = mine.filter((r) => r.status === 'joined' || r.status === 'settled');
         const clawed = mine.filter((r) => r.status === 'left');
+        // Split out income earned through the developer API (joinlinks tagged
+        // roleId 'api' by /api/join-check) from income earned by a verification
+        // bot the user runs on a Discord server.
+        const apiStanding = standing.filter((r) => r.roleId === 'api');
 
         // Per-server, per-window count of joiners who verified but later left
         // (clawed back). Keyed by the card's own server (cardGuildId) so it
@@ -2941,6 +2945,8 @@ async function handlePartner(req, res, path, clients, config) {
             ltcAddress: s.ltcAddress || null,
             standingJoins: standing.length,
             standingPaid: sumAmt(standing),
+            apiJoins: apiStanding.length,
+            apiPaid: sumAmt(apiStanding),
             clawedJoins: clawed.length,
             clawedAmount: sumAmt(clawed),
             withdrawnDone,
