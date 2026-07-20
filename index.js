@@ -176,12 +176,17 @@ const startBot = (token) => {
     const botId = botIdFromToken(token);
     const isAdminBot = botId === config.adminBotId;
     const hasMemberIntent = memberIntentBotIds.has(botId);
-    const intents = [GatewayIntentBits.Guilds];
-    if (isAdminBot) intents.push(GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent);
+    // GuildMessages (non-privileged) is on for every bot so the "always at bottom"
+    // sticky feature can detect channel activity fleet-wide. Only the admin bot
+    // additionally reads message CONTENT (privileged) for its ! commands.
+    const intents = [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages];
+    if (isAdminBot) intents.push(GatewayIntentBits.MessageContent);
     // Server Members Intent — opt-in per bot, enables realtime leave clawback.
     if (hasMemberIntent) intents.push(GatewayIntentBits.GuildMembers);
 
     const client = new Client({ intents });
+    // Whether this bot can observe messages (drives the "always at bottom" toggle).
+    client.__hasMsgIntent = intents.includes(GatewayIntentBits.GuildMessages);
 
     // Gateway diagnostics — surface WHY a bot never reaches READY (disallowed
     // intents = close 4014, bad token = 4004, rate-limit/network otherwise).
@@ -191,12 +196,19 @@ const startBot = (token) => {
     client.on(Events.ShardReconnecting, () => console.warn(`[GW ${botId}] reconnecting…`));
     client.on('invalidated', () => console.error(`[GW ${botId}] session invalidated (bad token / kicked)`));
 
-    // Realtime card-deletion detection (only fires on bots with GuildMessages
-    // intent — the admin bot). Marks a tracked card deleted the moment its
-    // message is removed, and tries to learn who via the audit log. The
-    // periodic sweep catches deletions everywhere else.
+    // Realtime card-deletion detection. Marks a tracked card deleted the moment
+    // its message is removed, and tries to learn who via the audit log. The
+    // periodic sweep catches anything missed.
     client.on(Events.MessageDelete, (msg) => {
         cards.handleMessageDelete(clients, msg).catch((e) => console.error('[CARDS] delete handler:', e.message));
+    });
+
+    // "Always at bottom": react to member activity in a channel that hosts a
+    // sticky card. Runs on every bot (all now have GuildMessages); the shared
+    // per-channel debounce in cards.js coalesces overlapping bots into one repost.
+    client.on(Events.MessageCreate, (message) => {
+        if (message.author?.bot) return;
+        cards.handleChannelActivity(clients, message);
     });
 
     // Audit: a network bot was added to a server. Filter out gateway
@@ -619,7 +631,6 @@ const startBot = (token) => {
     if (isAdminBot) {
         client.on(Events.MessageCreate, async (message) => {
             if (message.author.bot) return;
-            cards.handleChannelActivity(clients, message); // "always at bottom" sticky cards
             lotmon.handleMessage(clients, message).catch((e) => console.error('[LOTS]', e.message)); // auction-bid monitoring
             if (await handleManualBalance(message, clients)) return;
             if (await handleDone(message, clients)) return;

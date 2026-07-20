@@ -346,6 +346,10 @@ function userStats(userId) {
 // { list, avgVerifySeconds }, list mirroring the input order.
 function enrichCards(clients, records) {
     const now = Date.now();
+    // Bots that can observe channel messages — the "always at bottom" toggle is
+    // only offered on cards owned by one of these.
+    const msgIntentBots = new Set((Array.isArray(clients) ? clients : [])
+        .filter((cl) => cl && cl.__hasMsgIntent && cl.user?.id).map((cl) => cl.user.id));
     const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
     const jArr = (() => { const j = loadJSON('joinlinks.json', []); return Array.isArray(j) ? j : []; })();
     // Unique users per hour/day/week for a matched set of records.
@@ -410,6 +414,7 @@ function enrichCards(clients, records) {
             createdAt: c.createdAt || 0,
             autoResetMs: c.autoResetMs || 0,
             alwaysBottom: !!c.alwaysBottom,
+            alwaysBottomSupported: !!(c.botId && msgIntentBots.has(c.botId)),
             avgVerifySeconds,
             deletedAt: c.deletedAt || 0,
             deletedBy: c.deletedBy || null,
