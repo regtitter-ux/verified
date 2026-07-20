@@ -360,6 +360,12 @@ function enrichCards(clients, records) {
         return { hour: h.size, day: d.size, week: w.size };
     };
     const globalDeltas = []; // ms from first click → successful verification
+    // Index the big arrays by (creatorId|guildId) ONCE instead of re-scanning the
+    // whole verified/joinlinks list for every card (was O(cards × records)).
+    const vByKey = new Map();
+    for (const u of vArr) { const k = (u.creatorId || '') + '|' + (u.guildId || ''); let a = vByKey.get(k); if (!a) vByKey.set(k, a = []); a.push(u); }
+    const jByKey = new Map();
+    for (const r of jArr) { if (r.status !== 'left') continue; const k = (r.creatorId || '') + '|' + (r.cardGuildId || ''); let a = jByKey.get(k); if (!a) jByKey.set(k, a = []); a.push(r); }
     const list = (Array.isArray(records) ? records : []).map((c) => {
         const rid = c.roleId || null;
         // All role ids this card's stats live under (current + any pre-reset
@@ -367,8 +373,9 @@ function enrichCards(clients, records) {
         const roleIds = cards.cardRoleIds(c);
         // Verified-and-still-standing for this card (stage 3), and clawed
         // leavers (verified then left) — together they make "join checked".
-        const vmatch = vArr.filter((u) => u.creatorId === c.creatorId && u.guildId === c.guildId && roleIds.includes(u.roleId || null));
-        const leftMatch = jArr.filter((r) => r.status === 'left' && r.creatorId === c.creatorId && r.cardGuildId === c.guildId && roleIds.includes(r.roleId || null));
+        const _k = (c.creatorId || '') + '|' + (c.guildId || '');
+        const vmatch = (vByKey.get(_k) || []).filter((u) => roleIds.includes(u.roleId || null));
+        const leftMatch = (jByKey.get(_k) || []).filter((r) => roleIds.includes(r.roleId || null));
         const stayed = winOf(vmatch, 'timestamp', 'id');
         const leftW = winOf(leftMatch, 'ts', 'userId');
         const checked = { hour: stayed.hour + leftW.hour, day: stayed.day + leftW.day, week: stayed.week + leftW.week };

@@ -22,14 +22,31 @@ const readFile = (filePath) => {
     return data ? JSON.parse(data) : undefined;
 };
 
+// In-memory parse cache, invalidated by file mtime. The hot files (verified.json,
+// joinlinks.json, cardclicks.json) are read many times per request — once PER
+// CARD in enrichCards — and JSON.parse of a large file blocks the single event
+// loop, stalling every concurrent request. Caching the parsed value and only
+// re-parsing when the on-disk mtime changes turns those repeat reads into a cheap
+// stat. All writes go through saveJSON (same process), which refreshes the cache,
+// so the only thing that changes mtime out-of-band is a manual file edit — still
+// picked up. Callers get a shared reference; the existing mutate-then-saveJSON
+// paths are synchronous (no await between), so this is safe under Node's model.
+const _cache = new Map(); // file -> { mtimeMs, data }
+
 const loadJSON = (file, fallback = {}) => {
     try {
-        // Prefer the persisted copy on the volume; fall back to the bundled seed
-        // (e.g. the ad texts committed in the repo) on first run.
-        const persisted = readFile(persistPath(file));
-        if (persisted !== undefined) return persisted;
-
-        if (persistPath(file) !== seedPath(file)) {
+        const p = persistPath(file);
+        let st = null;
+        try { st = fs.statSync(p); } catch { st = null; }
+        if (st) {
+            const cached = _cache.get(file);
+            if (cached && cached.mtimeMs === st.mtimeMs) return cached.data;
+            const data = readFile(p);
+            if (data !== undefined) { _cache.set(file, { mtimeMs: st.mtimeMs, data }); return data; }
+        } else if (persistPath(file) !== seedPath(file)) {
+            // No persisted copy yet: fall back to the bundled seed (e.g. ad texts
+            // committed in the repo) on first run. Not cached — it's read at most
+            // until the first save creates the persisted file.
             const seed = readFile(seedPath(file));
             if (seed !== undefined) return seed;
         }
@@ -56,6 +73,9 @@ const saveJSON = (file, data) => {
         const fd = fs.openSync(tmp, 'w');
         try { fs.writeSync(fd, json); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
         fs.renameSync(tmp, target);
+        // Keep the read cache in sync with what we just wrote, so the next
+        // loadJSON is a hit rather than a re-read+parse.
+        try { _cache.set(file, { mtimeMs: fs.statSync(target).mtimeMs, data }); } catch { _cache.delete(file); }
     } catch (e) {
         console.error(`[ERROR] Failed to save ${file}:`, e);
         try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
