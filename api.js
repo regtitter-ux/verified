@@ -409,6 +409,7 @@ function enrichCards(clients, records) {
             link: (c.guildId && c.channelId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
             createdAt: c.createdAt || 0,
             autoResetMs: c.autoResetMs || 0,
+            alwaysBottom: !!c.alwaysBottom,
             avgVerifySeconds,
             deletedAt: c.deletedAt || 0,
             deletedBy: c.deletedBy || null,
@@ -3128,6 +3129,17 @@ async function handlePartner(req, res, path, clients, config) {
         const rec = cards.setAutoReset(mid, ms);
         if (!rec) return send(res, 400, { error: 'not-tracked' }, cors);
         return send(res, 200, { ok: true, autoResetMs: rec.autoResetMs || 0 }, cors);
+    }
+    // Toggle "always at bottom" — keep the card the last message in its channel.
+    if (path === '/partner/cards/always-bottom' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const mid = String(body?.messageId || '');
+        if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
+        if (!ownCard(mid)) return send(res, 403, { error: 'not-your-card' }, cors);
+        const rec = cards.setAlwaysBottom(mid, !!body?.on);
+        if (!rec) return send(res, 400, { error: 'not-tracked' }, cors);
+        return send(res, 200, { ok: true, alwaysBottom: !!rec.alwaysBottom }, cors);
     }
 
     if (path === '/partner/requisites' && req.method === 'PUT') {

@@ -619,6 +619,7 @@ const startBot = (token) => {
     if (isAdminBot) {
         client.on(Events.MessageCreate, async (message) => {
             if (message.author.bot) return;
+            cards.handleChannelActivity(clients, message); // "always at bottom" sticky cards
             lotmon.handleMessage(clients, message).catch((e) => console.error('[LOTS]', e.message)); // auction-bid monitoring
             if (await handleManualBalance(message, clients)) return;
             if (await handleDone(message, clients)) return;

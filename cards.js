@@ -633,8 +633,68 @@ function startAutoReset(clients) {
     console.log(`[CARDS] auto-reset tick every ${Math.round(every / 1000)}s`);
 }
 
+// ---- "Always at bottom": when a member posts in the card's channel, delete the
+// card's message and re-send it so the card stays the last message in the chat.
+// Detection runs on the admin bot's MessageCreate (the only bot with the message
+// intent); the repost is done by whichever fleet bot actually owns the card.
+function setAlwaysBottom(messageId, on) {
+    const card = getCard(messageId);
+    if (!card) return null;
+    return addCard({ ...card, alwaysBottom: !!on });
+}
+const stickyTimers = new Map();   // channelId -> pending repost timeout
+const stickyBusy = new Set();     // channelId currently reposting (avoid overlap)
+const STICKY_DELAY = Number(process.env.STICKY_BOTTOM_MS) || 1200; // coalesce bursts
+function stickyCardsInChannel(channelId) {
+    return loadCards().filter((c) => !c.deletedAt && c.alwaysBottom && c.channelId === channelId);
+}
+// Called for every non-bot message the admin bot sees. Cheap when nothing sticky
+// is in that channel. Coalesces message bursts into a single repost.
+function handleChannelActivity(clients, message) {
+    try {
+        const channelId = message && (message.channelId || message.channel?.id);
+        if (!channelId) return;
+        if (message.author && message.author.bot) return;
+        if (!stickyCardsInChannel(channelId).length) return;
+        if (stickyTimers.has(channelId)) clearTimeout(stickyTimers.get(channelId));
+        stickyTimers.set(channelId, setTimeout(() => {
+            stickyTimers.delete(channelId);
+            stickyBump(clients, channelId).catch(() => null);
+        }, STICKY_DELAY));
+    } catch (_) { /* never break message handling */ }
+}
+async function stickyBump(clients, channelId) {
+    if (stickyBusy.has(channelId)) return;
+    stickyBusy.add(channelId);
+    try {
+        for (const card of stickyCardsInChannel(channelId)) {
+            await stickyRepost(clients, card.messageId).catch(() => null);
+        }
+    } finally { stickyBusy.delete(channelId); }
+}
+// Re-send the card as a fresh message and delete the old one, preserving every
+// tracked field (owner, role, description, alwaysBottom, auto-reset, createdAt…).
+async function stickyRepost(clients, messageId) {
+    const card = getCard(messageId);
+    if (!card || !card.alwaysBottom) return { ok: false, error: 'not-tracked' };
+    const loc = await locate(clients, card.channelId, messageId);
+    if (!loc || !loc.client) return { ok: false, error: 'not-found' };
+    const ex = extractCard(loc.msg);
+    const creatorId = card.creatorId || ex.creatorId;
+    const roleId = card.roleId ?? ex.roleId;
+    const description = card.description ?? ((ex.description && ex.description !== DEFAULT_DESCRIPTION) ? ex.description : null);
+    if (!creatorId) return { ok: false, error: 'no-owner' };
+    const sent = await loc.channel.send(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id)).catch(() => null);
+    if (!sent) return { ok: false, error: 'send-failed' };
+    await loc.msg.delete().catch(() => null);
+    removeCard(messageId);
+    const rec = addCard({ ...card, messageId: sent.id, channelId: sent.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, description, botId: loc.client.user.id });
+    return { ok: true, card: rec };
+}
+
 module.exports = {
     setAutoReset, tickAutoReset, startAutoReset,
+    setAlwaysBottom, handleChannelActivity,
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate, DEFAULT_DESCRIPTION,
     PERSONALIZED_BOT_ID, FAQ_TEXT, buildFaqView,
