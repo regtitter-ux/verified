@@ -2374,6 +2374,25 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, { ok: true, managers: managers.saveManagers(next) }, cors);
     }
 
+    // Self-serve developer API key (for the "For developers" page). A logged-in
+    // user can view or (re)generate their own key for the /api/* endpoints.
+    if (path === '/order/api-key' && req.method === 'GET') {
+        const keys = loadJSON('apikeys.json');
+        const found = Object.keys(keys).find((k) => keys[k] && keys[k].userId === buyerId);
+        return send(res, 200, { key: found || null }, cors);
+    }
+    if (path === '/order/api-key' && req.method === 'POST') {
+        const body = await readBody(req);
+        const regen = !!(body && body.regenerate);
+        const keys = loadJSON('apikeys.json');
+        const found = Object.keys(keys).find((k) => keys[k] && keys[k].userId === buyerId);
+        if (found && !regen) return send(res, 200, { key: found, created: false }, cors);
+        if (found) { for (const k of Object.keys(keys)) if (keys[k] && keys[k].userId === buyerId) delete keys[k]; saveJSON('apikeys.json', keys); }
+        const key = createApiKey(buyerId, 'self-serve');
+        audit.logAction(buyerId, regen ? 'apikey.regenerate' : 'apikey.create', '');
+        return send(res, 200, { key, created: true }, cors);
+    }
+
     // Owner-only: list / add / remove users granted access to the DMALL console.
     if (path === '/order/dmall-access' && req.method === 'GET') {
         if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
