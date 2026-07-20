@@ -875,7 +875,10 @@ const startBot = (token) => {
             // buildCard renders the bespoke Components V2 layout for the one
             // personalized bot and the classic embed for everyone else; the verify
             // button customId (and the whole flow) is identical either way.
-            const cardPayload = cards.buildCard(interaction.guild, interaction.user.id, role.id, null, interaction.client.user.id);
+            // Apply the guild's template card (if one is marked) so new cards
+            // inherit its title/description/button/emoji/colour.
+            const tpl = cards.templateForGuild(interaction.guild.id);
+            const cardPayload = cards.buildCard(interaction.guild, interaction.user.id, role.id, tpl ? tpl.description : null, interaction.client.user.id, tpl ? tpl.opts : {});
             const sentCard = await interaction.channel.send(cardPayload).catch(() => null);
             // Track the card so it can be listed / repaired / managed remotely
             // from the admin "Экстренно" tab.
@@ -883,7 +886,8 @@ const startBot = (token) => {
                 try {
                     cards.addCard({
                         messageId: sentCard.id, channelId: sentCard.channelId, guildId: interaction.guild.id,
-                        creatorId: interaction.user.id, roleId: role.id, botId: interaction.client.user.id
+                        creatorId: interaction.user.id, roleId: role.id, botId: interaction.client.user.id,
+                        ...(tpl ? tpl.fields : {})
                     });
                     const gc = interaction.guild.memberCount != null ? ` · ${interaction.guild.memberCount.toLocaleString('en-US')} участников` : '';
                     auditlog.logAction(interaction.user.id, 'card.create', `${interaction.guild.name} (${interaction.guild.id})${gc} · #${interaction.channel?.name || sentCard.channelId} · https://discord.com/channels/${interaction.guild.id}/${sentCard.channelId}/${sentCard.id}`, `card.create|${sentCard.id}`);

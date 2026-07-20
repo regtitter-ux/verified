@@ -161,6 +161,30 @@ function cardOpts(card) {
     return o;
 }
 
+// Mark a card as the guild's template for new /verify cards. Only one template
+// per guild — turning it on clears the flag on every other card in that guild.
+function setTemplate(messageId, on) {
+    const card = getCard(messageId);
+    if (!card) return null;
+    if (on) {
+        for (const c of loadCards()) {
+            if (c.messageId !== messageId && c.guildId === card.guildId && c.isTemplate) addCard({ ...c, isTemplate: false });
+        }
+    }
+    return addCard({ ...card, isTemplate: !!on });
+}
+// The active template for a guild, as { description, opts, fields } — or null.
+// `fields` is the subset to persist on a newly created card so later rebuilds
+// keep the same look.
+function templateForGuild(guildId) {
+    if (!guildId) return null;
+    const tpl = loadCards().find((c) => !c.deletedAt && c.isTemplate && c.guildId === guildId);
+    if (!tpl) return null;
+    const fields = { description: tpl.description ?? null, title: tpl.title ?? null, buttonLabel: tpl.buttonLabel ?? null, color: tpl.color ?? null };
+    if (Object.prototype.hasOwnProperty.call(tpl, 'buttonEmoji') && tpl.buttonEmoji !== undefined) fields.buttonEmoji = tpl.buttonEmoji;
+    return { description: fields.description, opts: cardOpts(tpl), fields };
+}
+
 // The canonical verification-card message payload. `description` overrides the
 // embed body per card (empty → the default text). `botId` selects the bespoke
 // Components V2 layout for the one personalized bot. `opts` overrides the embed
@@ -736,6 +760,7 @@ async function stickyRepost(clients, messageId) {
 module.exports = {
     setAutoReset, tickAutoReset, startAutoReset,
     setAlwaysBottom, tickAlwaysBottom, startAlwaysBottom,
+    setTemplate, templateForGuild,
     loadCards, saveCards, addCard, removeCard, getCard,
     buildCard, parseMsgRef, extractCard, locate, DEFAULT_DESCRIPTION,
     PERSONALIZED_BOT_ID, FAQ_TEXT, buildFaqView,

@@ -411,6 +411,7 @@ function enrichCards(clients, records) {
             buttonLabel: c.buttonLabel || 'Start Verification',
             buttonEmoji: Object.prototype.hasOwnProperty.call(c, 'buttonEmoji') ? (c.buttonEmoji || '') : '🔐',
             color: c.color || '#5865F2',
+            isTemplate: !!c.isTemplate,
             link: (c.guildId && c.channelId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
             createdAt: c.createdAt || 0,
             autoResetMs: c.autoResetMs || 0,
@@ -3121,6 +3122,8 @@ async function handlePartner(req, res, path, clients, config) {
         if (body.buttonEmoji !== undefined) patch.buttonEmoji = String(body.buttonEmoji).slice(0, 100);
         if (body.color !== undefined) patch.color = String(body.color).slice(0, 9);
         const r = await cards.edit(clients, mid, patch).catch((e) => ({ ok: false, error: e.message }));
+        // Template flag (one per guild) is set after the edit so the record exists.
+        if (r.ok && body.isTemplate !== undefined) { const rec = cards.setTemplate(mid, !!body.isTemplate); if (rec) r.card = rec; }
         return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card } : { error: r.error || 'failed' }, cors);
     }
     // List the custom emojis of the card's server (for the button-emoji picker).
