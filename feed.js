@@ -42,6 +42,25 @@ function saveFeed(list) {
     return loadFeed();
 }
 
+// The raw stored list (no ICON_OVERRIDES applied) — for mutations that then save.
+function loadRaw() {
+    const raw = loadJSON('feedservers.json', null);
+    return Array.isArray(raw) ? raw : DEFAULT_FEED.map((s) => ({ ...s }));
+}
+
+// Owner: set (or clear, when img is falsy) a feed server's custom avatar. Keyed
+// by code or guild id. The img URL overrides the Discord icon everywhere the feed
+// is used (marquee + hero globe). Returns the updated feed, or null if not found.
+function setAvatar(key, img) {
+    const list = loadRaw();
+    const k = String(key);
+    const item = list.find((s) => String(s.code) === k || String(s.id) === k);
+    if (!item) return null;
+    if (img) item.img = String(img);
+    else delete item.img; // cleared → falls back to the Discord icon / letter tile
+    return saveFeed(list);
+}
+
 const PALETTE = ['#5865f2', '#e63b7a', '#a855f7', '#39c5bb', '#f59e0b', '#22d3ee', '#f472b6', '#8b5cf6', '#d1004b', '#10b981'];
 function colorFor(seed) {
     const h = crypto.createHash('sha1').update(String(seed || '')).digest();
@@ -65,4 +84,4 @@ function itemFromInvite(inv, code) {
     };
 }
 
-module.exports = { loadFeed, saveFeed, itemFromInvite, DEFAULT_FEED };
+module.exports = { loadFeed, saveFeed, setAvatar, itemFromInvite, DEFAULT_FEED };

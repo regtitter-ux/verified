@@ -2056,6 +2056,21 @@ async function handleAdmin(req, res, path, clients, config) {
         auditDo('feed.remove', code || id);
         return send(res, 200, { ok: true, servers: feed.saveFeed(list) }, cors);
     }
+    // Owner-only: set/clear a feed server's custom avatar (applies to the marquee
+    // AND the hero globe everywhere the feed is used). Body: { code|id, img }.
+    if (path === '/admin/feed/avatar' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const key = String(body?.code || body?.id || '');
+        if (!key) return send(res, 400, { error: 'bad request' }, cors);
+        const img = body?.img == null ? '' : String(body.img).trim();
+        if (img && !/^https?:\/\/.{3,}/i.test(img)) return send(res, 400, { error: 'bad-url' }, cors);
+        const servers = feed.setAvatar(key, img);
+        if (!servers) return send(res, 404, { error: 'not-found' }, cors);
+        auditDo('feed.avatar', `${key} → ${img || '(cleared)'}`);
+        return send(res, 200, { ok: true, servers }, cors);
+    }
 
     // Owner-only: verification-card registry + remote management.
     if (path === '/admin/cards' && req.method === 'GET') {
@@ -2739,7 +2754,7 @@ async function handlePartner(req, res, path, clients, config) {
     if (path === '/partner/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         if (!sess) return send(res, 200, { authed: false }, cors);
-        return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) }, cors);
+        return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), isOwner: sess.userId === adminAuth.OWNER_ID }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
