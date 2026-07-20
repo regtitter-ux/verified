@@ -406,6 +406,11 @@ function enrichCards(clients, records) {
             roleName: roleNameOf(clients, c.guildId, rid),
             description: c.description || cards.DEFAULT_DESCRIPTION,
             customDescription: Boolean(c.description),
+            title: c.title || 'Get verified!',
+            customTitle: Boolean(c.title),
+            buttonLabel: c.buttonLabel || 'Start Verification',
+            buttonEmoji: Object.prototype.hasOwnProperty.call(c, 'buttonEmoji') ? (c.buttonEmoji || '') : '🔐',
+            color: c.color || '#5865F2',
             link: (c.guildId && c.channelId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
             createdAt: c.createdAt || 0,
             autoResetMs: c.autoResetMs || 0,
@@ -3111,8 +3116,33 @@ async function handlePartner(req, res, path, clients, config) {
             patch.roleId = rid || null;
         }
         if (body.description !== undefined) patch.description = String(body.description).slice(0, 4000);
+        if (body.title !== undefined) patch.title = String(body.title).slice(0, 256);
+        if (body.buttonLabel !== undefined) patch.buttonLabel = String(body.buttonLabel).slice(0, 80);
+        if (body.buttonEmoji !== undefined) patch.buttonEmoji = String(body.buttonEmoji).slice(0, 100);
+        if (body.color !== undefined) patch.color = String(body.color).slice(0, 9);
         const r = await cards.edit(clients, mid, patch).catch((e) => ({ ok: false, error: e.message }));
         return send(res, r.ok ? 200 : 400, r.ok ? { ok: true, card: r.card } : { error: r.error || 'failed' }, cors);
+    }
+    // List the custom emojis of the card's server (for the button-emoji picker).
+    if (path === '/partner/cards/emojis' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const mid = String(body?.messageId || '');
+        if (!/^\d{17,20}$/.test(mid)) return send(res, 400, { error: 'bad message id' }, cors);
+        const card = ownCard(mid);
+        if (!card) return send(res, 403, { error: 'not-your-card' }, cors);
+        const arr = Array.isArray(clients) ? clients : [];
+        const client = arr.find((cl) => cl.guilds?.cache?.has(card.guildId));
+        const guild = client?.guilds?.cache?.get(card.guildId);
+        if (!guild) return send(res, 200, { emojis: [] }, cors);
+        let coll = guild.emojis?.cache;
+        if (!coll || !coll.size) coll = await guild.emojis.fetch().catch(() => null);
+        const emojis = coll ? [...coll.values()].map((e) => ({
+            id: e.id, name: e.name, animated: !!e.animated,
+            markup: e.animated ? `<a:${e.name}:${e.id}>` : `<:${e.name}:${e.id}>`,
+            url: `https://cdn.discordapp.com/emojis/${e.id}.${e.animated ? 'gif' : 'png'}?size=64`
+        })) : [];
+        return send(res, 200, { emojis }, cors);
     }
     // Auto-reset the card's role on a cooldown (days + hours). Empty/0 disables it;
     // the countdown restarts from now whenever this is saved.

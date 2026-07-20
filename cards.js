@@ -135,23 +135,56 @@ function buildPersonalCard(guild, creatorId, roleId) {
     return { components: [container], flags: MessageFlags.IsComponentsV2 };
 }
 
+const DEFAULT_TITLE = 'Get verified!';
+const DEFAULT_BUTTON_LABEL = 'Start Verification';
+const DEFAULT_BUTTON_EMOJI = '🔐';
+const DEFAULT_COLOR = 0x5865F2;
+
+// Parse a #rrggbb / #rgb / rrggbb colour to an int, or null if invalid.
+function parseColor(v) {
+    if (v == null) return null;
+    let s = String(v).trim().replace(/^#/, '');
+    if (/^[0-9a-fA-F]{3}$/.test(s)) s = s.split('').map((ch) => ch + ch).join('');
+    if (!/^[0-9a-fA-F]{6}$/.test(s)) return null;
+    return parseInt(s, 16);
+}
+
+// The editable presentation fields carried on a card record, as buildCard opts.
+// buttonEmoji is only included when explicitly set ('' means "no emoji"); absent
+// means the default lock emoji.
+function cardOpts(card) {
+    const o = {};
+    if (card && card.title != null) o.title = card.title;
+    if (card && card.buttonLabel != null) o.buttonLabel = card.buttonLabel;
+    if (card && card.color != null) o.color = card.color;
+    if (card && Object.prototype.hasOwnProperty.call(card, 'buttonEmoji') && card.buttonEmoji !== undefined) o.buttonEmoji = card.buttonEmoji;
+    return o;
+}
+
 // The canonical verification-card message payload. `description` overrides the
 // embed body per card (empty → the default text). `botId` selects the bespoke
-// Components V2 layout for the one personalized bot.
-function buildCard(guild, creatorId, roleId, description, botId) {
+// Components V2 layout for the one personalized bot. `opts` overrides the embed
+// title, accent colour, button label and button emoji (opts.buttonEmoji === ''
+// removes the emoji; omitted → default lock).
+function buildCard(guild, creatorId, roleId, description, botId, opts = {}) {
     if (String(botId || '') === PERSONALIZED_BOT_ID) return buildPersonalCard(guild, creatorId, roleId);
     // Static png: a broken animated (a_) icon renders as a broken avatar in the embed.
     const icon = guild?.iconURL?.({ extension: 'png', forceStatic: true }) || null;
+    const title = (opts.title && String(opts.title).trim()) ? String(opts.title) : DEFAULT_TITLE;
+    const color = parseColor(opts.color);
     const embed = new EmbedBuilder()
         .setAuthor({ name: guild?.name || 'Server', iconURL: icon })
-        .setTitle('Get verified!')
+        .setTitle(title)
         .setDescription((description && String(description).trim()) ? String(description) : DEFAULT_DESCRIPTION)
         .setThumbnail(icon)
-        .setColor('#5865F2')
+        .setColor(color == null ? DEFAULT_COLOR : color)
         .setFooter({ text: `Created by: ${creatorId}` });
+    const label = (opts.buttonLabel && String(opts.buttonLabel).trim()) ? String(opts.buttonLabel) : DEFAULT_BUTTON_LABEL;
     const btn = new ButtonBuilder()
         .setCustomId(roleId ? `start_verif_guild:${roleId}` : 'start_verif_guild')
-        .setLabel('Start Verification').setEmoji('🔐').setStyle(ButtonStyle.Primary);
+        .setLabel(label).setStyle(ButtonStyle.Primary);
+    const emoji = Object.prototype.hasOwnProperty.call(opts, 'buttonEmoji') ? opts.buttonEmoji : DEFAULT_BUTTON_EMOJI;
+    if (emoji) { try { btn.setEmoji(emoji); } catch (_) { /* invalid emoji → render without one */ } }
     return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btn)] };
 }
 
@@ -238,7 +271,7 @@ async function fix(clients, messageId) {
     const roleId = card.roleId ?? ex.roleId;
     const description = card.description ?? ((ex.description && ex.description !== DEFAULT_DESCRIPTION) ? ex.description : null);
     if (!creatorId) return { ok: false, error: 'no-owner' };
-    await loc.msg.edit(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id));
+    await loc.msg.edit(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id, cardOpts(card)));
     addCard({ ...card, creatorId, roleId, description });
     return { ok: true };
 }
@@ -257,9 +290,24 @@ async function edit(clients, messageId, patch = {}) {
         const d = String(patch.description).trim();
         description = d ? patch.description : null; // empty → default text
     }
+    // Presentation fields — null on the record means "use the default".
+    let title = card.title ?? null;
+    if (patch.title !== undefined) { const s = String(patch.title).trim(); title = s ? patch.title : null; }
+    let buttonLabel = card.buttonLabel ?? null;
+    if (patch.buttonLabel !== undefined) { const s = String(patch.buttonLabel).trim(); buttonLabel = s ? patch.buttonLabel : null; }
+    let color = card.color ?? null;
+    if (patch.color !== undefined) { color = parseColor(patch.color) != null ? String(patch.color).trim() : null; }
+    // buttonEmoji: '' = no emoji, non-empty = custom, absent key = default lock.
+    let hasEmoji = Object.prototype.hasOwnProperty.call(card, 'buttonEmoji') && card.buttonEmoji !== undefined;
+    let buttonEmoji = hasEmoji ? card.buttonEmoji : undefined;
+    if (patch.buttonEmoji !== undefined) { hasEmoji = true; const e = String(patch.buttonEmoji).trim(); buttonEmoji = e ? e.slice(0, 100) : ''; }
     if (!creatorId) return { ok: false, error: 'no-owner' };
-    await loc.msg.edit(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id));
-    const rec = addCard({ ...card, creatorId, roleId, description });
+    const opts = { title, buttonLabel, color };
+    if (hasEmoji) opts.buttonEmoji = buttonEmoji;
+    await loc.msg.edit(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id, opts));
+    const recPatch = { ...card, creatorId, roleId, description, title, buttonLabel, color };
+    if (hasEmoji) recPatch.buttonEmoji = buttonEmoji;
+    const rec = addCard(recPatch);
     return { ok: true, card: rec };
 }
 
@@ -285,11 +333,11 @@ async function republish(clients, messageId) {
     const roleId = card.roleId ?? ex.roleId;
     const description = card.description ?? ((ex.description && ex.description !== DEFAULT_DESCRIPTION) ? ex.description : null);
     if (!creatorId) return { ok: false, error: 'no-owner' };
-    const sent = await loc.channel.send(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id)).catch(() => null);
+    const sent = await loc.channel.send(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id, cardOpts(card))).catch(() => null);
     if (!sent) return { ok: false, error: 'send-failed' };
     await loc.msg.delete().catch(() => null);
     removeCard(messageId);
-    const rec = addCard({ messageId: sent.id, channelId: sent.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, description, botId: loc.client.user.id, createdAt: card.createdAt });
+    const rec = addCard({ ...card, messageId: sent.id, channelId: sent.channelId, guildId: loc.channel.guild?.id || null, creatorId, roleId, description, botId: loc.client.user.id });
     return { ok: true, card: rec };
 }
 
@@ -365,7 +413,7 @@ async function resetRole(clients, messageId) {
     const history = [...(Array.isArray(card.roleHistory) ? card.roleHistory : []), (card.roleId || null)]
         .filter((v, i, a) => a.indexOf(v) === i);
     const rec = addCard({ ...card, roleId: newRole.id, roleHistory: history });
-    await loc.msg.edit(buildCard(guild, card.creatorId, newRole.id, card.description ?? null, card.botId)).catch(() => null);
+    await loc.msg.edit(buildCard(guild, card.creatorId, newRole.id, card.description ?? null, card.botId, cardOpts(card))).catch(() => null);
 
     return { ok: true, card: rec, oldRoleId: oldRole.id, newRoleId: newRole.id, roleName: newRole.name };
 }
@@ -415,13 +463,12 @@ async function restore(clients, messageId) {
     const guild = client.guilds.cache.get(card.guildId);
     const channel = await client.channels.fetch(card.channelId).catch(() => null);
     if (!channel || typeof channel.send !== 'function') return { ok: false, error: 'no-channel' };
-    const sent = await channel.send(buildCard(guild, card.creatorId, card.roleId, card.description || null, info.botId)).catch(() => null);
+    const sent = await channel.send(buildCard(guild, card.creatorId, card.roleId, card.description || null, info.botId, cardOpts(card))).catch(() => null);
     if (!sent) return { ok: false, error: 'send-failed' };
     removeCard(messageId); // fresh record (no deletedAt) under the new message id
     const rec = addCard({
-        messageId: sent.id, channelId: sent.channelId, guildId: card.guildId,
-        creatorId: card.creatorId, roleId: card.roleId, description: card.description || null,
-        botId: client.user.id, createdAt: card.createdAt || Date.now()
+        ...card, messageId: sent.id, channelId: sent.channelId, guildId: card.guildId,
+        botId: client.user.id, createdAt: card.createdAt || Date.now(), deletedAt: 0, deletedBy: null
     });
     return { ok: true, card: rec };
 }
@@ -678,7 +725,7 @@ async function stickyRepost(clients, messageId) {
     const roleId = card.roleId ?? ex.roleId;
     const description = card.description ?? ((ex.description && ex.description !== DEFAULT_DESCRIPTION) ? ex.description : null);
     if (!creatorId) return { ok: false, error: 'no-owner' };
-    const sent = await loc.channel.send(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id)).catch(() => null);
+    const sent = await loc.channel.send(buildCard(loc.channel.guild, creatorId, roleId, description, loc.client.user.id, cardOpts(card))).catch(() => null);
     if (!sent) return { ok: false, error: 'send-failed' };
     await loc.msg.delete().catch(() => null);
     removeCard(messageId);
