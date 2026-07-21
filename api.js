@@ -567,7 +567,7 @@ const DOCS = {
     errors: 'Errors are JSON: { error: "<human message>", code: "<machine code>" }. 401 invalid_key → bad/missing API key. 400 → a required field is missing (code names it). 429 → rate limited (see Retry-After). 503 uncertain → membership check temporarily unavailable, retry. Business outcomes (not joined / already counted / no ad) are 200, not 4xx.',
     rateLimit: 'Requests are rate limited per IP. On a 429 back off and honour the Retry-After header. In practice: poll /api/ad at most once per user action, and only call /api/join-check when the user presses your check button.',
     endpoints: {
-        'GET /api/ad': 'The ad to show. ALL THREE query params are required: ?serverId=<your guild>&botId=<your bot app id>&userId=<the Discord user>. serverId is the guild your bot runs in (where the user is), not the sponsor — we pick a sponsor for it. Returns { adText, fallbackText, sponsor:{guildId,name,invite}|null }. adText is a short plain-text line that ALREADY contains the invite link; sponsor.invite is that link on its own if you prefer to build your own message. A sponsor the user is already in is skipped. sponsor null → no ad right now; do NOT promise a reward. 400 if any of serverId/botId/userId is missing.',
+        'GET /api/ad': 'The sponsor to show. ALL THREE query params are required: ?serverId=<your guild>&botId=<your bot app id>&userId=<the Discord user>. Returns { sponsor:{guildId,name,invite}|null, fallbackText }. Build your own message from sponsor.name + sponsor.invite. A sponsor the user is already in is skipped. sponsor null → no ad right now; do NOT promise a reward. 400 if any of serverId/botId/userId is missing.',
         'POST /api/join-check': 'Body: { userId, botId, sponsorId? }. userId + botId required; sponsorId is the guildId /api/ad returned — pass it to pin the check to that exact sponsor (deterministic when your bot ran several ad commands at once); omit it and we use the most recent ad shown to this user. serverId is not needed. We verify the shown sponsor, so a different server they already belong to never counts. Reward ONLY on status:"credited". Every response has a "status" field: "credited" → 200 { joined:true, credited:true } join verified and you were paid → GIVE the reward; "not_joined" → 200 { joined:false } not in the sponsor yet → ask them to join, no reward; "already_counted" → 200 { joined:true, credited:false, alreadyCounted:true } already credited for this sponsor → no reward; "no_ad" → 200 { joined:true, credited:false, ad:false } nothing was shown → no reward; "uncertain" → 503, retry. Each membership is paid once; leaving reverses it, a real rejoin counts again. userId is verified against real Discord membership, so passing IDs that did not actually join earns nothing.'
     }
 };
@@ -3779,11 +3779,10 @@ function startApiServer(clients, config) {
                 const ad = await adForServer(clients, config.ownerId, serverId, endUserId, botId);
                 try { recordApiClick({ creatorId: userId, botId, serverId, memberId: endUserId, sponsorGuildId: ad.sponsor ? ad.sponsor.guildId : null }); } catch { /* never block */ }
                 console.log('[API ad]', JSON.stringify({ dev: userId, botId, serverId, user: endUserId, sponsor: ad.sponsor ? ad.sponsor.guildId : null, campaignId: ad.campaignId || null, src: ad.campaignId ? 'campaign' : (ad.sponsor ? 'house' : 'none') }));
-                // Same "заглушка" the in-Discord bots show when there is no ad,
-                // so an API bot can render an identical no-ad message.
+                // Build your own message from sponsor.name + sponsor.invite.
+                // fallbackText is the owner's "заглушка" to show when there's no ad.
                 const cfg = loadJSON('siteconfig.json', {});
                 return send(res, 200, {
-                    adText: ad.adText,
                     fallbackText: (cfg.fallbackText && String(cfg.fallbackText).trim()) || null,
                     sponsor: ad.sponsor ? { guildId: ad.sponsor.guildId, name: guildNameOf(clients, ad.sponsor.guildId), invite: ad.invite } : null
                 });
