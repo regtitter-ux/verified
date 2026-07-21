@@ -50,10 +50,10 @@ function campaignAdKeys(campaign) {
 // be told apart between them from the data. To avoid double-counting (each
 // seeing all the joins → "308 / 200"), the shared joins are ALLOCATED — every
 // join goes to exactly one campaign, so the totals across the cohort add up to
-// the real number of joins. Each join is given to the eligible campaign that is
-// most "behind" proportionally (delivered ÷ purchased), which spreads joins
-// across concurrent orders in proportion to their size — the same way the ad is
-// shown (weighted by remaining). Deterministic; ties break by earliest paidAt.
+// the real number of joins. Allocation is strict FIFO: each join fills the
+// EARLIEST-PAID campaign that still has room, and only once it's full does the
+// next one start receiving joins — the same order the ad is served in
+// (weightedOrder by paidAt). So orders complete one after another, not evenly.
 function delivered(campaign, verifiedList, allCampaigns) {
     if (!campaign || !campaign.paidAt) return 0;
     const list = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
@@ -98,16 +98,15 @@ function delivered(campaign, verifiedList, allCampaigns) {
 
     const counts = new Map(cohort.map((c) => [c.id, 0]));
     for (const j of joins) {
-        let best = null;
+        // cohort is sorted by paidAt, so the FIRST eligible campaign with room is
+        // the earliest-paid one — it fills completely before the next gets any.
         for (const c of cohort) {
             if ((c.paidAt || 0) >= j.t) continue;             // not yet paid when this join happened
             if (!keySets.get(c.id).has(j.k)) continue;        // this campaign didn't use that invite
-            const cnt = counts.get(c.id), cap = Number(c.purchased) || 0;
-            if (cnt >= cap) continue;                          // already full
-            const ratio = cap > 0 ? cnt / cap : 1;
-            if (!best || ratio < best.ratio) best = { c, ratio };
+            if (counts.get(c.id) >= (Number(c.purchased) || 0)) continue; // already full → next in queue
+            counts.set(c.id, counts.get(c.id) + 1);
+            break;                                             // one join → one (earliest) campaign
         }
-        if (best) counts.set(best.c.id, counts.get(best.c.id) + 1);
     }
     return counts.get(campaign.id) || 0;
 }
