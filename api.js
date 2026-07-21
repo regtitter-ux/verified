@@ -3709,8 +3709,9 @@ function startApiServer(clients, config) {
                     (r) => r && (r.status === 'joined' || r.status === 'settled') && r.guildId === sponsor.guildId && r.userId === memberId
                 );
                 if (already) {
+                    console.log('[API join-check] outcome', JSON.stringify({ botId, user: memberId, sponsor: sponsor.guildId, outcome: 'already_counted' }));
                     try { partnerlog.logEvent(userId, { type: 'grant', reason: 'dup_join', userId: memberId, guildId: effServerId, roleId: 'api', srcId: `dup:${memberId}:${sponsor.guildId}` }); } catch { /* never block */ }
-                    return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
+                    return send(res, 200, { joined: true, credited: false, alreadyCounted: true, reason: 'already_counted', sponsor: sponsor.guildId, note: 'already counted' });
                 }
 
                 // Full parity with the in-Discord flow: joinlinks (clawback-
@@ -3727,8 +3728,9 @@ function startApiServer(clients, config) {
                 // Race backstop: creditJoin's atomic guard caught a concurrent
                 // credit for the same (user, sponsor) — treat as already counted.
                 if (credit.duplicate) {
+                    console.log('[API join-check] outcome', JSON.stringify({ botId, user: memberId, sponsor: sponsor.guildId, outcome: 'already_counted(race)' }));
                     try { partnerlog.logEvent(userId, { type: 'grant', reason: 'dup_join', userId: memberId, guildId: effServerId, roleId: 'api' }); } catch { /* never block */ }
-                    return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
+                    return send(res, 200, { joined: true, credited: false, alreadyCounted: true, reason: 'already_counted', sponsor: sponsor.guildId, note: 'already counted' });
                 }
                 const amount = credit.amount;
                 try { partnerlog.logEvent(userId, { type: 'grant', reason: 'paid', amount, userId: memberId, guildId: effServerId, roleId: 'api', srcId: credit.linkId }); } catch { /* never block */ }
@@ -3747,6 +3749,7 @@ function startApiServer(clients, config) {
                 }).catch(() => null);
                 maybeNotifyAdComplete(clients, adKey, fresh).catch(() => null);
                 await maybeAutoWithdraw(clients, userId).catch(() => null);
+                console.log('[API join-check] outcome', JSON.stringify({ botId, user: memberId, sponsor: sponsor.guildId, outcome: 'credited', amount: money(amount) }));
                 return send(res, 200, { joined: true, credited: true, sponsor: sponsor.guildId, amount: money(amount) });
             }
 
