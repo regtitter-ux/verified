@@ -272,24 +272,28 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId, botId) {
     if (botId) {
         const clicks = loadJSON('apiclicks.json', []);
         const now = Date.now();
+        // Keyed by (bot, user) ONLY — independent of whatever serverId the bot
+        // passes to join-check (some bots mistakenly send the sponsor's guild).
+        // We trust what /api/ad actually showed, recorded with the real guild.
         let shown = null;
         for (const e of (Array.isArray(clicks) ? clicks : [])) {
-            if (e.b === String(botId) && e.g === String(serverId) && e.u === String(memberId) && e.s && e.t > now - 3600000 && (!shown || e.t > shown.t)) shown = e;
+            if (e.b === String(botId) && e.u === String(memberId) && e.s && e.t > now - 3600000 && (!shown || e.t > shown.t)) shown = e;
         }
-        if (shown) {
-            if (String(shown.s) === String(serverId) || !approvedSponsor(String(shown.s))) return { none: true };
-            const elig = cands.find((c) => String(c.sponsorGuildId) === String(shown.s));
-            if (elig && capReached(elig.raw)) return { none: true };
-            const sp = await presenceByGuild(shown.s);
-            if (!sp) return { none: true };
-            const m = await isMember(sp.bot, sp.guildId, memberId).catch(() => null);
-            if (m === null) return { uncertain: true };
-            if (m !== true) return { notMember: true };
-            const raw = elig ? elig.raw : (houseRaw || '');
-            stampSponsorShow(sp.guildId);
-            return { ad: { adText: applyTemplate(serverId, raw), raw, sponsor: sp, campaignId: elig ? elig.campaignId : null } };
-        }
-        return { none: true }; // /api/ad recorded no sponsor for this user → nothing to reward
+        if (!shown) return { none: true };                     // nothing shown → nothing to reward
+        const effSid = String(shown.g || serverId || '');      // the guild the ad ran in
+        const gid = String(shown.s);                           // the sponsor we showed
+        if (!/^\d{17,20}$/.test(gid) || gid === effSid || !approvedSponsor(gid)) return { none: true };
+        const sp = await presenceByGuild(gid);
+        if (!sp) return { none: true };
+        const m = await isMember(sp.bot, sp.guildId, memberId).catch(() => null);
+        if (m === null) return { uncertain: true };            // transient → 503
+        if (m !== true) return { notMember: true };            // not in the shown sponsor → 403
+        const elig = campaigns.eligibleForGuild(effSid, verified, await coveredGuildIds(clients)).find((c) => String(c.sponsorGuildId) === gid);
+        if (elig && capReached(elig.invite)) return { none: true };
+        const raw = elig ? elig.invite
+            : ((s.serverAds && s.serverAds[effSid] && String(s.serverAds[effSid]).trim()) ? s.serverAds[effSid] : (s.advText || ''));
+        stampSponsorShow(gid);
+        return { ad: { adText: applyTemplate(effSid, raw), raw, sponsor: sp, campaignId: elig ? elig.id : null }, serverId: effSid };
     }
 
     // Legacy fallback (botId absent): scan eligible sponsors.
@@ -516,7 +520,7 @@ const DOCS = {
     note: 'Two operational endpoints only. Reward your user ONLY when join-check returns credited:true — that is the single signal that a real sponsor join happened and you were paid. joined:true with credited:false/ad:false means "let them through, but there is nothing to reward". Balance, stats, payout details and withdrawals are viewed in your cabinet on the site, not over the API.',
     endpoints: {
         'GET /api/ad': 'The ad to show. ALL THREE query params are required: ?serverId=<your guild>&botId=<your bot app id>&userId=<the Discord user>. Returns { adText, fallbackText, sponsor:{guildId,name,invite}|null }. It is the owner\'s per-server ad if set for your server, else a paid buyer campaign, else the global ad. A sponsor the user is already in is skipped. sponsor null → no ad right now; do NOT promise a reward. 400 if any of serverId/botId/userId is missing.',
-        'POST /api/join-check': 'Body: { userId, serverId, botId } — ALL required. We check the user\'s membership against every advertisable sponsor for your server via Discord. Reward the user ONLY on credited:true. Responses: 200 { joined:true, credited:true } → real sponsor join verified and you were paid → GIVE the reward; 403 { joined:false } → not a member of any sponsor → ask them to join first, no reward; 200 { joined:true, credited:false, ad:false } → no ad was running → let them through but DO NOT reward. 503 → retry. 400 if any id missing. Each member is paid once per sponsor; leaving reverses it.'
+        'POST /api/join-check': 'Body: { userId, botId } — required (serverId is optional and ignored). We verify the EXACT sponsor that /api/ad last showed this user (call /api/ad first), so a different server they already belong to never counts. Reward the user ONLY on credited:true. Responses: 200 { joined:true, credited:true } → real join of the shown sponsor verified and you were paid → GIVE the reward; 403 { joined:false } → not a member of the shown sponsor → ask them to join, no reward; 200 { joined:true, credited:false, ad:false } → nothing was shown (no ad) → let them through but DO NOT reward. 503 → retry. 400 if userId/botId missing. Each member is paid once per sponsor; leaving reverses it.'
     }
 };
 
@@ -3680,20 +3684,20 @@ function startApiServer(clients, config) {
                 if (!/^\d{17,20}$/.test(botId)) return send(res, 400, { error: 'botId is required — your bot application (client) ID' });
                 const serverId = /^\d{17,20}$/.test(String(body.serverId || '')) ? String(body.serverId)
                     : (/^\d{17,20}$/.test(String(body.cardGuildId || '')) ? String(body.cardGuildId) : null);
-                if (!serverId) return send(res, 400, { error: 'serverId is required — the guild your bot is operating in' });
 
-                // Find which advertised sponsor the user actually joined (scans the
-                // same candidate pool /api/ad shows from — NOT a fresh random pick,
-                // which could check the wrong sponsor and 403 a valid join).
+                // The reward is for the sponsor we actually SHOWED this user (recorded
+                // on /api/ad, keyed by bot+user) — the serverId in the body isn't
+                // trusted for that; effServerId is the guild the ad really ran in.
                 const match = await matchJoinedSponsor(clients, config.ownerId, serverId, memberId, botId);
-                console.log('[API join-check]', JSON.stringify({ dev: userId, botId, serverId, user: memberId, result: match.none ? 'none(no-ad)' : match.notMember ? 'notMember(403)' : match.uncertain ? 'uncertain(503)' : ('sponsor:' + (match.ad && match.ad.sponsor && match.ad.sponsor.guildId)) }));
+                const effServerId = match.serverId || serverId || 'api';
+                console.log('[API join-check]', JSON.stringify({ dev: userId, botId, serverId: effServerId, user: memberId, result: match.none ? 'none(no-ad)' : match.notMember ? 'notMember(403)' : match.uncertain ? 'uncertain(503)' : ('sponsor:' + (match.ad && match.ad.sponsor && match.ad.sponsor.guildId)) }));
                 if (match.uncertain) return send(res, 503, { joined: null, error: 'membership check temporarily unavailable, retry' });
 
-                // No join-check sponsor for this server → verify without an ad,
-                // exactly like a network bot: no-ad stat, hub role, no payout.
+                // Nothing was shown / no verifiable sponsor → verify without an ad:
+                // no-ad stat, hub role, no payout.
                 if (match.none) {
-                    recordApiVerified({ creatorId: userId, memberId, serverId, noAd: true, botId });
-                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'no_ad', userId: memberId, guildId: serverId, roleId: 'api', srcId: `v:${memberId}:${serverId}:api` }); } catch { /* never block */ }
+                    recordApiVerified({ creatorId: userId, memberId, serverId: effServerId, noAd: true, botId });
+                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'no_ad', userId: memberId, guildId: effServerId, roleId: 'api', srcId: `v:${memberId}:${effServerId}:api` }); } catch { /* never block */ }
                     syncHubMember(clients, userId).catch(() => null); // partner (card owner)
                     return send(res, 200, { joined: true, credited: false, ad: false });
                 }
@@ -3709,7 +3713,7 @@ function startApiServer(clients, config) {
                     (r) => r && (r.status === 'joined' || r.status === 'settled') && r.guildId === sponsor.guildId && r.userId === memberId
                 );
                 if (already) {
-                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'dup_join', userId: memberId, guildId: serverId, roleId: 'api', srcId: `dup:${memberId}:${sponsor.guildId}` }); } catch { /* never block */ }
+                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'dup_join', userId: memberId, guildId: effServerId, roleId: 'api', srcId: `dup:${memberId}:${sponsor.guildId}` }); } catch { /* never block */ }
                     return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
                 }
 
@@ -3722,26 +3726,26 @@ function startApiServer(clients, config) {
                 // for manager campaigns, no commission paid.
                 const camp = ad.campaignId ? campaigns.loadCampaigns()[ad.campaignId] : null;
                 const econ = managers.joinEconomics(camp, shares.REVENUE_PER_JOIN);
-                const credit = creditJoin(userId, sponsor.guildId, memberId, serverId, 'api', null,
+                const credit = creditJoin(userId, sponsor.guildId, memberId, effServerId, 'api', null,
                     { revenue: econ.revenue, managerId: econ.managerId, botId });
                 // Race backstop: creditJoin's atomic guard caught a concurrent
                 // credit for the same (user, sponsor) — treat as already counted.
                 if (credit.duplicate) {
-                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'dup_join', userId: memberId, guildId: serverId, roleId: 'api' }); } catch { /* never block */ }
+                    try { partnerlog.logEvent(userId, { type: 'grant', reason: 'dup_join', userId: memberId, guildId: effServerId, roleId: 'api' }); } catch { /* never block */ }
                     return send(res, 200, { joined: true, credited: false, sponsor: sponsor.guildId, note: 'already counted' });
                 }
                 const amount = credit.amount;
-                try { partnerlog.logEvent(userId, { type: 'grant', reason: 'paid', amount, userId: memberId, guildId: serverId, roleId: 'api', srcId: credit.linkId }); } catch { /* never block */ }
+                try { partnerlog.logEvent(userId, { type: 'grant', reason: 'paid', amount, userId: memberId, guildId: effServerId, roleId: 'api', srcId: credit.linkId }); } catch { /* never block */ }
                 // Parity with the in-Discord flow: if this server has outstanding
                 // investor invites, this paid join fills one — its share split
                 // already happened at the investor buy-in, so skip payShares.
                 let investorOwnedJoin = false;
-                try { investorOwnedJoin = investors.serverOutstanding(serverId, loadJSON('verified.json', [])) > 0; } catch { /* never block verification */ }
+                try { investorOwnedJoin = investors.serverOutstanding(effServerId, loadJSON('verified.json', [])) > 0; } catch { /* never block verification */ }
                 if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
-                const fresh = recordApiVerified({ creatorId: userId, memberId, serverId, adKey, botId });
+                const fresh = recordApiVerified({ creatorId: userId, memberId, serverId: effServerId, adKey, botId });
                 syncHubMember(clients, userId).catch(() => null); // partner (card owner)
                 await logFunds(clients, {
-                    type: 'credit', creatorId: userId, userId: memberId, guildId: serverId,
+                    type: 'credit', creatorId: userId, userId: memberId, guildId: effServerId,
                     amount, sponsorGuildId: sponsor.guildId,
                     reason: 'Join verified (API) — member joined the sponsor server'
                 }).catch(() => null);
