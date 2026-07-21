@@ -233,7 +233,7 @@ async function adForServer(clients, ownerId, serverId, memberId) {
 // the user is actually a member of — deterministic and correctly attributed.
 // Returns one of: { ad } | { uncertain:true } (→503) | { none:true } (→ad-free)
 // | { notMember:true } (→403). The credit dedup still guards double-pay.
-async function matchJoinedSponsor(clients, ownerId, serverId, memberId) {
+async function matchJoinedSponsor(clients, ownerId, serverId, memberId, botId) {
     const cfg = loadJSON('siteconfig.json', {});
     if (cfg.adsOff || (cfg.serverAdsOff && cfg.serverAdsOff[serverId])) return { none: true };
     const verified = loadJSON('verified.json', []);
@@ -254,20 +254,45 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId) {
         : ((s.advText || '').trim() ? s.advText : null);
     if (houseRaw) cands.push({ raw: houseRaw, campaignId: null, sponsorGuildId: null });
 
-    // A campaign stores its sponsor guild id, so resolve presence by THAT (find a
-    // fleet bot on the guild, or the reserve) instead of re-resolving the invite —
-    // a dead/rate-limited invite must never make a real join look like "no ad".
-    const presenceFor = async (cand) => {
-        if (cand.sponsorGuildId) {
-            const gid = String(cand.sponsorGuildId);
-            const bot = (Array.isArray(clients) ? clients : []).find((c) => c.guilds?.cache?.has(gid));
-            if (bot) return { guildId: gid, bot };
-            if (usertoken.enabled() && await usertoken.coversGuild(gid).catch(() => false)) return { guildId: gid, bot: null };
-            return null;
-        }
-        return resolveSponsorPresence(clients, applyTemplate(serverId, cand.raw)).catch(() => null);
+    // Resolve presence by guild id (fleet bot on it, or reserve) — robust to a
+    // dead/rate-limited invite, which must never make a real join look like "no ad".
+    const presenceByGuild = async (gid) => {
+        gid = String(gid);
+        const bot = (Array.isArray(clients) ? clients : []).find((c) => c.guilds?.cache?.has(gid));
+        if (bot) return { guildId: gid, bot };
+        if (usertoken.enabled() && await usertoken.coversGuild(gid).catch(() => false)) return { guildId: gid, bot: null };
+        return null;
     };
+    const presenceFor = (cand) => cand.sponsorGuildId ? presenceByGuild(cand.sponsorGuildId)
+        : resolveSponsorPresence(clients, applyTemplate(serverId, cand.raw)).catch(() => null);
 
+    // The reward is for the sponsor we ACTUALLY SHOWED this user via this bot
+    // (recorded on /api/ad). Verify ONLY that one — never credit a different
+    // eligible sponsor the user merely happens to already be in.
+    if (botId) {
+        const clicks = loadJSON('apiclicks.json', []);
+        const now = Date.now();
+        let shown = null;
+        for (const e of (Array.isArray(clicks) ? clicks : [])) {
+            if (e.b === String(botId) && e.g === String(serverId) && e.u === String(memberId) && e.s && e.t > now - 3600000 && (!shown || e.t > shown.t)) shown = e;
+        }
+        if (shown) {
+            if (String(shown.s) === String(serverId) || !approvedSponsor(String(shown.s))) return { none: true };
+            const elig = cands.find((c) => String(c.sponsorGuildId) === String(shown.s));
+            if (elig && capReached(elig.raw)) return { none: true };
+            const sp = await presenceByGuild(shown.s);
+            if (!sp) return { none: true };
+            const m = await isMember(sp.bot, sp.guildId, memberId).catch(() => null);
+            if (m === null) return { uncertain: true };
+            if (m !== true) return { notMember: true };
+            const raw = elig ? elig.raw : (houseRaw || '');
+            stampSponsorShow(sp.guildId);
+            return { ad: { adText: applyTemplate(serverId, raw), raw, sponsor: sp, campaignId: elig ? elig.campaignId : null } };
+        }
+        return { none: true }; // /api/ad recorded no sponsor for this user → nothing to reward
+    }
+
+    // Legacy fallback (botId absent): scan eligible sponsors.
     let sawAny = false, uncertain = false, checks = 0;
     const seenSponsors = new Set();
     for (const cand of cands) {
@@ -347,13 +372,17 @@ function recordApiVerified({ creatorId, memberId, serverId, adKey, noAd, botId }
 // inflate it; pruned to a week. Keyed by bot so the cabinet can draw a per-bot
 // funnel (started → checked → stayed), mirroring the server verification cards.
 const API_CLICK_TTL = 7 * 86400000;
-function recordApiClick({ creatorId, botId, serverId, memberId }) {
+function recordApiClick({ creatorId, botId, serverId, memberId, sponsorGuildId }) {
     if (!creatorId || !botId) return;
     const now = Date.now();
     const raw = loadJSON('apiclicks.json', []);
     const arr = (Array.isArray(raw) ? raw : []).filter((e) => e.t > now - API_CLICK_TTL);
-    if (arr.some((e) => e.b === String(botId) && e.g === String(serverId || '') && e.u === String(memberId || '') && e.t > now - 60000)) return;
-    arr.push({ c: String(creatorId), b: String(botId), g: String(serverId || ''), u: String(memberId || ''), t: now });
+    // Refresh a recent record for the same (bot, server, user) — keeps the funnel
+    // "started" count honest — but always update the last-shown sponsor so
+    // join-check verifies exactly what we showed.
+    const recent = arr.find((e) => e.b === String(botId) && e.g === String(serverId || '') && e.u === String(memberId || '') && e.t > now - 60000);
+    if (recent) { if (sponsorGuildId) recent.s = String(sponsorGuildId); recent.t = now; saveJSON('apiclicks.json', arr); return; }
+    arr.push({ c: String(creatorId), b: String(botId), g: String(serverId || ''), u: String(memberId || ''), s: sponsorGuildId ? String(sponsorGuildId) : null, t: now });
     saveJSON('apiclicks.json', arr);
 }
 
@@ -3620,7 +3649,7 @@ function startApiServer(clients, config) {
                 if (!/^\d{17,20}$/.test(botId)) return send(res, 400, { error: 'botId is required — your bot application (client) ID' });
                 if (!/^\d{17,20}$/.test(endUserId)) return send(res, 400, { error: 'userId is required — the Discord user you are serving' });
                 const ad = await adForServer(clients, config.ownerId, serverId, endUserId);
-                try { recordApiClick({ creatorId: userId, botId, serverId, memberId: endUserId }); } catch { /* never block */ }
+                try { recordApiClick({ creatorId: userId, botId, serverId, memberId: endUserId, sponsorGuildId: ad.sponsor ? ad.sponsor.guildId : null }); } catch { /* never block */ }
                 // Same "заглушка" the in-Discord bots show when there is no ad,
                 // so an API bot can render an identical no-ad message.
                 const cfg = loadJSON('siteconfig.json', {});
@@ -3655,7 +3684,7 @@ function startApiServer(clients, config) {
                 // Find which advertised sponsor the user actually joined (scans the
                 // same candidate pool /api/ad shows from — NOT a fresh random pick,
                 // which could check the wrong sponsor and 403 a valid join).
-                const match = await matchJoinedSponsor(clients, config.ownerId, serverId, memberId);
+                const match = await matchJoinedSponsor(clients, config.ownerId, serverId, memberId, botId);
                 console.log('[API join-check]', JSON.stringify({ dev: userId, botId, serverId, user: memberId, result: match.none ? 'none(no-ad)' : match.notMember ? 'notMember(403)' : match.uncertain ? 'uncertain(503)' : ('sponsor:' + (match.ad && match.ad.sponsor && match.ad.sponsor.guildId)) }));
                 if (match.uncertain) return send(res, 503, { joined: null, error: 'membership check temporarily unavailable, retry' });
 
