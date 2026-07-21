@@ -148,7 +148,7 @@ function stampSponsorShow(gid) {
     try { sponsorshow.stamp(gid); } catch { /* stamping must never break the ad path */ }
 }
 
-async function adForServer(clients, ownerId, serverId, memberId) {
+async function adForServer(clients, ownerId, serverId, memberId, botId) {
     const cfg = loadJSON('siteconfig.json', {});
     const gidOk = /^\d{17,20}$/.test(String(serverId || ''));
     if (cfg.adsOff) return { adText: null, sponsor: null, invite: null };
@@ -167,7 +167,7 @@ async function adForServer(clients, ownerId, serverId, memberId) {
             const verified = loadJSON('verified.json', []);
             const limits = loadJSON('adlimits.json', {});
             const capReached = (raw) => { const rec = limits[adKeyOf(raw)]; const cap = Number(rec?.limit) || 0; return cap > 0 && joinerCount(verified, adKeyOf(raw), Number(rec?.resetAt) || 0) >= cap; };
-            const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(serverId, verified, await coveredGuildIds(clients)));
+            const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(serverId, verified, await coveredGuildIds(clients), botId));
             let checks = 0;
             for (const cand of ordered) {
                 if (checks >= 8) break;                                  // bound the network calls
@@ -276,7 +276,7 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId, botId) {
         if (m !== true) return { notMember: true };            // not in the shown sponsor → 403
         // Attribution only — the sponsor is already resolved, so skip the
         // coveredGuildIds() network work (pass null → no bot-presence filter).
-        const elig = campaigns.eligibleForGuild(effSid, verified, null).find((c) => String(c.sponsorGuildId) === gid);
+        const elig = campaigns.eligibleForGuild(effSid, verified, null, botId).find((c) => String(c.sponsorGuildId) === gid);
         if (elig && capReached(elig.invite)) return { none: true };
         const raw = elig ? elig.invite
             : ((s.serverAds && s.serverAds[effSid] && String(s.serverAds[effSid]).trim()) ? s.serverAds[effSid] : (s.advText || ''));
@@ -2723,23 +2723,38 @@ async function handleBuyer(req, res, path, clients, config) {
         if (!c || (c.buyerId !== buyerId && !isAdminBuyer)) return send(res, 404, { error: 'not found' }, cors);
         const keys = campaigns.campaignAdKeys(c);
         const verified = loadJSON('verified.json', []);
-        const perGuild = {};   // gid -> { paid:Set, extra:Set }
+        const perGuild = {};   // gid   -> { paid:Set, extra:Set }  (in-Discord / server delivery)
+        const perBot = {};     // botId -> { paid:Set, extra:Set }  (developer-API delivery through a bot)
         for (const u of Array.isArray(verified) ? verified : []) {
             if (!keys.has(u.adKey) || (c.paidAt && u.timestamp < c.paidAt)) continue;
-            const g = (perGuild[u.guildId] ||= { paid: new Set(), extra: new Set() });
-            (u.viaExtra ? g.extra : g.paid).add(u.id);
+            // API deliveries are shown INSIDE a bot, not on a server card — group
+            // them by the bot (so the buyer sees the bot's name, not a guild).
+            if (u.roleId === 'api' && u.botId) {
+                const b = (perBot[u.botId] ||= { paid: new Set(), extra: new Set() });
+                (u.viaExtra ? b.extra : b.paid).add(u.id);
+            } else {
+                const g = (perGuild[u.guildId] ||= { paid: new Set(), extra: new Set() });
+                (u.viaExtra ? g.extra : g.paid).add(u.id);
+            }
         }
-        let servers = Object.entries(perGuild)
-            .map(([gid, g]) => {
-                // `count` = PAID joins (partner was paid). Admin also sees how many
-                // came via the EXTRA bonus ad (users delivered here ONLY through the
-                // extra button — a paid join for the same user counts as paid).
-                const extraOnly = [...g.extra].filter((uid) => !g.paid.has(uid)).length;
-                const row = { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), count: g.paid.size, disabled: (c.disabledGuilds || []).includes(gid) };
-                if (isAdminBuyer) row.extra = extraOnly;
-                return row;
-            });
-        // Non-admins (buyer / partner / manager) don't see extra-only servers.
+        const rowOf = (extra, paidSize, base) => {
+            // `count` = PAID joins (partner was paid). Admin also sees how many came
+            // via the EXTRA bonus ad (a paid join for the same user counts as paid).
+            const row = { ...base, count: paidSize };
+            if (isAdminBuyer) row.extra = extra;
+            return row;
+        };
+        let servers = Object.entries(perGuild).map(([gid, g]) =>
+            rowOf([...g.extra].filter((uid) => !g.paid.has(uid)).length, g.paid.size,
+                { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), disabled: (c.disabledGuilds || []).includes(gid) }));
+        // Resolve each bot's name/avatar and render it as a row alongside servers.
+        const botRows = await Promise.all(Object.entries(perBot).map(async ([bid, b]) => {
+            const mini = await userMiniLive(clients, bid).catch(() => null);
+            return rowOf([...b.extra].filter((uid) => !b.paid.has(uid)).length, b.paid.size,
+                { isBot: true, botId: bid, name: (mini && (mini.name || mini.username)) || `Bot ${bid}`, icon: (mini && mini.avatar) || null, disabled: (c.disabledBots || []).includes(bid) });
+        }));
+        servers = servers.concat(botRows);
+        // Non-admins (buyer / partner / manager) don't see extra-only rows.
         if (!isAdminBuyer) servers = servers.filter((s) => s.count > 0);
         servers.sort((a, b) => b.count - a.count || ((b.extra || 0) - (a.extra || 0)));
         return send(res, 200, { servers }, cors);
@@ -2775,6 +2790,23 @@ async function handleBuyer(req, res, path, clients, config) {
         else c.disabledGuilds = c.disabledGuilds.filter((x) => x !== gid);
         campaigns.saveCampaigns(camps);
         return send(res, 200, { ok: true, disabledGuilds: c.disabledGuilds }, cors);
+    }
+
+    // Toggle a BOT on/off for this campaign (developer-API delivery) — mirrors the
+    // per-server toggle above, keyed by the bot's application id.
+    if (path.startsWith('/order/campaigns/') && path.endsWith('/bot') && req.method === 'PUT') {
+        const id = path.slice('/order/campaigns/'.length, -('/bot'.length));
+        const camps = campaigns.loadCampaigns();
+        const c = camps[id];
+        if (!c || (c.buyerId !== buyerId && !isAdminBuyer)) return send(res, 404, { error: 'not found' }, cors);
+        const body = await readBody(req);
+        const bid = String(body?.botId || '');
+        if (!/^\d{17,20}$/.test(bid)) return send(res, 400, { error: 'bad botId' }, cors);
+        if (!Array.isArray(c.disabledBots)) c.disabledBots = [];
+        if (body?.disabled) { if (!c.disabledBots.includes(bid)) c.disabledBots.push(bid); }
+        else c.disabledBots = c.disabledBots.filter((x) => x !== bid);
+        campaigns.saveCampaigns(camps);
+        return send(res, 200, { ok: true, disabledBots: c.disabledBots }, cors);
     }
 
     // Change a running campaign's invite link mid-flight (e.g. the old one
@@ -3655,7 +3687,7 @@ function startApiServer(clients, config) {
                 if (!/^\d{17,20}$/.test(serverId)) return send(res, 400, { error: 'serverId is required — the guild your bot is operating in' });
                 if (!/^\d{17,20}$/.test(botId)) return send(res, 400, { error: 'botId is required — your bot application (client) ID' });
                 if (!/^\d{17,20}$/.test(endUserId)) return send(res, 400, { error: 'userId is required — the Discord user you are serving' });
-                const ad = await adForServer(clients, config.ownerId, serverId, endUserId);
+                const ad = await adForServer(clients, config.ownerId, serverId, endUserId, botId);
                 try { recordApiClick({ creatorId: userId, botId, serverId, memberId: endUserId, sponsorGuildId: ad.sponsor ? ad.sponsor.guildId : null }); } catch { /* never block */ }
                 console.log('[API ad]', JSON.stringify({ dev: userId, botId, serverId, user: endUserId, sponsor: ad.sponsor ? ad.sponsor.guildId : null }));
                 // Same "заглушка" the in-Discord bots show when there is no ad,

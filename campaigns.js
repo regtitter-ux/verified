@@ -151,6 +151,7 @@ function publicView(campaign, verifiedList) {
         linkDelivered: lp.delivered,
         limitReached: lp.reached,
         disabledGuilds: Array.isArray(campaign.disabledGuilds) ? campaign.disabledGuilds : [],
+        disabledBots: Array.isArray(campaign.disabledBots) ? campaign.disabledBots : [],
         invoiceUrl: campaign.invoiceUrl || null,
         createdAt: campaign.createdAt || 0,
         paidAt: campaign.paidAt || 0,
@@ -179,14 +180,18 @@ function botPresent(campaign, botGuildIds) {
 // server has a network bot (so the join can be verified). Each carries `remaining`
 // (unmet joins) and `paidAt` (queue position). Callers order these with
 // weightedOrder (now FIFO by paidAt) and layer priority/hide/membership on top.
-function eligibleForGuild(displayGuildId, verifiedList, botGuildIds) {
+function eligibleForGuild(displayGuildId, verifiedList, botGuildIds, botId) {
     const camps = loadCampaigns();
     const list = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
+    const bid = botId ? String(botId) : null;
     const eligible = [];
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active' || c.paused || c.autoPaused) continue;
         if (c.sponsorGuildId === displayGuildId) continue;                 // never on itself
         if (Array.isArray(c.disabledGuilds) && c.disabledGuilds.includes(displayGuildId)) continue;
+        // Developer API: the buyer can turn a campaign off for a specific bot,
+        // exactly like the per-server opt-out (only applies when a botId is given).
+        if (bid && Array.isArray(c.disabledBots) && c.disabledBots.includes(bid)) continue;
         if (botGuildIds && !botGuildIds.has(c.sponsorGuildId)) continue;   // no bot on buyer's server
         const del = delivered(c, list, camps);
         const remaining = c.purchased - del;
