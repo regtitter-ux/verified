@@ -1351,8 +1351,10 @@ const startBot = (token) => {
                     let ordered = campaigns.weightedOrder(eligibleHere);
                     // Partner per-server controls (set in the partner cabinet by
                     // the server owner = creatorId), keyed by THIS display guild:
-                    //  • hiddenByGuild — campaigns the partner hid on this server;
-                    //    they are removed from the pool entirely (never shown).
+                    //  • hiddenByGuild — campaigns the partner hid on this server.
+                    //    They are a MAIN-ad control only: the main pick skips them,
+                    //    but they STAY in the pool so the bonus EXTRA ad — which
+                    //    ignores the per-server hide — can still surface them.
                     //  • priorityByGuild — one campaign pinned to show FIRST here;
                     //    moved to the front of the weighted order. It's only a
                     //    preference — the loop below still skips it if it's capped,
@@ -1362,11 +1364,8 @@ const startBot = (token) => {
                     //    smart-distribution order stands unchanged.
                     const pctl = settings[creatorId] || {};
                     const hiddenHere = pctl.hiddenByGuild?.[guild.id];
-                    if (Array.isArray(hiddenHere) && hiddenHere.length) {
-                        const before = ordered.length;
-                        ordered = ordered.filter((c) => !hiddenHere.includes(c.id));
-                        if (before > 0 && ordered.length === 0) allHiddenHere = true;   // partner hid every available ad here
-                    }
+                    const isHidden = (id) => Array.isArray(hiddenHere) && hiddenHere.includes(id);
+                    if (Array.isArray(hiddenHere) && hiddenHere.length && ordered.length && ordered.every((c) => isHidden(c.id))) allHiddenHere = true; // partner hid every available ad here → no MAIN ad (extra may still show one)
                     // Priority pin: the partner's own per-server pin wins; where the
                     // partner set none, a service admin/manager's GLOBAL pin (set from
                     // the orders page) applies. Either way it only moves the campaign to
@@ -1382,7 +1381,7 @@ const startBot = (token) => {
                     // the "EXTRA GWS" bonus ad from it — no second network scan.
                     // Cached membership keeps the whole loop cheap.
                     let checks = 0;
-                    const cands = [];   // { cand, ad, definite }
+                    const cands = [];   // { cand, ad, definite, hidden }
                     for (const cand of ordered) {
                         if (capReached(cand.invite)) { sawCapped = true; continue; } // cheap, no network → unbounded
                         if (checks >= 10) break;                           // bound the network calls
@@ -1391,18 +1390,20 @@ const startBot = (token) => {
                         if (!ad) continue;                                 // unresolvable / self → try next
                         const m = await isMemberCached(ad.sp.bot, ad.sp.guildId, user.id);
                         if (m === true) { sawMember = true; continue; }    // already a member → try next
-                        cands.push({ cand, ad, definite: m === false });   // not a member (or uncertain) → showable
-                        if (cands.filter((c) => c.definite).length >= 2) break; // enough for main + extra
+                        cands.push({ cand, ad, definite: m === false, hidden: isHidden(cand.id) }); // not a member (or uncertain) → showable
+                        if (cands.filter((c) => c.definite && !c.hidden).length >= 2) break; // enough NON-HIDDEN for main + extra
                     }
-                    // main = first definite non-member, else first uncertain (unchanged).
-                    const pick = cands.find((c) => c.definite) || cands[0] || null;
-                    // extra = a showable campaign OTHER than the main ad's sponsor.
-                    // When this server turned ads off, no main ad is shown, so any
-                    // showable campaign — including the top pick — qualifies for the
-                    // bonus slot (the extra ad ignores the per-server off switch).
-                    const extraPickC = serverOff
-                        ? pick
-                        : (pick ? cands.find((c) => c.cand.id !== pick.cand.id && c.ad.sp.guildId !== pick.ad.sp.guildId) : null);
+                    // main = first definite non-member, else first uncertain — from
+                    // NON-HIDDEN candidates only (the main ad respects the hide).
+                    const mainCands = cands.filter((c) => !c.hidden);
+                    const pick = mainCands.find((c) => c.definite) || mainCands[0] || null;
+                    // extra = a showable campaign OTHER than the main ad's sponsor,
+                    // drawn from the FULL pool (hidden included — the bonus ad ignores
+                    // the per-server hide). Under serverOff no main ad is shown, so any
+                    // showable campaign qualifies.
+                    const shownMain = serverOff ? null : pick;
+                    const differsFromMain = (c) => !shownMain || (c.cand.id !== shownMain.cand.id && c.ad.sp.guildId !== shownMain.ad.sp.guildId);
+                    const extraPickC = cands.find((c) => c.definite && differsFromMain(c)) || cands.find((c) => differsFromMain(c)) || null;
                     // The main ad is suppressed on a server whose owner turned ads
                     // off — apply the pick only when ads are on for this server.
                     if (pick && !serverOff) {

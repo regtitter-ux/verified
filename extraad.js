@@ -29,17 +29,17 @@ function row(url) {
 }
 
 // Find the next eligible campaign for `guild` the user isn't a member of, other
-// than `excludeSponsorGuildId` (the main ad / the sponsor just joined). Applies
-// the partner's per-server hide flags, but not priority — it's a bonus slot.
-// deps: { fleet, isMember, resolveSponsor(invite)->{bot,guildId}|null, creatorId }.
+// than `excludeSponsorGuildId` (the main ad / the sponsor just joined). It's a
+// bonus slot that deliberately IGNORES the partner's per-server controls — both
+// the ads-off switch and the per-campaign hide flags (hiddenByGuild) — so the
+// EXTRA ad can still surface a campaign the partner turned off / hid in the main
+// slot. deps: { fleet, isMember, resolveSponsor(invite)->{bot,guildId}|null }.
 // Returns { campaignId, raw, sponsorGuildId, url } or null.
 async function pick(guild, userId, excludeSponsorGuildId, deps) {
     try {
-        const { fleet, isMember, resolveSponsor, creatorId } = deps;
+        const { fleet, isMember, resolveSponsor } = deps;
         const verified = loadJSON('verified.json', []);
-        let ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(guild.id, verified, fleet));
-        const hidden = (loadJSON('settings.json')[creatorId] || {}).hiddenByGuild?.[guild.id];
-        if (Array.isArray(hidden) && hidden.length) ordered = ordered.filter((c) => !hidden.includes(c.id));
+        const ordered = campaigns.weightedOrder(campaigns.eligibleForGuild(guild.id, verified, fleet));
 
         let checks = 0, tentative = null;
         for (const cand of ordered) {
