@@ -2966,6 +2966,53 @@ async function handlePartner(req, res, path, clients, config) {
         if (!sess) return send(res, 200, { authed: false }, cors);
         return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), isOwner: sess.userId === adminAuth.OWNER_ID }, cors);
     }
+    // Owner-only universal search (header search box). Given one Discord id, find
+    // whatever it matches: a partner (→ open their cabinet via acting-as), a
+    // server card (by the server's guild id), or a specific card (by the bot
+    // message id). Returns every match; the header renders them as a pick list.
+    if (path === '/partner/owner-search' && req.method === 'GET') {
+        const sess = buyerSessionOf(req);
+        if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
+        if (sess.userId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        const q = String((new URL(req.url, 'http://x')).searchParams.get('q') || '').trim();
+        if (!/^\d{16,20}$/.test(q)) return send(res, 200, { q, results: [] }, cors);
+        const results = [];
+        // Cards: by message id (exact) first, then by guild id.
+        const allCards = cards.loadCards().filter((c) => c && !c.deletedAt);
+        const cardRows = [];
+        const byMsg = allCards.find((c) => String(c.messageId) === q);
+        if (byMsg) cardRows.push(byMsg);
+        for (const c of allCards) {
+            if (String(c.guildId) === q && !cardRows.some((x) => x.messageId === c.messageId)) cardRows.push(c);
+        }
+        for (const c of cardRows.slice(0, 25)) {
+            const om = c.creatorId ? userMiniOf(clients, c.creatorId) : null;
+            results.push({
+                type: 'card',
+                matchedBy: String(c.messageId) === q ? 'message' : 'server',
+                messageId: c.messageId, guildId: c.guildId || null, channelId: c.channelId || null,
+                guildName: c.guildId ? guildNameOf(clients, c.guildId) : null,
+                creatorId: c.creatorId || null,
+                ownerName: om ? (om.name || om.username || ('ID ' + c.creatorId)) : (c.creatorId ? ('ID ' + c.creatorId) : null),
+                discordUrl: (c.guildId && c.channelId && c.messageId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
+                cabinetUrl: c.creatorId ? `/partner/?as=${c.creatorId}` : null
+            });
+        }
+        // Partner: any user id opens their cabinet (acting-as). Flag if they have data.
+        if (/^\d{17,20}$/.test(q)) {
+            const s = loadJSON('settings.json')[q];
+            const mini = await userMiniLive(clients, q).catch(() => null);
+            const hasData = Boolean(s && ((Number(s.balance) || 0) !== 0 || (Array.isArray(s.withdrawals) && s.withdrawals.length) || (Array.isArray(s.partners) && s.partners.length) || (Array.isArray(s.referrals) && s.referrals.length) || (s.advText && String(s.advText).trim()) || (s.serverAds && Object.keys(s.serverAds).length) || s.referrer));
+            results.push({
+                type: 'partner', id: q,
+                name: (mini && (mini.name || mini.username)) || null,
+                username: (mini && mini.username) || null,
+                avatar: (mini && mini.avatar) || null,
+                hasData, cabinetUrl: `/partner/?as=${q}`
+            });
+        }
+        return send(res, 200, { q, results }, cors);
+    }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
     const sess = buyerSessionOf(req);
