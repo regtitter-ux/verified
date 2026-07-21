@@ -3702,11 +3702,14 @@ function startApiServer(clients, config) {
                 const ad = match.ad;
                 const sponsor = ad.sponsor;
 
-                // Dedup by (sponsor, user) — one real invite is paid once, no
-                // matter which network server / partner delivered the join.
+                // Dedup by (sponsor, user) — one credit per ACTIVE membership, no
+                // matter which network server / partner delivered the join. A user
+                // who left (clawed back or settled) and genuinely rejoins counts
+                // again; only a still-live 'joined' record blocks. Mirrors
+                // creditJoin's guard.
                 const links = loadJSON('joinlinks.json', []);
                 const already = (Array.isArray(links) ? links : []).some(
-                    (r) => r && (r.status === 'joined' || r.status === 'settled') && r.guildId === sponsor.guildId && r.userId === memberId
+                    (r) => r && r.status === 'joined' && r.guildId === sponsor.guildId && r.userId === memberId
                 );
                 if (already) {
                     console.log('[API join-check] outcome', JSON.stringify({ botId, user: memberId, sponsor: sponsor.guildId, outcome: 'already_counted' }));

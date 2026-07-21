@@ -124,17 +124,22 @@ async function isMember(bot, guildId, userId) {
 // remember the payout — plus the granted role — so both can be reversed if the
 // user later leaves the sponsor server.
 // Returns { amount, linkId, duplicate }. `duplicate:true` (amount 0) means this
-// (user, sponsor) already had a live join — nothing was credited or recorded.
+// (user, sponsor) already has an ACTIVE (still-joined) credit — nothing was
+// credited or recorded. A user who genuinely left (status 'left', clawed back —
+// or 'settled', finalized without a clawback) and later rejoins is credited
+// again: we bill per active membership and reverse leaves, so a real rejoin is a
+// new join. Only a continuous, uninterrupted membership is paid once.
 function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, extra = {}) {
-    // Atomic idempotency guard. One real invite pays once per (user, sponsor).
-    // The caller's isDupJoin pre-check has awaits between it and this call, so two
-    // concurrent verify clicks can both pass it — but THIS function is fully
-    // synchronous (no await), so the single-threaded event loop can't interleave
-    // two calls: the second sees the first's appended joinlink and bails. This is
-    // the race-proof point of truth for "one join = one credit".
+    // Atomic idempotency guard. One credit per ACTIVE membership per (user,
+    // sponsor). The caller's isDupJoin pre-check has awaits between it and this
+    // call, so two concurrent verify clicks can both pass it — but THIS function
+    // is fully synchronous (no await), so the single-threaded event loop can't
+    // interleave two calls: the second sees the first's appended joinlink and
+    // bails. This is the race-proof point of truth for "one active join = one
+    // credit". A prior 'left'/'settled' record does NOT block a genuine rejoin.
     const list = loadJSON('joinlinks.json', []);
     const arr = Array.isArray(list) ? list : [];
-    if (arr.some((r) => r && (r.status === 'joined' || r.status === 'settled') && r.userId === userId && r.guildId === guildId)) {
+    if (arr.some((r) => r && r.status === 'joined' && r.userId === userId && r.guildId === guildId)) {
         return { amount: 0, linkId: null, duplicate: true };
     }
 
