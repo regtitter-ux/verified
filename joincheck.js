@@ -436,5 +436,5 @@ function startJoinCheckSweep(clients) {
 module.exports = {
     JOIN_BID, PER_JOIN, getJoinBid,
     extractInviteCodes, resolveSponsorPresence, isMember,
-    creditJoin, sweepOnce, startJoinCheckSweep, handleMemberLeave
+    creditJoin, sweepOnce, startJoinCheckSweep, handleMemberLeave, finalizeLeavers
 };

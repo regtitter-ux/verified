@@ -11,7 +11,7 @@ const { maybeAutoWithdraw } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
-const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes } = require('./joincheck.js');
+const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes, finalizeLeavers } = require('./joincheck.js');
 const { syncHubMember } = require('./hubrole.js');
 const { logFunds } = require('./fundslog.js');
 const shares = require('./shares.js');
@@ -3754,6 +3754,25 @@ function startApiServer(clients, config) {
                 await maybeAutoWithdraw(clients, userId).catch(() => null);
                 console.log('[API join-check] outcome', JSON.stringify({ botId, user: memberId, sponsor: sponsor.guildId, outcome: 'credited', amount: money(amount) }));
                 return send(res, 200, { joined: true, credited: true, sponsor: sponsor.guildId, amount: money(amount) });
+            }
+
+            // Testing aid — reverse YOUR OWN active API joins for a given end user
+            // (simulate a leave) so you can re-run the join→reward flow with the
+            // same account without waiting for the leave-reconciliation sweep. Only
+            // touches joins THIS key delivered (creatorId === you), applies the
+            // normal clawback, and never affects another developer's earnings.
+            if (p === '/api/test-reset' && req.method === 'POST') {
+                const body = await readBody(req);
+                if (body === null) return send(res, 400, { error: 'Invalid JSON body' });
+                const memberId = String(body.userId || '').trim();
+                if (!/^\d{17,20}$/.test(memberId)) return send(res, 400, { error: 'userId is required — the Discord user whose test join to reset' });
+                const links = loadJSON('joinlinks.json', []);
+                const ids = (Array.isArray(links) ? links : [])
+                    .filter((r) => r && r.status === 'joined' && r.roleId === 'api' && r.creatorId === userId && r.userId === memberId)
+                    .map((r) => r.id);
+                if (ids.length) await finalizeLeavers(clients, new Set(ids)).catch(() => null);
+                console.log('[API test-reset]', JSON.stringify({ dev: userId, user: memberId, reset: ids.length }));
+                return send(res, 200, { reset: ids.length });
             }
 
             return send(res, 404, { error: 'Unknown endpoint' });
