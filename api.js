@@ -3650,6 +3650,7 @@ function startApiServer(clients, config) {
                 if (!/^\d{17,20}$/.test(endUserId)) return send(res, 400, { error: 'userId is required — the Discord user you are serving' });
                 const ad = await adForServer(clients, config.ownerId, serverId, endUserId);
                 try { recordApiClick({ creatorId: userId, botId, serverId, memberId: endUserId, sponsorGuildId: ad.sponsor ? ad.sponsor.guildId : null }); } catch { /* never block */ }
+                console.log('[API ad]', JSON.stringify({ dev: userId, botId, serverId, user: endUserId, sponsor: ad.sponsor ? ad.sponsor.guildId : null }));
                 // Same "заглушка" the in-Discord bots show when there is no ad,
                 // so an API bot can render an identical no-ad message.
                 const cfg = loadJSON('siteconfig.json', {});
