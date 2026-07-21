@@ -1274,7 +1274,8 @@ const startBot = (token) => {
             // but for one guild in particular.
             const cfg = loadJSON('siteconfig.json', {});
             const serverOff = Boolean(cfg.serverAdsOff && cfg.serverAdsOff[guild.id]);
-            const adsOff = Boolean(cfg.adsOff) || serverOff;
+            const globalOff = Boolean(cfg.adsOff);       // master kill switch — nothing shows, not even the bonus ad
+            const adsOff = globalOff || serverOff;        // main ad off (per-server OR global)
             // Track WHY an ad ends up not shown, for the activity log. Seeded from
             // the hard kill switches and refined by the selection below; only used
             // when no ad is ultimately displayed.
@@ -1323,7 +1324,11 @@ const startBot = (token) => {
             // only reached when NO eligible campaign is showable.
             let campaignPicked = false;
             let firstExtra = null;   // the "EXTRA GWS" bonus ad, reused from the main selection pass (no extra network calls)
-            if (!adsOff) {
+            // Runs whenever the master switch is off — even when THIS server turned
+            // ads off (serverOff). The main ad stays suppressed under serverOff
+            // (guarded below), but the bonus EXTRA ad ignores the per-server switch
+            // and still shows, so we still do the selection pass to find it.
+            if (!globalOff) {
                 try {
                     // Resolve a candidate's sponsor (network) → { text, raw, sp }
                     // or null (self-target / unresolvable). The cheap cap check is
@@ -1391,9 +1396,16 @@ const startBot = (token) => {
                     }
                     // main = first definite non-member, else first uncertain (unchanged).
                     const pick = cands.find((c) => c.definite) || cands[0] || null;
-                    // extra = next showable that's a different campaign AND sponsor.
-                    const extraPickC = pick ? cands.find((c) => c.cand.id !== pick.cand.id && c.ad.sp.guildId !== pick.ad.sp.guildId) : null;
-                    if (pick) {
+                    // extra = a showable campaign OTHER than the main ad's sponsor.
+                    // When this server turned ads off, no main ad is shown, so any
+                    // showable campaign — including the top pick — qualifies for the
+                    // bonus slot (the extra ad ignores the per-server off switch).
+                    const extraPickC = serverOff
+                        ? pick
+                        : (pick ? cands.find((c) => c.cand.id !== pick.cand.id && c.ad.sp.guildId !== pick.ad.sp.guildId) : null);
+                    // The main ad is suppressed on a server whose owner turned ads
+                    // off — apply the pick only when ads are on for this server.
+                    if (pick && !serverOff) {
                         // Carry the resolved sponsor guild so click 2 can re-find
                         // the bot WITHOUT re-resolving the invite (which could fail
                         // transiently and wrongly log the join as ad-free).
