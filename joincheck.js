@@ -196,6 +196,7 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
     // (symmetric with the 'referral_clawback' debit logged on a leave).
     if (referrerId && refBonus > 0) {
         try { partnerlog.logEvent(referrerId, { type: 'credit', reason: 'referral_bonus', amount: refBonus, userId: creatorId, sponsorGuildId: guildId, srcId: `refbonus:${id}` }); } catch { /* never block the credit */ }
+        console.log('[REFERRAL] credit', JSON.stringify({ referrer: referrerId, referral: creatorId, sponsor: guildId, bonus: refBonus, join: id }));
     }
     return { amount: perJoin, linkId: id, duplicate: false, referrerId, refBonus };
 }
@@ -372,6 +373,7 @@ async function finalizeLeavers(clients, leaverIds) {
                 settingsDirty = true;
                 // Partner activity log — the referrer's referral-bonus clawback.
                 if (o.refClaw > 0) { try { partnerlog.logEvent(o.referrerId, { type: 'debit', amount: o.refClaw, reason: 'referral_clawback', userId: o.userId, sponsorGuildId: o.sponsorGuildId, srcId: `refclaw:${o.id}` }); } catch { /* never break the commit */ } }
+                console.log('[REFERRAL] clawback', JSON.stringify({ referrer: o.referrerId, referral: o.partnerId, sponsor: o.sponsorGuildId, bonus: o.refClaw, join: o.id }));
             }
             // Partner activity log — the verification removal (снятие верифки).
             if (o.unverified) { try { partnerlog.logEvent(o.partnerId, { type: 'unverify', reason: 'left', userId: o.userId, guildId: o.cardGuildId, sponsorGuildId: o.sponsorGuildId, roleId: o.roleId, srcId: o.id }); } catch { /* never break the commit */ } }
