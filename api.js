@@ -3627,9 +3627,16 @@ function startApiServer(clients, config) {
 
             if (!p.startsWith('/api/')) return send(res, 404, { error: 'Not found' });
 
+            // Most /api/* calls are server-to-server (no browser, no CORS). The
+            // developer cabinet, however, calls /api/test-reset straight from the
+            // browser with the dev's key, so answer its CORS preflight and echo the
+            // allowed origin on the response.
+            const apiCors = corsHeaders(req);
+            if (req.method === 'OPTIONS') { res.writeHead(204, apiCors); return res.end(); }
+
             // Auth
             const userId = resolveKey(getKey(req));
-            if (!userId) return send(res, 401, { error: 'Invalid or missing API key' });
+            if (!userId) return send(res, 401, { error: 'Invalid or missing API key' }, apiCors);
 
             // Account info (balance, stats, requisites, withdrawals) is not exposed
             // over the API — developers view and manage it in their cabinet on the
@@ -3763,16 +3770,16 @@ function startApiServer(clients, config) {
             // normal clawback, and never affects another developer's earnings.
             if (p === '/api/test-reset' && req.method === 'POST') {
                 const body = await readBody(req);
-                if (body === null) return send(res, 400, { error: 'Invalid JSON body' });
+                if (body === null) return send(res, 400, { error: 'Invalid JSON body' }, apiCors);
                 const memberId = String(body.userId || '').trim();
-                if (!/^\d{17,20}$/.test(memberId)) return send(res, 400, { error: 'userId is required — the Discord user whose test join to reset' });
+                if (!/^\d{17,20}$/.test(memberId)) return send(res, 400, { error: 'userId is required — the Discord user whose test join to reset' }, apiCors);
                 const links = loadJSON('joinlinks.json', []);
                 const ids = (Array.isArray(links) ? links : [])
                     .filter((r) => r && r.status === 'joined' && r.roleId === 'api' && r.creatorId === userId && r.userId === memberId)
                     .map((r) => r.id);
                 if (ids.length) await finalizeLeavers(clients, new Set(ids)).catch(() => null);
                 console.log('[API test-reset]', JSON.stringify({ dev: userId, user: memberId, reset: ids.length }));
-                return send(res, 200, { reset: ids.length });
+                return send(res, 200, { reset: ids.length }, apiCors);
             }
 
             return send(res, 404, { error: 'Unknown endpoint' });
