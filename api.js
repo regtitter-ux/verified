@@ -2806,6 +2806,7 @@ async function handleBuyer(req, res, path, clients, config) {
         if (body?.disabled) { if (!c.disabledBots.includes(bid)) c.disabledBots.push(bid); }
         else c.disabledBots = c.disabledBots.filter((x) => x !== bid);
         campaigns.saveCampaigns(camps);
+        console.log('[order bot-toggle]', JSON.stringify({ campaign: id, botId: bid, disabled: !!body?.disabled, disabledBots: c.disabledBots }));
         return send(res, 200, { ok: true, disabledBots: c.disabledBots }, cors);
     }
 
