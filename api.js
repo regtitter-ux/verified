@@ -471,16 +471,10 @@ function enrichCards(clients, records) {
 const DOCS = {
     name: 'Verification API',
     auth: 'Send your API key as `Authorization: Bearer <key>` or `X-API-Key: <key>`.',
-    note: 'Your bot behaves exactly like a network verification bot. You only run verifications; ad text, rate and campaigns are controlled by the owner — you cannot set them. Payouts are earned only through verified joins.',
+    note: 'Two operational endpoints only. Reward your user ONLY when join-check returns credited:true — that is the single signal that a real sponsor join happened and you were paid. joined:true with credited:false/ad:false means "let them through, but there is nothing to reward". Balance, stats, payout details and withdrawals are viewed in your cabinet on the site, not over the API.',
     endpoints: {
-        'GET /api/ad': 'The ad to show. ALL THREE query params are required: ?serverId=<your guild>&botId=<your bot app id>&userId=<the Discord user>. Returns { adText, fallbackText, sponsor:{guildId,name,invite}|null }. It is the owner\'s per-server ad if set for your server, else a paid buyer campaign, else the global ad. A sponsor the user is already in is skipped. adText null → no ad; show fallbackText (the network\'s no-ad message) if set, then just verify. 400 if any of serverId/botId/userId is missing.',
-        'POST /api/join-check': 'Complete a verification, mirroring the in-Discord bots. Body: { userId, serverId, botId } — ALL required. We check the user\'s membership against every advertisable sponsor for your server via Discord: 200 { joined:true, credited:true } on success (let them through), 403 { joined:false } if not a member of any (ask them to join first). If there is no ad (kran closed / none set / limit reached), 200 { joined:true, ad:false } → verify them without an ad (no payout). The sponsor is derived from OUR ad config, never partner input. 503 to retry. 400 if userId/serverId/botId missing. Each member is paid once per sponsor; leaving reverses it.',
-        'GET /api/balance': 'Your balance and payment details.',
-        'GET /api/stats': 'Your verification stats (per server + time windows).',
-        'GET /api/requisites': 'Your payment details.',
-        'PUT /api/requisites': 'Set your payout details. Body: { requisites }. (The only thing you configure — same as a network bot operator setting theirs in /bal.)',
-        'GET /api/withdrawals': 'Your withdrawal history and total withdrawn.',
-        'POST /api/withdraw': 'Nudge the payout check — a request is filed automatically once balance reaches $10.'
+        'GET /api/ad': 'The ad to show. ALL THREE query params are required: ?serverId=<your guild>&botId=<your bot app id>&userId=<the Discord user>. Returns { adText, fallbackText, sponsor:{guildId,name,invite}|null }. It is the owner\'s per-server ad if set for your server, else a paid buyer campaign, else the global ad. A sponsor the user is already in is skipped. sponsor null → no ad right now; do NOT promise a reward. 400 if any of serverId/botId/userId is missing.',
+        'POST /api/join-check': 'Body: { userId, serverId, botId } — ALL required. We check the user\'s membership against every advertisable sponsor for your server via Discord. Reward the user ONLY on credited:true. Responses: 200 { joined:true, credited:true } → real sponsor join verified and you were paid → GIVE the reward; 403 { joined:false } → not a member of any sponsor → ask them to join first, no reward; 200 { joined:true, credited:false, ad:false } → no ad was running → let them through but DO NOT reward. 503 → retry. 400 if any id missing. Each member is paid once per sponsor; leaving reverses it.'
     }
 };
 
@@ -3595,14 +3589,10 @@ function startApiServer(clients, config) {
             const userId = resolveKey(getKey(req));
             if (!userId) return send(res, 401, { error: 'Invalid or missing API key' });
 
-            if (p === '/api/balance' && req.method === 'GET') {
-                const s = loadJSON('settings.json')[userId] || {};
-                return send(res, 200, {
-                    userId,
-                    balance: money(s.balance),
-                    requisites: (s.requisites || '').trim()
-                });
-            }
+            // Account info (balance, stats, requisites, withdrawals) is not exposed
+            // over the API — developers view and manage it in their cabinet on the
+            // site. Only the two operational endpoints (/api/ad, /api/join-check)
+            // remain.
 
             // The ad to show on YOUR server right now — the owner's per-server
             // ad if they set one for it, else the global ad (same rule as
@@ -3713,55 +3703,7 @@ function startApiServer(clients, config) {
                 }).catch(() => null);
                 maybeNotifyAdComplete(clients, adKey, fresh).catch(() => null);
                 await maybeAutoWithdraw(clients, userId).catch(() => null);
-                const s = loadJSON('settings.json')[userId] || {};
-                return send(res, 200, { joined: true, credited: true, sponsor: sponsor.guildId, amount: money(amount), balance: money(s.balance) });
-            }
-
-            if (p === '/api/requisites' && req.method === 'GET') {
-                const s = loadJSON('settings.json')[userId] || {};
-                return send(res, 200, { requisites: (s.requisites || '').trim() });
-            }
-            if (p === '/api/requisites' && req.method === 'PUT') {
-                const body = await readBody(req);
-                if (body === null || typeof body.requisites !== 'string') {
-                    return send(res, 400, { error: 'Body must be { "requisites": "..." }' });
-                }
-                const settings = loadJSON('settings.json');
-                if (!settings[userId]) settings[userId] = blankUser();
-                settings[userId].requisites = body.requisites.trim().slice(0, 1000);
-                saveJSON('settings.json', settings);
-                return send(res, 200, { ok: true, requisites: settings[userId].requisites });
-            }
-
-            if (p === '/api/stats' && req.method === 'GET') {
-                return send(res, 200, { verifications: userStats(userId) });
-            }
-
-            if (p === '/api/withdrawals' && req.method === 'GET') {
-                const s = loadJSON('settings.json')[userId] || {};
-                const list = Array.isArray(s.withdrawals) ? s.withdrawals : [];
-                const withdrawals = list
-                    .map(w => ({
-                        id: w.id,
-                        amount: money(w.amount),
-                        status: w.status,
-                        createdAt: w.createdAt || null,
-                        completedAt: w.completedAt || null,
-                        requisites: w.requisites || ''
-                    }))
-                    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-                const totalWithdrawn = money(list.filter(w => w.status === 'completed').reduce((a, w) => a + (Number(w.amount) || 0), 0));
-                return send(res, 200, { totalWithdrawn, withdrawals });
-            }
-
-            if (p === '/api/withdraw' && req.method === 'POST') {
-                await maybeAutoWithdraw(clients, userId).catch(() => null);
-                const s = loadJSON('settings.json')[userId] || {};
-                return send(res, 200, {
-                    ok: true,
-                    balance: money(s.balance),
-                    note: 'A payout request is filed automatically once your balance reaches $10.'
-                });
+                return send(res, 200, { joined: true, credited: true, sponsor: sponsor.guildId, amount: money(amount) });
             }
 
             return send(res, 404, { error: 'Unknown endpoint' });
