@@ -26,14 +26,16 @@ const round4 = (n) => +((Number(n) || 0).toFixed(4));
 
 const roundTenth = (n) => Math.round((Number(n) || 0) * 10) / 10;
 const sellPer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10;      // $ service resells per 100 (the retail join price)
-// Investor buy-in price is DERIVED from the sell price: exactly 10% below it,
-// rounded to the nearest 10¢. So raising/lowering JOIN_SALE_PRICE moves the buy
-// price with it (keeps the 9:10 ratio) instead of leaving investors on a stale
-// fixed price. (Was a separate INVEST_BUY_PER_100 env var — now ignored.)
-const buyPer100 = () => roundTenth(sellPer100() * 0.9);                  // $ investor pays per 100
 const returnRate = () => Number.isFinite(Number(process.env.INVEST_RETURN_RATE)) ? Number(process.env.INVEST_RETURN_RATE) : 0.10;
-const buyPerInvite = () => round4(buyPer100() / 100);                    // $0.09
-const retPerInvite = () => round4(buyPerInvite() * (1 + returnRate()));   // $0.099
+// Investor buy-in price is DERIVED from the sell price so the return is EXACTLY
+// returnRate ON THE BUY PRICE: buy = retail ÷ (1 + rate), so buy × (1 + rate) is
+// back to retail. At $11 retail + 10%: buy $10, and each sold invite returns the
+// full retail $11/100 — a clean 10% margin. (Previously buy was retail × 0.9 =
+// $9.9, which then returned $10.89, i.e. an >10% effective margin off the base.)
+// Rounded to the nearest 10¢; raising/lowering JOIN_SALE_PRICE moves it along.
+const buyPer100 = () => roundTenth(sellPer100() / (1 + returnRate()));   // $ investor pays per 100 (e.g. $10)
+const buyPerInvite = () => round4(buyPer100() / 100);                    // $0.10
+const retPerInvite = () => round4(buyPerInvite() * (1 + returnRate()));   // $0.11 (= retail)
 // Dedicated minimum for the investment account; falls back to the shared
 // minTopup(), then $5. Set INVEST_MIN_TOPUP in Railway to change it.
 const minTopup = () => Number(process.env.INVEST_MIN_TOPUP) || Number(process.env.MIN_TOPUP) || 5;
