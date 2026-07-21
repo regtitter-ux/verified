@@ -118,32 +118,12 @@ async function findPayoutChannel(clients) {
 // `amount` here is the referrer-eligible portion (own earnings only) — the
 // caller has already drained the referred user's `refBonusAccrued` pool so
 // bonuses don't cascade further up the chain.
-function payReferral(clients, referredId, amount, _seen) {
-    if (!(amount > 0)) return;
-    const settings = loadJSON('settings.json');
-    const referrerId = Object.keys(settings).find(
-        (uid) => uid !== referredId && Array.isArray(settings[uid].referrals) && settings[uid].referrals.includes(referredId)
-    );
-    if (!referrerId) return;
-
-    const bonus = round2(amount * REFERRAL_RATE);
-    if (bonus <= 0) return;
-
-    settings[referrerId].balance = round2((Number(settings[referrerId].balance) || 0) + bonus);
-    // Remember this credit as "bonus, not own earnings" so it will be
-    // excluded from the base when the referrer eventually withdraws.
-    settings[referrerId].refBonusAccrued = round2((Number(settings[referrerId].refBonusAccrued) || 0) + bonus);
-    saveJSON('settings.json', settings);
-
-    logPartnerMoney(referrerId, { type: 'credit', reason: 'referral_bonus', amount: bonus, userId: referredId, srcId: `refbonus:${referredId}:${Date.now()}` });
-    logFunds(clients, {
-        type: 'credit', creatorId: referrerId, userId: referredId,
-        amount: bonus, reason: 'Referral bonus (10% of withdrawal)'
-    });
-
-    // The referrer's bonus may push them over the threshold too.
-    maybeAutoWithdraw(clients, referrerId, _seen).catch(() => null);
-}
+// Referral bonuses are now credited to the referrer AT JOIN TIME (see
+// creditJoin in joincheck.js), not deferred to the referred user's withdrawal —
+// this keeps earnings symmetric with the instant leave-clawback. So this
+// withdrawal-time hook is intentionally a no-op; kept only so existing call
+// sites (and the LTC settle path) don't need to change.
+function payReferral(_clients, _referredId, _amount, _seen) { /* no-op — credited per-join */ }
 
 // If the user's balance reached the threshold, create a withdrawal request and post it
 // from the service bot (whichever instance can see the payout channel).

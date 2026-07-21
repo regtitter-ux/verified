@@ -152,7 +152,27 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
     const noPay = Boolean(extra && extra.noPay);
     // Boosted referral rate acts as a floor while active (see referral.js).
     const perJoin = noPay ? 0 : round2(boostedRate(s, getJoinBid(s)) / 100);
-    if (!noPay) { s.balance = round2((Number(s.balance) || 0) + perJoin); saveJSON('settings.json', settings); }
+    // Referral: the partner's referrer earns their 10% cut of THIS join right now,
+    // at join time — NOT deferred to the partner's withdrawal. This keeps earnings
+    // symmetric with the leave clawback (which reverses the referrer's cut the
+    // instant the user leaves), so a referrer can't go negative from churn before
+    // their referral has withdrawn anything. The exact bonus is stored on the
+    // joinlink so the reversal debits precisely what was credited.
+    let referrerId = null, refBonus = 0;
+    if (!noPay && perJoin > 0) {
+        referrerId = Object.keys(settings).find(
+            (uid) => uid !== creatorId && Array.isArray(settings[uid].referrals) && settings[uid].referrals.includes(creatorId)
+        ) || null;
+        if (referrerId) {
+            refBonus = round2(perJoin * REFERRAL_RATE);
+            if (refBonus <= 0) referrerId = null;
+        }
+    }
+    if (!noPay) {
+        s.balance = round2((Number(s.balance) || 0) + perJoin);
+        if (referrerId) settings[referrerId].balance = round2((Number(settings[referrerId].balance) || 0) + refBonus);
+        saveJSON('settings.json', settings);
+    }
 
     const id = newId();
     const rec = {
@@ -160,6 +180,7 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
         cardGuildId: cardGuildId || null, roleId: roleId || null, channelId: channelId || null,
         ts: Date.now(), status: 'joined'
     };
+    if (referrerId) { rec.referrerId = referrerId; rec.refBonus = refBonus; }
     // Optional economics for the shares/revenue stats: revenue (what the buyer
     // actually paid per join — lower for a manager sale). Absent = the standard
     // $0.10 revenue (recomputed downstream).
@@ -171,7 +192,12 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
     }
     arr.push(rec);
     saveJSON('joinlinks.json', arr);
-    return { amount: perJoin, linkId: id, duplicate: false };
+    // Activity-log the referral credit so the referrer sees it the moment it lands
+    // (symmetric with the 'referral_clawback' debit logged on a leave).
+    if (referrerId && refBonus > 0) {
+        try { partnerlog.logEvent(referrerId, { type: 'credit', reason: 'referral_bonus', amount: refBonus, userId: creatorId, sponsorGuildId: guildId, srcId: `refbonus:${id}` }); } catch { /* never block the credit */ }
+    }
+    return { amount: perJoin, linkId: id, duplicate: false, referrerId, refBonus };
 }
 
 // Is the sponsor server `gid` being advertised on the network right now?
@@ -266,8 +292,6 @@ async function finalizeLeavers(clients, leaverIds) {
         }
 
         // Reverse the payout (balance may go negative, like manual edits).
-        // The portion that pushes the balance below zero is money already paid out
-        // via a withdrawal — that's the part the referrer earned a bonus on.
         // `before` reads from the snapshot (mutated in-loop to stay consistent
         // across multiple records of the same creator); the actual debit is
         // applied to a fresh load in the commit block.
@@ -287,23 +311,15 @@ async function finalizeLeavers(clients, leaverIds) {
             reason: 'Clawback — join reversed: member left the sponsor server'
         });
 
-        // If the referrer already got a bonus from these funds (i.e. they were
-        // withdrawn), claw back their 10% share of the withdrawn portion too.
-        const withdrawnPortion = round2(rec.amount - Math.max(0, Math.min(before, rec.amount)));
-        if (withdrawnPortion > 0) {
-            const referrerId = Object.keys(settings).find(
-                (uid) => uid !== rec.creatorId && Array.isArray(settings[uid].referrals) && settings[uid].referrals.includes(rec.creatorId)
-            );
-            const refClaw = round2(withdrawnPortion * REFERRAL_RATE);
-            if (referrerId && refClaw > 0) {
+        // Referral: the referrer earned their cut of this join AT JOIN TIME, so
+        // reverse EXACTLY that stored bonus now — symmetric, no withdrawn-portion
+        // heuristic (which could hit a referrer whose referral simply had a low
+        // balance). The bonus was recorded on the joinlink by creditJoin.
+        const referrerId = rec.referrerId || null;
+        const refClaw = round2(Number(rec.refBonus) || 0);
+        if (referrerId && refClaw > 0) {
+            if (settings[referrerId]) {
                 settings[referrerId].balance = round2((Number(settings[referrerId].balance) || 0) - refClaw);
-                // Keep the "unwithdrawn referral bonus" pool in sync — otherwise
-                // this bonus, already clawed back off the balance, would still
-                // be treated as bonus (and excluded from an upstream cut) on
-                // the referrer's next withdrawal. Clamp to 0 for the case
-                // where the referrer already withdrew and drained the pool.
-                const accrued = Number(settings[referrerId].refBonusAccrued) || 0;
-                settings[referrerId].refBonusAccrued = round2(Math.max(0, accrued - refClaw));
                 outcome.referrerId = referrerId;
                 outcome.refClaw = refClaw;
                 await logFunds(clients, {
@@ -353,7 +369,6 @@ async function finalizeLeavers(clients, leaverIds) {
             }
             if (o.referrerId && freshSettings[o.referrerId]) {
                 freshSettings[o.referrerId].balance = round2((Number(freshSettings[o.referrerId].balance) || 0) - o.refClaw);
-                freshSettings[o.referrerId].refBonusAccrued = round2(Math.max(0, (Number(freshSettings[o.referrerId].refBonusAccrued) || 0) - o.refClaw));
                 settingsDirty = true;
                 // Partner activity log — the referrer's referral-bonus clawback.
                 if (o.refClaw > 0) { try { partnerlog.logEvent(o.referrerId, { type: 'debit', amount: o.refClaw, reason: 'referral_clawback', userId: o.userId, sponsorGuildId: o.sponsorGuildId, srcId: `refclaw:${o.id}` }); } catch { /* never break the commit */ } }

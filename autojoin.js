@@ -104,6 +104,7 @@ async function complete(clients, e) {
     await logFunds(clients, { type: 'credit', creatorId: e.creatorId, userId: e.userId, guildId: e.cardGuildId, channelId: e.channelId, amount, sponsorGuildId: e.sponsorGuildId, reason: 'Join auto-verified — first click + confirmed join (no second click)' });
     if (!investorOwned) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
     await maybeAutoWithdraw(clients, e.creatorId);
+    if (credit.referrerId) await maybeAutoWithdraw(clients, credit.referrerId).catch(() => null); // referral bonus credited at join
     console.log(`[AUTOJOIN] credited ${e.userId} on sponsor ${e.sponsorGuildId} (partner ${e.creatorId}) $${amount}`);
 }
 

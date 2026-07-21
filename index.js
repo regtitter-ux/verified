@@ -1643,6 +1643,7 @@ const startBot = (token) => {
                     // done at buy-in (no double-counting).
                     if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
                     await maybeAutoWithdraw(clients, creatorId);
+                    if (credit.referrerId) await maybeAutoWithdraw(clients, credit.referrerId).catch(() => null); // referral bonus credited at join
                 }
             }
         } catch (e) {

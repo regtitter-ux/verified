@@ -2980,11 +2980,23 @@ async function handlePartner(req, res, path, clients, config) {
             addW(g.funnel.clicks, ec.stats.clicks); addW(g.funnel.checked, ec.stats.checked); addW(g.funnel.stayed, ec.stats.stayed);
         }
 
+        // Referral bonuses are credited per-join and stored on the joinlink
+        // (refBonus + referrerId); a leave reverses that exact record. So my
+        // earnings from each referral = sum of refBonus on their STILL-ACTIVE
+        // joins where I'm the referrer (left/reversed joins are excluded).
+        const jlAll = loadJSON('joinlinks.json', []);
+        const earnedByRef = {};
+        for (const r of (Array.isArray(jlAll) ? jlAll : [])) {
+            if (!r || String(r.referrerId || '') !== String(userId) || !(Number(r.refBonus) > 0)) continue;
+            if (r.status !== 'joined' && r.status !== 'settled') continue;
+            earnedByRef[String(r.creatorId)] = (earnedByRef[String(r.creatorId)] || 0) + Number(r.refBonus);
+        }
+
         const list = await Promise.all(refs.map(async (rid) => {
             const rs = settings[rid] || {};
             const wds = Array.isArray(rs.withdrawals) ? rs.withdrawals : [];
             const withdrawn = money(wds.reduce((a, w) => a + (Number(w.amount) || 0), 0));
-            const earned = money(withdrawn * REFERRAL_RATE);
+            const earned = money(earnedByRef[String(rid)] || 0);
             const g = byRef[String(rid)] || { servers: new Set(), funnel: { clicks: zero(), checked: zero(), stayed: zero() } };
             const active = withdrawn > 0 || (Number(rs.balance) || 0) > 0 || g.funnel.checked.week > 0;
             const mini = await userMiniLive(clients, rid);
@@ -2998,7 +3010,7 @@ async function handlePartner(req, res, path, clients, config) {
             count: refs.length,
             activeCount: list.filter((r) => r.active).length,
             totalEarned: money(list.reduce((a, r) => a + r.earned, 0)),
-            pending: money(s.refBonusAccrued),
+            pending: 0,   // referral bonuses are credited at join time — nothing is deferred
             rate: REFERRAL_RATE,
             referrals: list,
             myReferrer   // who referred THIS user (null if none set yet)
@@ -3812,6 +3824,7 @@ function startApiServer(clients, config) {
                 }).catch(() => null);
                 maybeNotifyAdComplete(clients, adKey, fresh).catch(() => null);
                 await maybeAutoWithdraw(clients, userId).catch(() => null);
+                if (credit.referrerId) maybeAutoWithdraw(clients, credit.referrerId).catch(() => null); // referral bonus credited at join
                 console.log('[API join-check] outcome', JSON.stringify({ botId, user: memberId, sponsor: sponsor.guildId, outcome: 'credited', amount: money(amount) }));
                 return send(res, 200, { joined: true, credited: true, sponsor: sponsor.guildId, amount: money(amount) });
             }
