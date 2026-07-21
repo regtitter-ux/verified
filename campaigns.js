@@ -331,6 +331,16 @@ async function reconcile(clients) {
                 c.status = 'complete'; c.completedAt = now; changed = true;
                 notifyBuyer(clients, c, 'complete').catch(() => null);
             }
+        } else if (c.status === 'complete') {
+            // Self-heal: a completed order whose delivered count has since dropped
+            // below the target (shared-invite FIFO re-allocation, or leave
+            // clawbacks) must RESUME — otherwise it's frozen 'complete' below its
+            // purchased total and, since only active orders serve ads, can never
+            // reach it. Resume delivering until it genuinely fills again.
+            if (delivered(c, verified, camps) < c.purchased) {
+                c.status = 'active'; c.completedAt = 0; changed = true;
+                console.log(`[CAMPAIGN] resume ${c.id} — delivered fell below target (was complete)`);
+            }
         }
     }
     if (changed) saveCampaigns(camps);
