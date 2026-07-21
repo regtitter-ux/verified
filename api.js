@@ -237,8 +237,12 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId) {
     const jcg = joinCheckGuilds();
     const approvedSponsor = (gid) => !jcg.size || jcg.has(gid);
 
-    // Same candidate order /api/ad uses: eligible campaigns (weighted), then house ad.
-    const cands = campaigns.weightedOrder(campaigns.eligibleForGuild(serverId, verified, await coveredGuildIds(clients)))
+    // The SAME pool /api/ad draws from, but NOT weighted-random and NOT capped at
+    // the first few: for a membership check the order is irrelevant — we must
+    // check EVERY advertisable sponsor for this server, otherwise a valid join is
+    // missed whenever /api/ad happened to show a different sponsor than the random
+    // subset we'd re-pick here (that was the "already a member but 403" bug).
+    const cands = campaigns.eligibleForGuild(serverId, verified, await coveredGuildIds(clients))
         .map((c) => ({ raw: c.invite, campaignId: c.id }));
     const s = loadJSON('settings.json')[ownerId] || {};
     const houseRaw = (s.serverAds && s.serverAds[serverId] && String(s.serverAds[serverId]).trim()) ? s.serverAds[serverId]
@@ -246,13 +250,16 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId) {
     if (houseRaw) cands.push({ raw: houseRaw, campaignId: null });
 
     let sawAny = false, uncertain = false, checks = 0;
+    const seenSponsors = new Set();
     for (const cand of cands) {
+        if (checks >= 25) break;                 // bound network calls (only REAL checks count)
         if (capReached(cand.raw)) continue;
-        if (checks >= 8) break;
-        checks++;
         const text = applyTemplate(serverId, cand.raw);
         const sp = await resolveSponsorPresence(clients, text).catch(() => null);
         if (!sp || sp.guildId === String(serverId) || !approvedSponsor(sp.guildId)) continue;
+        if (seenSponsors.has(sp.guildId)) continue; // same sponsor via another campaign
+        seenSponsors.add(sp.guildId);
+        checks++;
         sawAny = true;
         const m = await isMember(sp.bot, sp.guildId, memberId).catch(() => null);
         if (m === true) { stampSponsorShow(sp.guildId); return { ad: { adText: text, raw: cand.raw, sponsor: sp, campaignId: cand.campaignId } }; }
