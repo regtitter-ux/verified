@@ -148,6 +148,27 @@ function stampSponsorShow(gid) {
     try { sponsorshow.stamp(gid); } catch { /* stamping must never break the ad path */ }
 }
 
+// Short-lived membership cache for AD SELECTION only (mirrors the in-Discord
+// isMemberCached). Reserve-covered sponsors (no network bot) answer membership
+// over a user-token gateway that intermittently replies "don't know" (null); a
+// fresh check every /api/ad then sometimes fails to skip a sponsor the user is
+// already in. Caching a CONFIRMED true/false for a minute smooths that out so an
+// already-joined sponsor is skipped consistently once we've seen it. Crediting
+// (matchJoinedSponsor) still uses a FRESH isMember — never a cached membership.
+const _adMemberCache = new Map();       // "guild:user" -> { at, val }
+const AD_MEMBER_TTL = 60000;
+async function isMemberForAd(bot, guildId, memberId) {
+    const key = String(guildId) + ':' + String(memberId);
+    const hit = _adMemberCache.get(key);
+    if (hit && Date.now() - hit.at < AD_MEMBER_TTL) return hit.val;
+    const val = await isMember(bot, guildId, memberId).catch(() => null);
+    if (val === true || val === false) {
+        if (_adMemberCache.size > 5000) _adMemberCache.clear();
+        _adMemberCache.set(key, { at: Date.now(), val });
+    }
+    return val;
+}
+
 async function adForServer(clients, ownerId, serverId, memberId, botId) {
     const cfg = loadJSON('siteconfig.json', {});
     const gidOk = /^\d{17,20}$/.test(String(serverId || ''));
@@ -177,7 +198,7 @@ async function adForServer(clients, ownerId, serverId, memberId, botId) {
                 if (!sponsor || sponsor.guildId === String(serverId)) continue; // unresolvable / self → try next
                 // Optional: a bot may pass userId so we skip sponsors the user is
                 // already in (don't advertise a server they've already joined).
-                if (memberId && (await isMember(sponsor.bot, sponsor.guildId, memberId).catch(() => null)) === true) continue;
+                if (memberId && (await isMemberForAd(sponsor.bot, sponsor.guildId, memberId)) === true) continue;
                 stampSponsorShow(sponsor.guildId);
                 const codes = extractInviteCodes(cand.invite);
                 return { adText: applyTemplate(serverId, cand.invite), raw: cand.invite, sponsor, campaignId: cand.id, invite: codes.length ? `https://discord.gg/${codes[0]}` : null };
@@ -218,7 +239,7 @@ async function adForServer(clients, ownerId, serverId, memberId, botId) {
     // Also never advertise a server on itself (members are already in), nor one
     // the passed user is already a member of.
     if (!sponsor || (gidOk && sponsor.guildId === String(serverId))
-        || (memberId && (await isMember(sponsor.bot, sponsor.guildId, memberId).catch(() => null)) === true)) {
+        || (memberId && (await isMemberForAd(sponsor.bot, sponsor.guildId, memberId)) === true)) {
         return { adText: null, sponsor: null, invite: null };
     }
     stampSponsorShow(sponsor.guildId);
@@ -272,14 +293,6 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId, botId) {
         const sp = await presenceByGuild(gid);
         if (!sp) return { none: true };
         const m = await isMember(sp.bot, sp.guildId, memberId).catch(() => null);
-        try {
-            const inviteRaw = shown.raw || null;
-            console.log('[API jc-debug]', JSON.stringify({
-                gid, effSid, via: sp.bot ? ('bot:' + (sp.bot.user && sp.bot.user.id)) : 'reserve', member: m,
-                fleetHasGid: (Array.isArray(clients) ? clients : []).some((c) => c.guilds && c.guilds.cache && c.guilds.cache.has(gid)),
-                reserveCoversGid: usertoken.enabled() ? await usertoken.coversGuild(gid).catch(() => null) : false
-            }));
-        } catch { /* diag only */ }
         if (m === null) return { uncertain: true };            // transient → 503
         if (m !== true) return { notMember: true };            // not in the shown sponsor → 403
         // Attribution only — the sponsor is already resolved, so skip the
@@ -2814,7 +2827,6 @@ async function handleBuyer(req, res, path, clients, config) {
         if (body?.disabled) { if (!c.disabledBots.includes(bid)) c.disabledBots.push(bid); }
         else c.disabledBots = c.disabledBots.filter((x) => x !== bid);
         campaigns.saveCampaigns(camps);
-        console.log('[order bot-toggle]', JSON.stringify({ campaign: id, botId: bid, disabled: !!body?.disabled, disabledBots: c.disabledBots }));
         return send(res, 200, { ok: true, disabledBots: c.disabledBots }, cors);
     }
 
