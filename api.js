@@ -272,6 +272,14 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId, botId) {
         const sp = await presenceByGuild(gid);
         if (!sp) return { none: true };
         const m = await isMember(sp.bot, sp.guildId, memberId).catch(() => null);
+        try {
+            const inviteRaw = shown.raw || null;
+            console.log('[API jc-debug]', JSON.stringify({
+                gid, effSid, via: sp.bot ? ('bot:' + (sp.bot.user && sp.bot.user.id)) : 'reserve', member: m,
+                fleetHasGid: (Array.isArray(clients) ? clients : []).some((c) => c.guilds && c.guilds.cache && c.guilds.cache.has(gid)),
+                reserveCoversGid: usertoken.enabled() ? await usertoken.coversGuild(gid).catch(() => null) : false
+            }));
+        } catch { /* diag only */ }
         if (m === null) return { uncertain: true };            // transient → 503
         if (m !== true) return { notMember: true };            // not in the shown sponsor → 403
         // Attribution only — the sponsor is already resolved, so skip the
