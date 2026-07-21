@@ -248,26 +248,39 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId) {
     // missed whenever /api/ad happened to show a different sponsor than the random
     // subset we'd re-pick here (that was the "already a member but 403" bug).
     const cands = campaigns.eligibleForGuild(serverId, verified, await coveredGuildIds(clients))
-        .map((c) => ({ raw: c.invite, campaignId: c.id }));
+        .map((c) => ({ raw: c.invite, campaignId: c.id, sponsorGuildId: c.sponsorGuildId || null }));
     const s = loadJSON('settings.json')[ownerId] || {};
     const houseRaw = (s.serverAds && s.serverAds[serverId] && String(s.serverAds[serverId]).trim()) ? s.serverAds[serverId]
         : ((s.advText || '').trim() ? s.advText : null);
-    if (houseRaw) cands.push({ raw: houseRaw, campaignId: null });
+    if (houseRaw) cands.push({ raw: houseRaw, campaignId: null, sponsorGuildId: null });
+
+    // A campaign stores its sponsor guild id, so resolve presence by THAT (find a
+    // fleet bot on the guild, or the reserve) instead of re-resolving the invite —
+    // a dead/rate-limited invite must never make a real join look like "no ad".
+    const presenceFor = async (cand) => {
+        if (cand.sponsorGuildId) {
+            const gid = String(cand.sponsorGuildId);
+            const bot = (Array.isArray(clients) ? clients : []).find((c) => c.guilds?.cache?.has(gid));
+            if (bot) return { guildId: gid, bot };
+            if (usertoken.enabled() && await usertoken.coversGuild(gid).catch(() => false)) return { guildId: gid, bot: null };
+            return null;
+        }
+        return resolveSponsorPresence(clients, applyTemplate(serverId, cand.raw)).catch(() => null);
+    };
 
     let sawAny = false, uncertain = false, checks = 0;
     const seenSponsors = new Set();
     for (const cand of cands) {
         if (checks >= 25) break;                 // bound network calls (only REAL checks count)
         if (capReached(cand.raw)) continue;
-        const text = applyTemplate(serverId, cand.raw);
-        const sp = await resolveSponsorPresence(clients, text).catch(() => null);
+        const sp = await presenceFor(cand);
         if (!sp || sp.guildId === String(serverId) || !approvedSponsor(sp.guildId)) continue;
         if (seenSponsors.has(sp.guildId)) continue; // same sponsor via another campaign
         seenSponsors.add(sp.guildId);
         checks++;
         sawAny = true;
         const m = await isMember(sp.bot, sp.guildId, memberId).catch(() => null);
-        if (m === true) { stampSponsorShow(sp.guildId); return { ad: { adText: text, raw: cand.raw, sponsor: sp, campaignId: cand.campaignId } }; }
+        if (m === true) { stampSponsorShow(sp.guildId); return { ad: { adText: applyTemplate(serverId, cand.raw), raw: cand.raw, sponsor: sp, campaignId: cand.campaignId } }; }
         if (m === null) uncertain = true;
     }
     if (uncertain) return { uncertain: true };  // don't 403 on a transient check
@@ -3643,6 +3656,7 @@ function startApiServer(clients, config) {
                 // same candidate pool /api/ad shows from — NOT a fresh random pick,
                 // which could check the wrong sponsor and 403 a valid join).
                 const match = await matchJoinedSponsor(clients, config.ownerId, serverId, memberId);
+                console.log('[API join-check]', JSON.stringify({ dev: userId, botId, serverId, user: memberId, result: match.none ? 'none(no-ad)' : match.notMember ? 'notMember(403)' : match.uncertain ? 'uncertain(503)' : ('sponsor:' + (match.ad && match.ad.sponsor && match.ad.sponsor.guildId)) }));
                 if (match.uncertain) return send(res, 503, { joined: null, error: 'membership check temporarily unavailable, retry' });
 
                 // No join-check sponsor for this server → verify without an ad,
