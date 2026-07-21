@@ -12,6 +12,7 @@ const adminAuth = require('./admin-auth.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes, finalizeLeavers } = require('./joincheck.js');
+const webhooks = require('./webhooks.js');
 const { syncHubMember } = require('./hubrole.js');
 const { logFunds } = require('./fundslog.js');
 const shares = require('./shares.js');
@@ -536,8 +537,31 @@ function enrichCards(clients, records) {
 }
 
 
+// Public changelog for the developer API. Newest first. Surfaced at
+// GET /api/changelog and mirrored on the docs page. `breaking` flags changes
+// that could affect an existing integration.
+const API_VERSION = 1;
+const CHANGELOG = [
+    { date: '2026-07-22', version: 1, breaking: true, changes: [
+        'join-check: "not joined" is now 200 { joined:false, status:"not_joined" } instead of 403 (so it is no longer confused with an auth error).',
+        'join-check: every response now carries a status field: credited | not_joined | already_counted | no_ad | uncertain. The old boolean fields still ship.',
+        'join-check: accepts an optional sponsorId (the guildId /api/ad returned) to pin the check deterministically.',
+        'Errors now include a machine code: { error, code }. /v1/api/* is available as the versioned alias of /api/*.',
+        'Signed webhooks (credited / reverted) can be configured in your cabinet.'
+    ] },
+    { date: '2026-07-19', version: 1, breaking: true, changes: [
+        'join-check no longer needs serverId — the shown sponsor is remembered per (bot, user).',
+        'A membership is credited once per active join; a genuine leave-then-rejoin counts again.'
+    ] },
+    { date: '2026-07-17', version: 1, breaking: true, changes: [
+        '/api/ad and /api/join-check now require botId (and /api/ad requires userId) so per-bot funnels and reward attribution work.'
+    ] }
+];
+
 const DOCS = {
     name: 'Verification API',
+    version: API_VERSION,
+    versioning: 'Call /v1/api/... for the versioned path (bare /api/... stays supported). See GET /api/changelog for what changed.',
     auth: 'Send your API key as `Authorization: Bearer <key>` or `X-API-Key: <key>`.',
     note: 'Two operational endpoints only. Reward your user ONLY when join-check returns status:"credited" (credited:true) — that is the single signal that a real sponsor join happened and you were paid. A join can only be credited when the sponsor server has the Vemoni bot on it (that is how we verify membership). Balance, stats, payout details and withdrawals are viewed in your cabinet on the site, not over the API.',
     errors: 'Errors are JSON: { error: "<human message>", code: "<machine code>" }. 401 invalid_key → bad/missing API key. 400 → a required field is missing (code names it). 429 → rate limited (see Retry-After). 503 uncertain → membership check temporarily unavailable, retry. Business outcomes (not joined / already counted / no ad) are 200, not 4xx.',
@@ -2485,6 +2509,22 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, { key, created: true }, cors);
     }
 
+    // Developer webhook config (signed credited/reverted callbacks). The secret is
+    // never returned — only whether one is set.
+    if (path === '/order/webhook' && req.method === 'GET') {
+        const c = webhooks.getConfig(buyerId);
+        return send(res, 200, { url: (c && c.url) || null, hasSecret: !!(c && c.secret) }, cors);
+    }
+    if (path === '/order/webhook' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const url = String(body.url || '').trim();
+        if (url && !/^https:\/\/.+/i.test(url)) return send(res, 400, { error: 'url must be https://…' }, cors);
+        const rec = webhooks.setConfig(buyerId, url, body.secret != null ? String(body.secret) : undefined);
+        audit.logAction(buyerId, url ? 'webhook.set' : 'webhook.clear', '');
+        return send(res, 200, { url: (rec && rec.url) || null, hasSecret: !!(rec && rec.secret) }, cors);
+    }
+
     // Developer API funnels, grouped by the caller's bots. Started = ad shown
     // (apiclicks), Checked = confirmed sponsor join (joinlinks, roleId 'api'),
     // Stayed = still a member. Unique users per hour/day/week.
@@ -3572,8 +3612,12 @@ function startApiServer(clients, config) {
 
     const server = http.createServer(async (req, res) => {
         try {
-            if (rateLimited(req)) return send(res, 429, { error: 'rate limited' });
-            const p = (new URL(req.url, 'http://x').pathname).replace(/\/+$/, '') || '/';
+            if (rateLimited(req)) return send(res, 429, { error: 'rate limited', code: 'rate_limited' });
+            let p = (new URL(req.url, 'http://x').pathname).replace(/\/+$/, '') || '/';
+            // API versioning: /v1/api/* is the versioned alias of /api/* (bare
+            // /api/* stays supported for existing integrations). Strip the prefix
+            // once here so every route matches unchanged.
+            if (p.startsWith('/v1/api/')) p = p.slice(3);
 
             // CSRF defense for the cookie-authenticated cabinets. The session
             // cookie is SameSite=None (cross-origin admin panel), so a malicious
@@ -3715,6 +3759,11 @@ function startApiServer(clients, config) {
             // site. Only the two operational endpoints (/api/ad, /api/join-check)
             // remain.
 
+            // Public changelog + current version for the API.
+            if (p === '/api/changelog' && req.method === 'GET') {
+                return send(res, 200, { version: API_VERSION, changelog: CHANGELOG }, apiCors);
+            }
+
             // The ad to show on YOUR server right now — the owner's per-server
             // ad if they set one for it, else the global ad (same rule as
             // every network bot). Poll this, show adText to your users.
@@ -3843,6 +3892,7 @@ function startApiServer(clients, config) {
                 await maybeAutoWithdraw(clients, userId).catch(() => null);
                 if (credit.referrerId) maybeAutoWithdraw(clients, credit.referrerId).catch(() => null); // referral bonus credited at join
                 console.log('[API join-check] outcome', JSON.stringify({ botId, user: memberId, sponsor: sponsor.guildId, outcome: 'credited', amount: money(amount) }));
+                webhooks.fire(userId, 'credited', { user: memberId, sponsorId: sponsor.guildId, serverId: effServerId, botId, amount: money(amount) }).catch(() => null);
                 return send(res, 200, { joined: true, credited: true, status: 'credited', sponsor: sponsor.guildId, amount: money(amount) });
             }
 

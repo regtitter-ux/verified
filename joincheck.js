@@ -20,6 +20,7 @@ const partnerlog = require('./partnerlog.js');
 const campaigns = require('./campaigns.js');
 const usertoken = require('./usertoken.js');
 const sponsorshow = require('./sponsorshow.js');
+const webhooks = require('./webhooks.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -377,6 +378,11 @@ async function finalizeLeavers(clients, leaverIds) {
             }
             // Partner activity log — the verification removal (снятие верифки).
             if (o.unverified) { try { partnerlog.logEvent(o.partnerId, { type: 'unverify', reason: 'left', userId: o.userId, guildId: o.cardGuildId, sponsorGuildId: o.sponsorGuildId, roleId: o.roleId, srcId: o.id }); } catch { /* never break the commit */ } }
+            // Developer webhook: an API-delivered join was reversed (member left the
+            // sponsor). Fire 'reverted' to the developer so they can undo the reward.
+            if (o.roleId === 'api' && o.partnerId) {
+                webhooks.fire(o.partnerId, 'reverted', { user: o.userId, sponsorId: o.sponsorGuildId, serverId: o.cardGuildId, botId: r.botId || null, amount: o.amt, join: o.id }).catch(() => null);
+            }
         }
         if (settingsDirty) saveJSON('settings.json', freshSettings);
         if (listDirty) saveJSON('joinlinks.json', fl);
