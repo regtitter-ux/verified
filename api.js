@@ -2421,6 +2421,33 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, { key, created: true }, cors);
     }
 
+    // Developer API funnels, grouped by the caller's bots. Started = ad shown
+    // (apiclicks), Checked = confirmed sponsor join (joinlinks, roleId 'api'),
+    // Stayed = still a member. Unique users per hour/day/week.
+    if (path === '/order/bot-funnels' && req.method === 'GET') {
+        const now = Date.now(), H = 3600000, D = 86400000, W = 604800000;
+        const clicks = loadJSON('apiclicks.json', []);
+        const jl = loadJSON('joinlinks.json', []);
+        const bots = new Map();
+        const ensure = (b) => { if (!bots.has(b)) bots.set(b, { started: [new Set(), new Set(), new Set()], checked: [new Set(), new Set(), new Set()], stayed: [new Set(), new Set(), new Set()] }); return bots.get(b); };
+        const add = (sets, t, u) => { if (t > now - H) sets[0].add(u); if (t > now - D) sets[1].add(u); if (t > now - W) sets[2].add(u); };
+        for (const e of (Array.isArray(clicks) ? clicks : [])) { if (e.c !== buyerId || !e.b) continue; add(ensure(e.b).started, Number(e.t) || 0, e.u); }
+        for (const r of (Array.isArray(jl) ? jl : [])) {
+            if (!r || r.creatorId !== buyerId || r.roleId !== 'api' || !r.botId) continue;
+            const t = Number(r.ts) || 0, rec = ensure(r.botId);
+            add(rec.checked, t, r.userId);
+            if (r.status === 'joined' || r.status === 'settled') add(rec.stayed, t, r.userId);
+        }
+        const win = (s) => ({ hour: s[0].size, day: s[1].size, week: s[2].size });
+        const list = [];
+        for (const [b, v] of bots) {
+            const mini = await userMiniLive(clients, b).catch(() => ({}));
+            list.push({ botId: b, name: mini.name || null, username: mini.username || null, avatar: mini.avatar || null, started: win(v.started), checked: win(v.checked), stayed: win(v.stayed) });
+        }
+        list.sort((a, b) => (b.checked.week - a.checked.week) || (b.started.week - a.started.week));
+        return send(res, 200, { bots: list }, cors);
+    }
+
     // Owner-only: list / add / remove users granted access to the DMALL console.
     if (path === '/order/dmall-access' && req.method === 'GET') {
         if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
