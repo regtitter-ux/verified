@@ -82,8 +82,33 @@ const saveJSON = (file, data) => {
     }
 };
 
+// Atomic read-modify-write — the SANCTIONED way to change a data file. This is
+// the safe alternative to the `loadJSON → mutate → saveJSON` idiom, which is
+// error-prone because loadJSON hands back a SHARED, mtime-cached reference:
+// mutating it and then re-loading the same file elsewhere sees the polluted
+// object (this caused the double-clawback bug). `mutate` hands `fn` a DEEP COPY,
+// so nothing it does can ever leak into the cache, and it saves in one
+// synchronous pass (no `await` inside → atomic under Node's single thread).
+//
+//   mutate('settings.json', (s) => { s[uid].balance += 5; }, {})
+//   const bal = mutate('wallets.json', (w) => { if (w[id].balance < amt) return false;  // abort: no save
+//                                               w[id].balance -= amt; return w[id].balance; }, {})
+//
+// `fn` MUST be synchronous (do any awaits BEFORE calling mutate). Return `false`
+// to abort the write (nothing is saved); any other return value is passed back.
+// Best for the small money files (settings/wallets/shares); the deep copy makes
+// it a poor fit for the multi-MB hot files (verified/joinlinks).
+function mutate(file, fn, fallback = {}) {
+    const cur = loadJSON(file, fallback);
+    const base = (cur && typeof cur === 'object') ? cur : fallback;
+    const draft = JSON.parse(JSON.stringify(base));
+    const ret = fn(draft);
+    if (ret !== false) saveJSON(file, draft);
+    return ret;
+}
+
 // Test-only: drop the parse cache so a fixture reseed between tests is seen even
 // if mtime resolution is coarse. No-op cost in production (never called there).
 const _resetCache = () => _cache.clear();
 
-module.exports = { loadJSON, saveJSON, DATA_DIR, _resetCache };
+module.exports = { loadJSON, saveJSON, mutate, DATA_DIR, _resetCache };
