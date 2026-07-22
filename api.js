@@ -103,6 +103,7 @@ const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
 const dmaccess = require('./dmaccess.js');
 const rateLimit = require('./ratelimit.js');
+const proxy = require('./proxy.js');
 const feed = require('./feed.js');
 const cards = require('./cards.js');
 const audit = require('./auditlog.js');
@@ -2151,9 +2152,10 @@ async function handleAdmin(req, res, path, clients, config) {
             || raw.match(/^([a-z0-9-]{2,32})$/i);
         if (!m) return send(res, 400, { error: 'bad-invite' }, cors);
         const code = m[1];
-        let inv = null;
-        for (const c of clients) { inv = await rateLimit.schedule(() => c.fetchInvite(code)).catch(() => null); if (inv) break; }
-        if (!inv?.guild?.id) return send(res, 400, { error: 'bad-invite' }, cors);
+        // Proxy-resolve (bounded): direct egress IP is invite-rate-limited → a
+        // direct fetchInvite would hang the request.
+        const inv = await proxy.getInvite(code);
+        if (!(inv && inv.guild && inv.guild.id)) return send(res, 400, { error: 'bad-invite' }, cors);
         const list = feed.loadFeed();
         if (list.some((s) => s.code === code || (s.id && s.id === inv.guild.id))) {
             return send(res, 409, { error: 'exists' }, cors);
@@ -2666,9 +2668,11 @@ async function handleBuyer(req, res, path, clients, config) {
         const joins = Math.floor(Number(body?.joins));
         if (!Number.isFinite(joins) || joins < campaigns.MIN_JOINS) return send(res, 400, { error: 'min-joins' }, cors);
 
-        let inv = null;
-        for (const c of clients) { inv = await rateLimit.schedule(() => c.fetchInvite(inviteCode)).catch(() => null); if (inv) break; }
-        const sponsorGuildId = inv?.guild?.id || null;
+        // Resolve via the proxy (bounded, reliable): the direct egress IP is
+        // invite-rate-limited by Discord, so a direct fetchInvite here HANGS
+        // forever ("Создаём счёт…" never finishes). getInvite has its own timeout.
+        const inv = await proxy.getInvite(inviteCode);
+        const sponsorGuildId = (inv && inv.guild && inv.guild.id) || null;
         if (!sponsorGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
 
         const isMgr = managers.isManager(buyerId);
@@ -2899,10 +2903,10 @@ async function handleBuyer(req, res, path, clients, config) {
             || rawInvite.match(/^([a-z0-9-]{2,32})$/i);
         if (!m) return send(res, 400, { error: 'bad-invite' }, cors);
         const inviteCode = m[1];
-        // Link must resolve (works)…
-        let inv = null;
-        for (const cl of clients) { inv = await rateLimit.schedule(() => cl.fetchInvite(inviteCode)).catch(() => null); if (inv) break; }
-        const newGuildId = inv?.guild?.id || null;
+        // Link must resolve — via the proxy (bounded): direct egress IP is
+        // invite-rate-limited, a direct fetchInvite would hang the save request.
+        const inv = await proxy.getInvite(inviteCode);
+        const newGuildId = (inv && inv.guild && inv.guild.id) || null;
         if (!newGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
         // …and the server must be join-checkable: a network bot on it, OR the
         // reserve user account (selfbot) is a member (invisible fallback).
