@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
 const { adKeyOf, joinerCount } = require('./adcreative.js');
 const cryptopay = require('./cryptopay.js');
+const usertoken = require('./usertoken.js');
 
 const pricePer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10; // $ per 100 verified joins (live: applies on Save)
 const minJoins = () => Number(process.env.MIN_ORDER_JOINS) || 1;
@@ -308,6 +309,22 @@ async function reconcile(clients) {
     const verified = loadJSON('verified.json', []);
     let changed = false;
     const now = Date.now();
+
+    // Can this campaign still be DELIVERED right now? A join can only be verified
+    // (and thus credited) when a network bot — or the reserve — is on the sponsor
+    // server. If neither is, the order can't progress no matter what: it must NOT
+    // be reopened, and if it's somehow 'active' below target it should freeze.
+    // Only trust this once the fleet is actually connected (fleet has guilds or
+    // the reserve is enabled) — otherwise a cold start would look "no bot".
+    const fleet = fleetGuildIds(clients);
+    const canJudgePresence = fleet.size > 0;   // only once the fleet is actually connected
+    const serveable = async (c) => {
+        const gid = String(c.sponsorGuildId || '');
+        if (fleet.has(gid)) return true;
+        if (usertoken.enabled()) { try { return await usertoken.coversGuild(gid); } catch { return false; } }
+        return false;
+    };
+
     for (const c of Object.values(camps)) {
         if (!c) continue;
         // Legacy invoice-checkout campaigns are gone — orders are now paid
@@ -330,16 +347,22 @@ async function reconcile(clients) {
             if (delivered(c, verified, camps) >= c.purchased) {
                 c.status = 'complete'; c.completedAt = now; changed = true;
                 notifyBuyer(clients, c, 'complete').catch(() => null);
+            } else if (canJudgePresence && !(await serveable(c))) {
+                // Below target but the sponsor has no bot/reserve → it can't be
+                // delivered. Freeze it back to 'complete' (this is the settled state
+                // for a long-finished order whose bot has left) rather than leaving
+                // it hanging 'active' with nobody serving it.
+                c.status = 'complete'; c.completedAt = c.completedAt || now; changed = true;
+                console.log(`[CAMPAIGN] freeze ${c.id} — no bot/reserve on sponsor ${c.sponsorGuildId}, cannot deliver`);
             }
         } else if (c.status === 'complete') {
-            // Self-heal: a completed order whose delivered count has since dropped
-            // below the target (shared-invite FIFO re-allocation, or leave
-            // clawbacks) must RESUME — otherwise it's frozen 'complete' below its
-            // purchased total and, since only active orders serve ads, can never
-            // reach it. Resume delivering until it genuinely fills again.
-            if (delivered(c, verified, camps) < c.purchased) {
-                c.status = 'active'; c.completedAt = 0; changed = true;
-                console.log(`[CAMPAIGN] resume ${c.id} — delivered fell below target (was complete)`);
+            // Self-heal a completion that dropped below target (shared-invite FIFO
+            // re-allocation, or leave clawbacks) — BUT only reopen it if it can
+            // actually still be delivered (a bot/reserve is on the sponsor). A
+            // long-finished order whose bot has left stays 'complete'.
+            if (delivered(c, verified, camps) < c.purchased && canJudgePresence && await serveable(c)) {
+                c.status = 'active'; changed = true;   // keep completedAt for history
+                console.log(`[CAMPAIGN] resume ${c.id} — below target and still deliverable`);
             }
         }
     }
