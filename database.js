@@ -82,4 +82,8 @@ const saveJSON = (file, data) => {
     }
 };
 
-module.exports = { loadJSON, saveJSON, DATA_DIR };
+// Test-only: drop the parse cache so a fixture reseed between tests is seen even
+// if mtime resolution is coarse. No-op cost in production (never called there).
+const _resetCache = () => _cache.clear();
+
+module.exports = { loadJSON, saveJSON, DATA_DIR, _resetCache };
