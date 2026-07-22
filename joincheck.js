@@ -383,20 +383,16 @@ async function finalizeLeavers(clients, leaverIds) {
         // across multiple records of the same creator); the actual debit is
         // applied to a fresh load in the commit block.
         const before = settings[rec.creatorId] ? (Number(settings[rec.creatorId].balance) || 0) : 0;
-        const outcome = { id: rec.id, kind: 'left', ts: Date.now(), userId: rec.userId, cardGuildId: rec.cardGuildId, sponsorGuildId: rec.guildId, roleId: rec.roleId, partnerId: rec.creatorId };
+        const outcome = { id: rec.id, kind: 'left', ts: Date.now(), userId: rec.userId, cardGuildId: rec.cardGuildId, channelId: rec.channelId, sponsorGuildId: rec.guildId, roleId: rec.roleId, partnerId: rec.creatorId };
         if (settings[rec.creatorId]) {
             settings[rec.creatorId].balance = round2(before - rec.amount);
             outcome.creatorId = rec.creatorId;
             outcome.amt = rec.amount;
         }
         outcomes.push(outcome);
-
-        await logFunds(clients, {
-            type: 'debit', creatorId: rec.creatorId, userId: rec.userId,
-            guildId: rec.cardGuildId, channelId: rec.channelId, amount: rec.amount,
-            sponsorGuildId: rec.guildId,
-            reason: 'Clawback — join reversed: member left the sponsor server'
-        });
+        // The Discord audit embed (logFunds) is fired from the COMMIT block, only
+        // for the debit that WINS the joined→left transition — so a concurrent
+        // trigger that loses the race no longer posts a phantom/duplicate embed.
 
         // Referral: the referrer earned their cut of this join AT JOIN TIME, so
         // reverse EXACTLY that stored bonus now — symmetric, no withdrawn-portion
@@ -409,11 +405,6 @@ async function finalizeLeavers(clients, leaverIds) {
                 settings[referrerId].balance = round2((Number(settings[referrerId].balance) || 0) - refClaw);
                 outcome.referrerId = referrerId;
                 outcome.refClaw = refClaw;
-                await logFunds(clients, {
-                    type: 'debit', creatorId: referrerId, userId: rec.creatorId,
-                    amount: refClaw, sponsorGuildId: rec.guildId,
-                    reason: 'Referral clawback — referred partner\'s join reversed (member left the sponsor server)'
-                });
             }
         }
 
@@ -453,12 +444,17 @@ async function finalizeLeavers(clients, leaverIds) {
                 settingsDirty = true;
                 // Partner activity log — the clawback debit we actually applied.
                 try { partnerlog.logEvent(o.partnerId, { type: 'debit', amount: o.amt, reason: 'left', userId: o.userId, guildId: o.cardGuildId, sponsorGuildId: o.sponsorGuildId, roleId: o.roleId, srcId: o.id }); } catch { /* never break the commit */ }
+                // Audit embed — fire-and-forget (no await keeps the commit atomic).
+                logFunds(clients, { type: 'debit', creatorId: o.creatorId, userId: o.userId, guildId: o.cardGuildId, channelId: o.channelId, amount: o.amt, sponsorGuildId: o.sponsorGuildId, reason: 'Clawback — join reversed: member left the sponsor server' }).catch(() => null);
             }
             if (o.referrerId && freshSettings[o.referrerId]) {
                 freshSettings[o.referrerId].balance = round2((Number(freshSettings[o.referrerId].balance) || 0) - o.refClaw);
                 settingsDirty = true;
                 // Partner activity log — the referrer's referral-bonus clawback.
-                if (o.refClaw > 0) { try { partnerlog.logEvent(o.referrerId, { type: 'debit', amount: o.refClaw, reason: 'referral_clawback', userId: o.userId, sponsorGuildId: o.sponsorGuildId, srcId: `refclaw:${o.id}` }); } catch { /* never break the commit */ } }
+                if (o.refClaw > 0) {
+                    try { partnerlog.logEvent(o.referrerId, { type: 'debit', amount: o.refClaw, reason: 'referral_clawback', userId: o.userId, sponsorGuildId: o.sponsorGuildId, srcId: `refclaw:${o.id}` }); } catch { /* never break the commit */ }
+                    logFunds(clients, { type: 'debit', creatorId: o.referrerId, userId: o.partnerId, amount: o.refClaw, sponsorGuildId: o.sponsorGuildId, reason: 'Referral clawback — referred partner\'s join reversed (member left the sponsor server)' }).catch(() => null);
+                }
                 console.log('[REFERRAL] clawback', JSON.stringify({ referrer: o.referrerId, referral: o.partnerId, sponsor: o.sponsorGuildId, bonus: o.refClaw, join: o.id }));
             }
             // Partner activity log — the verification removal (снятие верифки).

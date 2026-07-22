@@ -74,10 +74,20 @@ async function distributeProfit(clients, profit, nowMs) {
     const toWithdraw = [];
     const credited = {}; // uid -> exact profit share this holder received
 
+    // Guard: shareholder percentages are meant to sum to ≤100 (the house keeps the
+    // remainder). If a misconfiguration pushes the total OVER 100, paying pct/100
+    // each would distribute MORE than the profit — creating money out of nothing.
+    // Scale all shares down proportionally so the total payout never exceeds the
+    // profit; under 100 is left untouched (the house simply keeps the rest).
+    let totalPct = 0;
+    for (const cfg of Object.values(shares)) totalPct += Math.max(0, Number(cfg.pct) || 0);
+    const scale = totalPct > 100 ? 100 / totalPct : 1;
+    if (scale < 1) console.error(`[SHARES] shareholder pct sums to ${totalPct}% (>100) — scaling payouts by ${scale.toFixed(4)} so profit isn't over-distributed. Fix the share config.`);
+
     for (const [uid, cfg] of Object.entries(shares)) {
         const pct = Number(cfg.pct) || 0;
         if (pct <= 0) continue;
-        const exact = profit * (pct / 100);
+        const exact = profit * (pct * scale / 100);
         if (exact <= 0) continue;
         credited[uid] = round4(exact);
 

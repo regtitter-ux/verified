@@ -226,6 +226,38 @@ function refundReserved(userId, amount) {
     logPartnerMoney(userId, { type: 'credit', reason: 'payout_refund', amount, srcId: `prefund:${userId}:${Date.now()}` });
 }
 
+// Record a payout whose outcome is UNKNOWN (the provider may have accepted it
+// before the response was lost) for MANUAL reconciliation. The reserved balance is
+// deliberately NOT refunded — refunding would risk a double payout on the next
+// cycle. The owner is alerted to verify with the provider and refund only if the
+// batch truly never sent.
+function recordReviewPayout(userId, amount, coin, address, why) {
+    const settings = loadJSON('settings.json');
+    if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
+    if (!Array.isArray(settings[userId].withdrawals)) settings[userId].withdrawals = [];
+    settings[userId].withdrawals.push({
+        id: `${userId}-${Date.now()}`, amount, status: 'review', method: 'nowpayments_ltc',
+        payoutId: null, coinAmount: coin, address, reviewReason: String(why || 'response lost'), createdAt: Date.now()
+    });
+    saveJSON('settings.json', settings);
+    logPartnerMoney(userId, { type: 'debit', reason: 'payout_review', amount, srcId: `payoutreview:${userId}:${Date.now()}` });
+}
+
+// Alert the bot OWNER that an LTC payout needs manual reconciliation (NOT retried,
+// NOT refunded — it may already have gone through). 6h dedupe.
+async function alertPayoutReview(clients, userId, amount, coin, address, why) {
+    const settings = loadJSON('settings.json');
+    if (!settings[OWNER_ID]) settings[OWNER_ID] = { advText: '', serverAds: {}, partners: [] };
+    const now = Date.now();
+    if (!(settings[OWNER_ID]._payoutReviewAt && now - settings[OWNER_ID]._payoutReviewAt < 6 * 3600000)) {
+        settings[OWNER_ID]._payoutReviewAt = now; saveJSON('settings.json', settings);
+        await dmOwner(clients, OWNER_ID, {
+            content: `🔎 **LTC payout needs manual check.** User \`${userId}\`, **$${amount.toFixed(2)}** (≈ ${coin} LTC → \`${address}\`). The payout request errored AFTER possibly being accepted (\`${String(why || '').slice(0, 120)}\`), so it was NOT auto-refunded to avoid a double payout. Verify in NOWPayments: if the batch never sent, refund this user manually.`
+        }).catch(() => null);
+    }
+    console.error(`[LTC_PAYOUT] REVIEW needed for ${userId} $${amount}: ${why}`);
+}
+
 // Notify the money owner that a payout was deferred — throttled to once per 6h so a
 // persistently under-funded app doesn't DM-spam on every new credit.
 async function alertPayoutDeferred(clients, userId, amount, why) {
@@ -282,7 +314,15 @@ async function autoPayViaLtc(clients, userId, amount, _seen, eligibleForReferral
 
     let batch;
     try { batch = await nowpayments.createPayout({ address, amount: coin }); }
-    catch (e) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, `LTC payout failed (${e.message || 'unknown'})`); }
+    catch (e) {
+        // AMBIGUOUS: NOWPayments may have accepted the batch before the response
+        // was lost (timeout / dropped connection). Auto-refunding would let the
+        // next earnings cycle pay AGAIN — a DOUBLE payout. So DON'T refund; record
+        // it for manual reconciliation and alert the owner. The reserved balance
+        // stays consumed (holding money pending a check beats paying twice).
+        recordReviewPayout(userId, amount, coin, address, e && e.message);
+        return alertPayoutReview(clients, userId, amount, coin, address, e && e.message);
+    }
     const wd = (batch && Array.isArray(batch.withdrawals) && batch.withdrawals[0]) || null;
     if (!wd && !(batch && batch.id)) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'LTC payout was not accepted'); }
 
