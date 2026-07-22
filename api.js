@@ -3686,60 +3686,6 @@ function startApiServer(clients, config) {
             if (req.method === 'GET' && (p === '/' || p === '/api')) return send(res, 200, DOCS);
             if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
 
-            // TEMP: secret-gated full export of all state JSON (gzipped) for an
-            // off-box backup before a region/volume migration. Active only while
-            // BACKUP_EXPORT_KEY is set; reads local files only (no Discord).
-            if (p === '/admin/_export' && req.method === 'GET') {
-                const EXP_HASH = '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88';
-                const provided = require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex');
-                if (provided !== EXP_HASH) return send(res, 403, { error: 'forbidden' });
-                const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
-                const { DATA_DIR } = require('./database.js');
-                const out = {};
-                let n = 0;
-                for (const f of fs.readdirSync(DATA_DIR).filter((x) => x.endsWith('.json') && !x.endsWith('.tmp'))) {
-                    try { out[f] = fs.readFileSync(pathm.join(DATA_DIR, f), 'utf8'); n++; } catch { /* skip */ }
-                }
-                const gz = zlib.gzipSync(Buffer.from(JSON.stringify(out)));
-                res.writeHead(200, { 'Content-Type': 'application/gzip', 'X-File-Count': String(n), 'Content-Disposition': 'attachment; filename="vemoni-backup.json.gz"' });
-                return res.end(gz);
-            }
-            // TEMP: secret-gated restore — write JSON files back into DATA_DIR from a
-            // gzipped export bundle. Used to seed a fresh-region volume after migration.
-            if (p === '/admin/_import' && req.method === 'POST') {
-                const EXP_HASH = '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88';
-                const provided = require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex');
-                if (provided !== EXP_HASH) return send(res, 403, { error: 'forbidden' });
-                const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
-                const { DATA_DIR } = require('./database.js');
-                const chunks = [];
-                for await (const c of req) chunks.push(c);
-                let bundle;
-                try { bundle = JSON.parse(zlib.gunzipSync(Buffer.concat(chunks)).toString('utf8')); }
-                catch (e) { return send(res, 400, { error: 'bad bundle: ' + e.message }); }
-                let written = 0;
-                for (const [f, content] of Object.entries(bundle)) {
-                    if (!/^[\w.-]+\.json$/.test(f)) continue;
-                    try { fs.writeFileSync(pathm.join(DATA_DIR, f), String(content)); written++; } catch { /* skip */ }
-                }
-                return send(res, 200, { restored: written });
-            }
-
-            // Public: from THIS server's IP, live-time a known-good invite fetch.
-            // Tells us if the egress IP can reach Discord's invite endpoint (a slow/
-            // failing result here while an external probe is instant = the IP is
-            // rate-limited / Cloudflare-banned → no ads resolve). No secrets.
-            if (req.method === 'GET' && p === '/selfcheck') {
-                const ready = (Array.isArray(clients) ? clients : []).filter((c) => { try { return c.isReady(); } catch { return false; } });
-                let invite = 'no ready client';
-                if (ready.length) {
-                    const t0 = Date.now();
-                    try { const inv = await ready[0].rest.get('/invites/discord'); invite = { ok: true, ms: Date.now() - t0, guild: inv && inv.guild && inv.guild.id }; }
-                    catch (e) { invite = { ok: false, ms: Date.now() - t0, status: (e && (e.status || e.code)) || null, msg: (e && e.message) || null }; }
-                }
-                return send(res, 200, { fleet: (Array.isArray(clients) ? clients.length : 0), ready: ready.length, reserve: usertoken.enabled(), invite }, { 'Access-Control-Allow-Origin': '*' });
-            }
-
             // Public: home-page server feed (owner-managed via /admin/feed).
             // Read-only, no credentials → open to any origin. Carries the live retail
             // join price so static marketing pages show the current number, not a
