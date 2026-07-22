@@ -281,12 +281,12 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
     return { amount: perJoin, linkId: id, duplicate: false, referrerId, refBonus };
 }
 
-// Is the sponsor server `gid` being advertised on the network right now?
-// A stamp is written every time a join-check ad for a sponsor is actually
-// displayed. If the last display is older than the stale window, the ad is
-// considered "not showing" — whatever the reason (campaign delivered, house-ad
-// limit hit, kran closed, ad removed, opted out on every partner server).
-const sponsorAdShowing = (gid, shows) => sponsorshow.showing(gid, shows);
+// Is the sponsor's campaign still ACTIVE enough that a leaver should be clawed
+// back? A stamp is written every time a join-check ad for a sponsor is displayed;
+// we use the day-scale era window (NOT the 30-min "showing now" window) so a
+// campaign that merely paused in rotation — or rode out a temporary outage — still
+// claws its leavers. Only a sponsor genuinely dark for ~a day reads as "deal over".
+const sponsorAdShowing = (gid, shows) => sponsorshow.recentlyAdvertised(gid, shows);
 
 // Apply the leave-clawback to the given set of joinlink record IDs: reverse the
 // payout on the card owner (and any referrer bonus already earned via a

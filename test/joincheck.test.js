@@ -80,6 +80,28 @@ test('finalizeLeavers reverses the referral bonus symmetrically', async () => {
     assert.equal(s[REF].balance, 0, 'referrer clawed back exactly the stored bonus');
 });
 
+test('finalizeLeavers STILL claws back when the sponsor advertised within the day (rotation gap ≠ deal over)', async () => {
+    const oneHourAgo = Date.now() - 60 * 60 * 1000; // stale for the 30-min display window, fresh for the 24h clawback window
+    seedBase({
+        joinlinks: [{ id: 'J1', userId: U, guildId: SPON, creatorId: P, amount: 0.05, status: 'joined', cardGuildId: CARD, roleId: R, ts: now }],
+        files: { 'sponsorshow.json': { [SPON]: oneHourAgo } },
+    });
+    await jc.finalizeLeavers([], new Set(['J1']));
+    assert.equal(read('settings.json')[P].balance, 9.95, 'clawed back — a 1h rotation gap must not settle an active-campaign leaver');
+    assert.equal(read('joinlinks.json')[0].status, 'left');
+});
+
+test('finalizeLeavers does NOT claw back when the sponsor has been dark for over a day (deal over → settled)', async () => {
+    const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    seedBase({
+        joinlinks: [{ id: 'J1', userId: U, guildId: SPON, creatorId: P, amount: 0.05, status: 'joined', cardGuildId: CARD, roleId: R, ts: now }],
+        files: { 'sponsorshow.json': { [SPON]: twoDaysAgo } },
+    });
+    await jc.finalizeLeavers([], new Set(['J1']));
+    assert.equal(read('settings.json')[P].balance, 10, 'not clawed — sponsor genuinely stopped advertising');
+    assert.equal(read('joinlinks.json')[0].status, 'settled');
+});
+
 test('finalizeLeavers does NOT claw back when the sponsor ad is not showing (settled)', async () => {
     seedBase({
         joinlinks: [{ id: 'J1', userId: U, guildId: SPON, creatorId: P, amount: 0.05, status: 'joined', cardGuildId: CARD, roleId: R, ts: now }],
