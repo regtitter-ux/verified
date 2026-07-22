@@ -62,7 +62,7 @@ const INVITE_NEG_TTL = 5 * 60 * 1000;    // confirmed-dead invite
 // a reconnect loop (dead token, gateway 4004) can otherwise leave members.fetch /
 // fetchInvite pending indefinitely, freezing the whole verification flow. Race
 // every such call against a hard timeout; a timeout rejects like a transient error.
-const REST_TIMEOUT_MS = 2500;
+const REST_TIMEOUT_MS = 4000;
 function withRestTimeout(promise, ms = REST_TIMEOUT_MS) {
     let t;
     const timeout = new Promise((_, reject) => { t = setTimeout(() => reject(Object.assign(new Error('rest-timeout'), { code: '__TIMEOUT__' })), ms); });
@@ -80,32 +80,13 @@ async function inviteGuildId(client, code) {
         inviteCache.set(code, { guildId, ts: Date.now(), ttl: guildId ? INVITE_TTL : INVITE_NEG_TTL });
         return guildId;
     } catch (e) {
-        // Unknown Invite → cache the negative for a while. A transient failure
-        // (timeout / rate-limit) is cached BRIEFLY too: without this, a batch of
-        // dead/slow invites gets re-fetched on every click and every candidate,
-        // which storms the REST API and slows every verification. Short TTL so a
-        // temporarily rate-limited invite recovers fast.
-        const ttl = e?.code === 10006 ? INVITE_NEG_TTL : 20000;
-        inviteCache.set(code, { guildId: null, ts: Date.now(), ttl });
+        // Only a CONFIRMED-dead invite is cached (Unknown Invite). A transient
+        // failure (timeout / rate-limit) is NOT cached — otherwise it would poison
+        // a valid invite as "dead" and suppress its ad until the TTL expires. Retry
+        // on the next call instead.
+        if (e?.code === 10006) inviteCache.set(code, { guildId: null, ts: Date.now(), ttl: INVITE_NEG_TTL });
         return null;
     }
-}
-
-// First bot to return a guild id for `code`, or null when all fail — resolved in
-// PARALLEL so one slow/stuck bot can't serialize the lookup (a bot stuck
-// reconnecting on a dead token would otherwise add a full timeout each).
-function firstResolvedGuildId(clients, code) {
-    return new Promise((resolve) => {
-        let pending = clients.length, settled = false;
-        if (!pending) return resolve(null);
-        for (const c of clients) {
-            inviteGuildId(c, code).then((gid) => {
-                if (settled) return;
-                if (gid) { settled = true; resolve(gid); }
-                else if (--pending === 0) resolve(null);
-            }, () => { if (!settled && --pending === 0) resolve(null); });
-        }
-    });
 }
 
 // Resolve the sponsor server referenced in an ad and check whether any network
@@ -113,15 +94,20 @@ function firstResolvedGuildId(clients, code) {
 async function resolveSponsorPresence(clients, adText) {
     const codes = extractInviteCodes(adText);
     const all = Array.isArray(clients) ? clients : [];
-    // Only ask bots that are actually CONNECTED. A bot stuck reconnecting (dead
-    // token / gateway 4004) makes fetchInvite hang until the timeout, and looping
-    // them sequentially piled those timeouts up (~6s each) — that is what froze
-    // verification for everyone. Fall back to the full list only if none report ready.
+    // Only ask bots that are actually CONNECTED — a bot stuck reconnecting (dead
+    // token / gateway 4004) makes fetchInvite hang until the timeout; skipping it
+    // is what keeps this fast. But resolve SEQUENTIALLY (break on first success):
+    // fetchInvite is a public lookup that any connected bot can answer, so one
+    // call per invite is enough. Fanning it out to every bot at once (the earlier
+    // "parallel" attempt) multiplied REST calls ~N×, tripping Discord rate limits
+    // and suppressing ads network-wide. Fall back to the full list only if none
+    // report ready.
     const ready = all.filter((c) => { try { return c.isReady(); } catch { return false; } });
     const pool = ready.length ? ready : all;
     if (!codes.length || !pool.length) return null;
     for (const code of codes) {
-        const guildId = await firstResolvedGuildId(pool, code);
+        let guildId = null;
+        for (const c of pool) { guildId = await inviteGuildId(c, code); if (guildId) break; }
         if (!guildId) continue;
         const bot = pool.find((c) => c.guilds.cache.has(guildId));
         if (bot) return { guildId, bot };
