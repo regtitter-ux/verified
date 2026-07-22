@@ -14,6 +14,7 @@
 // later manual click.
 const { loadJSON, saveJSON } = require('./database.js');
 const { isMember, creditJoin } = require('./joincheck.js');
+const { isDuplicateJoin } = require('./verifyrules.js');
 const { touchCreative, maybeNotifyAdComplete } = require('./adcreative.js');
 const { logFunds } = require('./fundslog.js');
 const { syncHubMember } = require('./hubrole.js');
@@ -42,8 +43,7 @@ function record(entry) {
 }
 
 function alreadyJoined(userId, sponsorGuildId) {
-    const links = loadJSON('joinlinks.json', []);
-    return (Array.isArray(links) ? links : []).some((r) => r && (r.status === 'joined' || r.status === 'settled') && r.userId === userId && r.guildId === sponsorGuildId);
+    return isDuplicateJoin(loadJSON('joinlinks.json', []), userId, sponsorGuildId);
 }
 function alreadyVerified(userId, cardGuildId, roleId) {
     const v = loadJSON('verified.json', []);

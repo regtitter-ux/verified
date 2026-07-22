@@ -15,6 +15,7 @@ const {
 } = require('./payouts.js');
 const { startApiServer, createApiKey } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave, extractInviteCodes, startInviteWarm } = require('./joincheck.js');
+const { shouldCountJoin, isDuplicateJoin } = require('./verifyrules.js');
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
@@ -1559,19 +1560,16 @@ const startBot = (token) => {
             // One real invite = one join: if this user already has a live
             // ('joined') join record for THIS sponsor (they verified elsewhere
             // in the network), don't pay or count them again — just verify.
-            let isDupJoin = false;
-            if (sponsor) {
-                const links = loadJSON('joinlinks.json', []);
-                isDupJoin = (Array.isArray(links) ? links : []).some(
-                    (r) => r && (r.status === 'joined' || r.status === 'settled') && r.userId === user.id && r.guildId === sponsor.guildId
-                );
-            }
+            const isDupJoin = sponsor ? isDuplicateJoin(loadJSON('joinlinks.json', []), user.id, sponsor.guildId) : false;
+            // Single predicate for BOTH counting the order AND paying the partner —
+            // so the two can never diverge (see verifyrules.js).
+            const counts = shouldCountJoin({ roleId, adShown: pending?.adShown, adRaw: pending?.adRaw, sponsor, isDupJoin });
 
             // adKey (the "paid" marker used by every stat) is set only for a
             // CONFIRMED join-check join — the only thing that pays now. A
             // verification with no sponsor bot, a duplicate join, or no ad is
             // tagged noAd instead, so it never counts as a paid ad verification.
-            const adKey = (roleId && pending?.adShown && pending?.adRaw && sponsor && !isDupJoin) ? touchCreative(pending.adRaw) : '';
+            const adKey = counts ? touchCreative(pending.adRaw) : '';
             const rec = { id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() };
             if (adKey) rec.adKey = adKey;
             // Verification that displayed no ad = organic activity. Tagged so
@@ -1614,7 +1612,7 @@ const startBot = (token) => {
             // bot on the ad's server) are disabled entirely: such ads are never
             // shown, so there's nothing to pay for. Ad-free verifications and
             // duplicate joins accrue nothing.
-            if (roleId && pending?.adShown && sponsor && !isDupJoin) {
+            if (counts) {
                 const channelId = message.channelId; // channel the verification card lives in
                 // Manager economics: a sales manager's campaign simply brings
                 // less revenue ($9/100). No commission is paid — the manager
