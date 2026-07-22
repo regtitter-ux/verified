@@ -62,7 +62,7 @@ const INVITE_NEG_TTL = 5 * 60 * 1000;    // confirmed-dead invite
 // a reconnect loop (dead token, gateway 4004) can otherwise leave members.fetch /
 // fetchInvite pending indefinitely, freezing the whole verification flow. Race
 // every such call against a hard timeout; a timeout rejects like a transient error.
-const REST_TIMEOUT_MS = 6000;
+const REST_TIMEOUT_MS = 5000;
 function withRestTimeout(promise, ms = REST_TIMEOUT_MS) {
     let t;
     const timeout = new Promise((_, reject) => { t = setTimeout(() => reject(Object.assign(new Error('rest-timeout'), { code: '__TIMEOUT__' })), ms); });
@@ -86,19 +86,39 @@ async function inviteGuildId(client, code) {
     }
 }
 
+// First bot to return a guild id for `code`, or null when all fail — resolved in
+// PARALLEL so one slow/stuck bot can't serialize the lookup (a bot stuck
+// reconnecting on a dead token would otherwise add a full timeout each).
+function firstResolvedGuildId(clients, code) {
+    return new Promise((resolve) => {
+        let pending = clients.length, settled = false;
+        if (!pending) return resolve(null);
+        for (const c of clients) {
+            inviteGuildId(c, code).then((gid) => {
+                if (settled) return;
+                if (gid) { settled = true; resolve(gid); }
+                else if (--pending === 0) resolve(null);
+            }, () => { if (!settled && --pending === 0) resolve(null); });
+        }
+    });
+}
+
 // Resolve the sponsor server referenced in an ad and check whether any network
 // bot is a member of it. Returns { guildId, bot } if a bot is present, else null.
 async function resolveSponsorPresence(clients, adText) {
     const codes = extractInviteCodes(adText);
-    if (!codes.length || !clients.length) return null;
+    const all = Array.isArray(clients) ? clients : [];
+    // Only ask bots that are actually CONNECTED. A bot stuck reconnecting (dead
+    // token / gateway 4004) makes fetchInvite hang until the timeout, and looping
+    // them sequentially piled those timeouts up (~6s each) — that is what froze
+    // verification for everyone. Fall back to the full list only if none report ready.
+    const ready = all.filter((c) => { try { return c.isReady(); } catch { return false; } });
+    const pool = ready.length ? ready : all;
+    if (!codes.length || !pool.length) return null;
     for (const code of codes) {
-        // Try each bot as the resolver until one succeeds — so a single bot being
-        // rate-limited / unable to fetch this invite doesn't suppress the ad. The
-        // per-code cache short-circuits once any bot resolves it.
-        let guildId = null;
-        for (const c of clients) { guildId = await inviteGuildId(c, code); if (guildId) break; }
+        const guildId = await firstResolvedGuildId(pool, code);
         if (!guildId) continue;
-        const bot = clients.find((c) => c.guilds.cache.has(guildId));
+        const bot = pool.find((c) => c.guilds.cache.has(guildId));
         if (bot) return { guildId, bot };
         // Reserve (invisible to buyers): no network bot on this server, but the
         // personal account is a member → joins can still be verified via the user
