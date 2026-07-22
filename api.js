@@ -3686,6 +3686,43 @@ function startApiServer(clients, config) {
             if (req.method === 'GET' && (p === '/' || p === '/api')) return send(res, 200, DOCS);
             if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
 
+            // TEMP: secret-gated full export of all state JSON (gzipped) for an
+            // off-box backup before a region/volume migration. Active only while
+            // BACKUP_EXPORT_KEY is set; reads local files only (no Discord).
+            if (p === '/admin/_export' && req.method === 'GET') {
+                const key = process.env.BACKUP_EXPORT_KEY;
+                if (!key || req.headers['x-export-key'] !== key) return send(res, 403, { error: 'forbidden' });
+                const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
+                const { DATA_DIR } = require('./database.js');
+                const out = {};
+                let n = 0;
+                for (const f of fs.readdirSync(DATA_DIR).filter((x) => x.endsWith('.json') && !x.endsWith('.tmp'))) {
+                    try { out[f] = fs.readFileSync(pathm.join(DATA_DIR, f), 'utf8'); n++; } catch { /* skip */ }
+                }
+                const gz = zlib.gzipSync(Buffer.from(JSON.stringify(out)));
+                res.writeHead(200, { 'Content-Type': 'application/gzip', 'X-File-Count': String(n), 'Content-Disposition': 'attachment; filename="vemoni-backup.json.gz"' });
+                return res.end(gz);
+            }
+            // TEMP: secret-gated restore — write JSON files back into DATA_DIR from a
+            // gzipped export bundle. Used to seed a fresh-region volume after migration.
+            if (p === '/admin/_import' && req.method === 'POST') {
+                const key = process.env.BACKUP_EXPORT_KEY;
+                if (!key || req.headers['x-export-key'] !== key) return send(res, 403, { error: 'forbidden' });
+                const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
+                const { DATA_DIR } = require('./database.js');
+                const chunks = [];
+                for await (const c of req) chunks.push(c);
+                let bundle;
+                try { bundle = JSON.parse(zlib.gunzipSync(Buffer.concat(chunks)).toString('utf8')); }
+                catch (e) { return send(res, 400, { error: 'bad bundle: ' + e.message }); }
+                let written = 0;
+                for (const [f, content] of Object.entries(bundle)) {
+                    if (!/^[\w.-]+\.json$/.test(f)) continue;
+                    try { fs.writeFileSync(pathm.join(DATA_DIR, f), String(content)); written++; } catch { /* skip */ }
+                }
+                return send(res, 200, { restored: written });
+            }
+
             // Public: from THIS server's IP, live-time a known-good invite fetch.
             // Tells us if the egress IP can reach Discord's invite endpoint (a slow/
             // failing result here while an external probe is instant = the IP is
