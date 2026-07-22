@@ -22,6 +22,7 @@ const usertoken = require('./usertoken.js');
 const sponsorshow = require('./sponsorshow.js');
 const webhooks = require('./webhooks.js');
 const rateLimit = require('./ratelimit.js');
+const proxy = require('./proxy.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -70,24 +71,22 @@ function withRestTimeout(promise, ms = REST_TIMEOUT_MS) {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
 }
 
-async function inviteGuildId(client, code) {
+async function inviteGuildId(code) {
     const hit = inviteCache.get(code);
     if (hit && Date.now() - hit.ts < hit.ttl) return hit.guildId;
-    try {
-        const inv = await withRestTimeout(rateLimit.schedule(() => client.fetchInvite(code)));
-        const guildId = inv?.guild?.id || null;
-        // A successful fetch that yields no guild id (group-DM invite / odd
-        // Discord response) is treated as a short negative, not cached 6h.
-        inviteCache.set(code, { guildId, ts: Date.now(), ttl: guildId ? INVITE_TTL : INVITE_NEG_TTL });
-        return guildId;
-    } catch (e) {
-        // Only a CONFIRMED-dead invite is cached (Unknown Invite). A transient
-        // failure (timeout / rate-limit) is NOT cached — otherwise it would poison
-        // a valid invite as "dead" and suppress its ad until the TTL expires. Retry
-        // on the next call instead.
-        if (e?.code === 10006) inviteCache.set(code, { guildId: null, ts: Date.now(), ttl: INVITE_NEG_TTL });
-        return null;
-    }
+    // Invite lookup is a PUBLIC request (no bot token), so it doesn't matter which
+    // bot asks — one fetch resolves it. It is routed through the proxy when
+    // DISCORD_PROXY is set (invite endpoint is the ban-prone one), else direct.
+    const inv = await rateLimit.schedule(() => proxy.getInvite(code));
+    // Transient failure (timeout / rate-limit / 5xx) → NOT cached: a blip must
+    // never poison a valid invite as "dead" and suppress its ad. Retry next call.
+    if (!inv) return null;
+    // Only a CONFIRMED-dead invite (404 Unknown Invite) is cached as negative.
+    if (inv.notFound) { inviteCache.set(code, { guildId: null, ts: Date.now(), ttl: INVITE_NEG_TTL }); return null; }
+    const guildId = inv.guild?.id || null;
+    // A 200 with no guild id (group-DM invite / odd response) → short negative, not 6h.
+    inviteCache.set(code, { guildId, ts: Date.now(), ttl: guildId ? INVITE_TTL : INVITE_NEG_TTL });
+    return guildId;
 }
 
 // Resolve the sponsor server referenced in an ad and check whether any network
@@ -106,20 +105,14 @@ async function resolveSponsorPresence(clients, adText) {
     const ready = all.filter((c) => { try { return c.isReady(); } catch { return false; } });
     const pool = ready.length ? ready : all;
     if (!codes.length || !pool.length) return null;
-    // Total budget for resolving THIS ad. fetchInvite is a global lookup any
-    // connected bot can answer, so normally the first bot resolves instantly. If
-    // fetches are timing out (e.g. the egress IP is being rate-limited), don't
-    // grind through every bot × every code — give up fast so verification stays
-    // responsive (shows no ad rather than hanging).
+    // Total budget for resolving THIS ad. The invite lookup is a single public
+    // request (see inviteGuildId — one fetch per code, not per bot), so if it's
+    // timing out (e.g. the egress IP is rate-limited) we give up fast rather than
+    // hang, keeping verification responsive (shows no ad rather than freezing).
     const deadline = Date.now() + 3500;
     for (const code of codes) {
-        let guildId = null;
-        for (const c of pool) {
-            if (Date.now() > deadline) break;
-            guildId = await inviteGuildId(c, code);
-            if (guildId) break;
-        }
-        if (Date.now() > deadline && !guildId) break;
+        if (Date.now() > deadline) break;
+        const guildId = await inviteGuildId(code);
         if (!guildId) continue;
         const bot = pool.find((c) => c.guilds.cache.has(guildId));
         if (bot) return { guildId, bot };

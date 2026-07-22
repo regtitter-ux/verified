@@ -15,6 +15,7 @@ const { adKeyOf, joinerCount } = require('./adcreative.js');
 const cryptopay = require('./cryptopay.js');
 const usertoken = require('./usertoken.js');
 const rateLimit = require('./ratelimit.js');
+const proxy = require('./proxy.js');
 
 const pricePer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10; // $ per 100 verified joins (live: applies on Save)
 const minJoins = () => Number(process.env.MIN_ORDER_JOINS) || 1;
@@ -297,10 +298,11 @@ const inviteCodeOf = (invite) => { const m = String(invite || '').match(/([a-z0-
 async function isInviteValid(clients, invite) {
     const code = inviteCodeOf(invite);
     if (!code) return false;
-    const client = (Array.isArray(clients) ? clients : [])[0];
-    if (!client) return null;
-    try { const inv = await rateLimit.schedule(() => client.fetchInvite(code)); return Boolean(inv?.guild?.id); }
-    catch (e) { return e?.code === 10006 ? false : null; } // 10006 = Unknown Invite
+    // Public invite lookup (optionally proxied), independent of any bot.
+    const inv = await rateLimit.schedule(() => proxy.getInvite(code));
+    if (!inv) return null;              // transient (timeout / rate-limit) — don't act
+    if (inv.notFound) return false;     // 404 Unknown Invite → genuinely dead
+    return Boolean(inv.guild && inv.guild.id);
 }
 
 // Periodic reconciliation: activate paid pending campaigns and complete
