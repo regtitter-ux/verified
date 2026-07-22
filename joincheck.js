@@ -105,9 +105,20 @@ async function resolveSponsorPresence(clients, adText) {
     const ready = all.filter((c) => { try { return c.isReady(); } catch { return false; } });
     const pool = ready.length ? ready : all;
     if (!codes.length || !pool.length) return null;
+    // Total budget for resolving THIS ad. fetchInvite is a global lookup any
+    // connected bot can answer, so normally the first bot resolves instantly. If
+    // fetches are timing out (e.g. the egress IP is being rate-limited), don't
+    // grind through every bot × every code — give up fast so verification stays
+    // responsive (shows no ad rather than hanging).
+    const deadline = Date.now() + 3500;
     for (const code of codes) {
         let guildId = null;
-        for (const c of pool) { guildId = await inviteGuildId(c, code); if (guildId) break; }
+        for (const c of pool) {
+            if (Date.now() > deadline) break;
+            guildId = await inviteGuildId(c, code);
+            if (guildId) break;
+        }
+        if (Date.now() > deadline && !guildId) break;
         if (!guildId) continue;
         const bot = pool.find((c) => c.guilds.cache.has(guildId));
         if (bot) return { guildId, bot };
