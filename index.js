@@ -1348,7 +1348,9 @@ const startBot = (token) => {
                     // as join-checkable so a campaign with no bot but where the owner
                     // joined by request still shows and verifies.
                     if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) fleet.add(g); } catch { /* ignore */ } }
+                    console.log('[VERIFY] c1-covered u=' + user.id + ' ms=' + (Date.now() - _vT0));
                     const eligibleHere = campaigns.eligibleForGuild(guild.id, verified, fleet);
+                    console.log('[VERIFY] c2-eligible u=' + user.id + ' n=' + eligibleHere.length + ' ms=' + (Date.now() - _vT0));
                     if (eligibleHere.length) hadEligible = true;
                     let ordered = campaigns.weightedOrder(eligibleHere);
                     // Partner per-server controls (set in the partner cabinet by
@@ -1388,9 +1390,12 @@ const startBot = (token) => {
                         if (capReached(cand.invite)) { sawCapped = true; continue; } // cheap, no network → unbounded
                         if (checks >= 10) break;                           // bound the network calls
                         checks++;
+                        console.log('[VERIFY] cand' + checks + ' resolve u=' + user.id + ' ms=' + (Date.now() - _vT0));
                         const ad = await resolveCand(cand);
+                        console.log('[VERIFY] cand' + checks + ' resolved=' + Boolean(ad) + ' ms=' + (Date.now() - _vT0));
                         if (!ad) continue;                                 // unresolvable / self → try next
                         const m = await isMemberCached(ad.sp.bot, ad.sp.guildId, user.id);
+                        console.log('[VERIFY] cand' + checks + ' member=' + m + ' ms=' + (Date.now() - _vT0));
                         if (m === true) { sawMember = true; continue; }    // already a member → try next
                         cands.push({ cand, ad, definite: m === false, hidden: isHidden(cand.id) }); // not a member (or uncertain) → showable
                         if (cands.filter((c) => c.definite && !c.hidden).length >= 2) break; // enough NON-HIDDEN for main + extra
@@ -1419,8 +1424,9 @@ const startBot = (token) => {
                     }
                     // Carry the bonus ad picked in the SAME pass — no second scan.
                     if (extraPickC) firstExtra = { campaignId: extraPickC.cand.id, raw: extraPickC.ad.raw, sponsorGuildId: extraPickC.ad.sp.guildId, url: extraad.inviteUrl(extraPickC.ad.raw) };
-                } catch (e) { /* never let campaign selection break verification */ }
+                } catch (e) { console.error('[VERIFY] selection error u=' + user.id, e && e.message); }
             }
+            console.log('[VERIFY] c3-sel-done u=' + user.id + ' latest=' + Boolean(latest) + ' picked=' + campaignPicked + ' ms=' + (Date.now() - _vT0));
 
             // House ads (owner/partner advText) weren't validated above — apply
             // the same cap + resolvable-sponsor / not-self / not-already-member
@@ -1441,6 +1447,7 @@ const startBot = (token) => {
                     try { sponsorshow.stamp(sp.guildId); } catch { /* stamping must never break verification */ }
                 }
             }
+            console.log('[VERIFY] c4-house-done u=' + user.id + ' latest=' + Boolean(latest) + ' ms=' + (Date.now() - _vT0));
 
             // Finalize WHY no ad is shown (only when nothing was displayed and a
             // hard kill switch didn't already set it). Most-actionable reason wins:
