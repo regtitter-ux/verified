@@ -3687,27 +3687,6 @@ function startApiServer(clients, config) {
             if (req.method === 'GET' && (p === '/' || p === '/api')) return send(res, 200, DOCS);
             if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
 
-            // TEMP: secret-gated proxy probe — runs a real invite lookup through the
-            // configured DISCORD_PROXY from Railway's egress and reports the outcome,
-            // so we can validate a proxy that can't be tested from a port-restricted
-            // dev box. Remove once the proxy is confirmed.
-            if (p === '/admin/_proxyprobe' && req.method === 'GET') {
-                const EXP_HASH = '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88';
-                const provided = require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex');
-                if (provided !== EXP_HASH) return send(res, 403, { error: 'forbidden' });
-                const proxy = require('./proxy.js');
-                const t0 = Date.now();
-                let result;
-                try { result = await proxy.getInvite('discord-developers'); } catch (e) { result = { error: e && e.message }; }
-                return send(res, 200, {
-                    proxyEnabled: proxy.enabled(),
-                    ms: Date.now() - t0,
-                    ok: !!(result && result.guild && result.guild.id),
-                    guild: result && result.guild ? result.guild.name : null,
-                    detail: result && result.guild ? undefined : result
-                });
-            }
-
             // Public: home-page server feed (owner-managed via /admin/feed).
             // Read-only, no credentials → open to any origin. Carries the live retail
             // join price so static marketing pages show the current number, not a
