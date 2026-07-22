@@ -58,11 +58,22 @@ const inviteCache = new Map();
 const INVITE_TTL = 6 * 3600 * 1000;      // positive result
 const INVITE_NEG_TTL = 5 * 60 * 1000;    // confirmed-dead invite
 
+// A single Discord REST call must never hang the caller forever — a bot stuck in
+// a reconnect loop (dead token, gateway 4004) can otherwise leave members.fetch /
+// fetchInvite pending indefinitely, freezing the whole verification flow. Race
+// every such call against a hard timeout; a timeout rejects like a transient error.
+const REST_TIMEOUT_MS = 6000;
+function withRestTimeout(promise, ms = REST_TIMEOUT_MS) {
+    let t;
+    const timeout = new Promise((_, reject) => { t = setTimeout(() => reject(Object.assign(new Error('rest-timeout'), { code: '__TIMEOUT__' })), ms); });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+}
+
 async function inviteGuildId(client, code) {
     const hit = inviteCache.get(code);
     if (hit && Date.now() - hit.ts < hit.ttl) return hit.guildId;
     try {
-        const inv = await client.fetchInvite(code);
+        const inv = await withRestTimeout(client.fetchInvite(code));
         const guildId = inv?.guild?.id || null;
         // A successful fetch that yields no guild id (group-DM invite / odd
         // Discord response) is treated as a short negative, not cached 6h.
@@ -105,11 +116,11 @@ async function isMember(bot, guildId, userId) {
     const g = bot?.guilds.cache.get(guildId);
     if (g) {
         try {
-            await g.members.fetch({ user: userId, force: true });
+            await withRestTimeout(g.members.fetch({ user: userId, force: true }));
             return true;
         } catch (e) {
             if (e?.code === 10007 || e?.code === 10013) return false; // Unknown Member / Unknown User
-            return null;
+            return null;                                              // incl. timeout → uncertain
         }
     }
     // Reserve path: no bot on this server → read membership via the user token,
