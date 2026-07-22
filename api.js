@@ -3690,8 +3690,9 @@ function startApiServer(clients, config) {
             // off-box backup before a region/volume migration. Active only while
             // BACKUP_EXPORT_KEY is set; reads local files only (no Discord).
             if (p === '/admin/_export' && req.method === 'GET') {
-                const key = process.env.BACKUP_EXPORT_KEY;
-                if (!key || req.headers['x-export-key'] !== key) return send(res, 403, { error: 'forbidden' });
+                const EXP_HASH = '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88';
+                const provided = require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex');
+                if (provided !== EXP_HASH) return send(res, 403, { error: 'forbidden' });
                 const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
                 const { DATA_DIR } = require('./database.js');
                 const out = {};
@@ -3706,8 +3707,9 @@ function startApiServer(clients, config) {
             // TEMP: secret-gated restore — write JSON files back into DATA_DIR from a
             // gzipped export bundle. Used to seed a fresh-region volume after migration.
             if (p === '/admin/_import' && req.method === 'POST') {
-                const key = process.env.BACKUP_EXPORT_KEY;
-                if (!key || req.headers['x-export-key'] !== key) return send(res, 403, { error: 'forbidden' });
+                const EXP_HASH = '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88';
+                const provided = require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex');
+                if (provided !== EXP_HASH) return send(res, 403, { error: 'forbidden' });
                 const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
                 const { DATA_DIR } = require('./database.js');
                 const chunks = [];
