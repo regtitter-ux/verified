@@ -45,10 +45,6 @@ function record(entry) {
 function alreadyJoined(userId, sponsorGuildId) {
     return isDuplicateJoin(loadJSON('joinlinks.json', []), userId, sponsorGuildId);
 }
-function alreadyVerified(userId, cardGuildId, roleId) {
-    const v = loadJSON('verified.json', []);
-    return (Array.isArray(v) ? v : []).some((u) => u && u.id === userId && u.guildId === cardGuildId && (u.roleId || null) === (roleId || null));
-}
 // A COUNTED verification — a verified.json entry that actually carries an adKey
 // (i.e. the join was tallied toward the order). A bare `noAd` placeholder does
 // NOT count: it must not stop auto-join from later tallying the confirmed join.

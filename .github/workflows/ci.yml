@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      # Syntax-check every module (catches a broken require/parse before deploy).
+      - name: Syntax check all modules
+        run: |
+          set -e
+          for f in $(git ls-files '*.js'); do node --check "$f"; done
+      # Lint — fails only on ERRORS (e.g. undefined vars, duplicate keys), not on
+      # the legacy unused-var warnings.
+      - name: Lint
+        run: npm run lint
+      # Money-invariant test suite (creditJoin / finalizeLeavers / delivered /
+      # wallet / shares / ledger / verifyrules). A red suite must block the merge.
+      - name: Tests
+        run: npm test

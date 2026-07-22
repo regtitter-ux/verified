@@ -766,5 +766,5 @@ module.exports = {
     PERSONALIZED_BOT_ID, FAQ_TEXT, buildFaqView,
     register, fix, edit, remove, republish, restore, restoreInfo, resetRole,
     trackClick, clickWindows, clicksForKey, clickWindowsMulti, clicksForKeyMulti, cardRoleIds, scanAll, getScanState,
-    markDeleted, removeCard, sweepDeleted, startCardSweep, handleMessageDelete
+    markDeleted, sweepDeleted, startCardSweep, handleMessageDelete
 };
