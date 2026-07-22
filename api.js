@@ -102,6 +102,7 @@ function queueResolver(camps, verified, covered) {
 const campaigns = require('./campaigns.js');
 const managers = require('./managers.js');
 const dmaccess = require('./dmaccess.js');
+const rateLimit = require('./ratelimit.js');
 const feed = require('./feed.js');
 const cards = require('./cards.js');
 const audit = require('./auditlog.js');
@@ -2151,7 +2152,7 @@ async function handleAdmin(req, res, path, clients, config) {
         if (!m) return send(res, 400, { error: 'bad-invite' }, cors);
         const code = m[1];
         let inv = null;
-        for (const c of clients) { inv = await c.fetchInvite(code).catch(() => null); if (inv) break; }
+        for (const c of clients) { inv = await rateLimit.schedule(() => c.fetchInvite(code)).catch(() => null); if (inv) break; }
         if (!inv?.guild?.id) return send(res, 400, { error: 'bad-invite' }, cors);
         const list = feed.loadFeed();
         if (list.some((s) => s.code === code || (s.id && s.id === inv.guild.id))) {
@@ -2666,7 +2667,7 @@ async function handleBuyer(req, res, path, clients, config) {
         if (!Number.isFinite(joins) || joins < campaigns.MIN_JOINS) return send(res, 400, { error: 'min-joins' }, cors);
 
         let inv = null;
-        for (const c of clients) { inv = await c.fetchInvite(inviteCode).catch(() => null); if (inv) break; }
+        for (const c of clients) { inv = await rateLimit.schedule(() => c.fetchInvite(inviteCode)).catch(() => null); if (inv) break; }
         const sponsorGuildId = inv?.guild?.id || null;
         if (!sponsorGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
 
@@ -2900,7 +2901,7 @@ async function handleBuyer(req, res, path, clients, config) {
         const inviteCode = m[1];
         // Link must resolve (works)…
         let inv = null;
-        for (const cl of clients) { inv = await cl.fetchInvite(inviteCode).catch(() => null); if (inv) break; }
+        for (const cl of clients) { inv = await rateLimit.schedule(() => cl.fetchInvite(inviteCode)).catch(() => null); if (inv) break; }
         const newGuildId = inv?.guild?.id || null;
         if (!newGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
         // …and the server must be join-checkable: a network bot on it, OR the

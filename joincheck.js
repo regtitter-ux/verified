@@ -21,6 +21,7 @@ const campaigns = require('./campaigns.js');
 const usertoken = require('./usertoken.js');
 const sponsorshow = require('./sponsorshow.js');
 const webhooks = require('./webhooks.js');
+const rateLimit = require('./ratelimit.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
@@ -73,7 +74,7 @@ async function inviteGuildId(client, code) {
     const hit = inviteCache.get(code);
     if (hit && Date.now() - hit.ts < hit.ttl) return hit.guildId;
     try {
-        const inv = await withRestTimeout(client.fetchInvite(code));
+        const inv = await withRestTimeout(rateLimit.schedule(() => client.fetchInvite(code)));
         const guildId = inv?.guild?.id || null;
         // A successful fetch that yields no guild id (group-DM invite / odd
         // Discord response) is treated as a short negative, not cached 6h.
@@ -138,7 +139,7 @@ async function isMember(bot, guildId, userId) {
     const g = bot?.guilds.cache.get(guildId);
     if (g) {
         try {
-            await withRestTimeout(g.members.fetch({ user: userId, force: true }));
+            await withRestTimeout(rateLimit.schedule(() => g.members.fetch({ user: userId, force: true })));
             return true;
         } catch (e) {
             if (e?.code === 10007 || e?.code === 10013) return false; // Unknown Member / Unknown User
@@ -371,7 +372,7 @@ async function finalizeLeavers(clients, leaverIds) {
             const cardBot = clients.find((c) => c.guilds.cache.has(rec.cardGuildId));
             const g = cardBot?.guilds.cache.get(rec.cardGuildId);
             if (g) {
-                const m = await g.members.fetch(rec.userId).catch(() => null);
+                const m = await rateLimit.schedule(() => g.members.fetch(rec.userId)).catch(() => null);
                 if (m && m.roles.cache.has(rec.roleId)) await m.roles.remove(rec.roleId).catch(() => null);
             }
             verifiedRemovals.push({ userId: rec.userId, cardGuildId: rec.cardGuildId, roleId: rec.roleId });

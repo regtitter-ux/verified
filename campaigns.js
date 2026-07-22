@@ -14,6 +14,7 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { adKeyOf, joinerCount } = require('./adcreative.js');
 const cryptopay = require('./cryptopay.js');
 const usertoken = require('./usertoken.js');
+const rateLimit = require('./ratelimit.js');
 
 const pricePer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10; // $ per 100 verified joins (live: applies on Save)
 const minJoins = () => Number(process.env.MIN_ORDER_JOINS) || 1;
@@ -298,7 +299,7 @@ async function isInviteValid(clients, invite) {
     if (!code) return false;
     const client = (Array.isArray(clients) ? clients : [])[0];
     if (!client) return null;
-    try { const inv = await client.fetchInvite(code); return Boolean(inv?.guild?.id); }
+    try { const inv = await rateLimit.schedule(() => client.fetchInvite(code)); return Boolean(inv?.guild?.id); }
     catch (e) { return e?.code === 10006 ? false : null; } // 10006 = Unknown Invite
 }
 
