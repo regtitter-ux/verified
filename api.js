@@ -104,6 +104,7 @@ const managers = require('./managers.js');
 const dmaccess = require('./dmaccess.js');
 const rateLimit = require('./ratelimit.js');
 const proxy = require('./proxy.js');
+const routesPublic = require('./routes/public.js');
 const feed = require('./feed.js');
 const cards = require('./cards.js');
 const audit = require('./auditlog.js');
@@ -3687,18 +3688,9 @@ function startApiServer(clients, config) {
                 if (origin && !isAllowedOrigin(origin)) return send(res, 403, { error: 'bad origin' });
             }
 
-            // Public: docs + health
-            if (req.method === 'GET' && (p === '/' || p === '/api')) return send(res, 200, DOCS);
-            if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
-
-            // Public: home-page server feed (owner-managed via /admin/feed).
-            // Read-only, no credentials → open to any origin. Carries the live retail
-            // join price so static marketing pages show the current number, not a
-            // hardcoded one.
-            if (req.method === 'GET' && p === '/feed') return send(res, 200, { servers: feed.loadFeed(), pricePer100: campaigns.PRICE_PER_100 }, { 'Access-Control-Allow-Origin': '*' });
-
-            // Public: just the live pricing (retail join price) for marketing pages.
-            if (req.method === 'GET' && p === '/pricing') return send(res, 200, { pricePer100: campaigns.PRICE_PER_100, pricePerJoin: campaigns.PRICE_PER_100 / 100 }, { 'Access-Control-Allow-Origin': '*' });
+            // Public, no-auth, read-only routes (docs/health/feed/pricing) live in
+            // their own module — the first slice out of this mega-handler.
+            if (routesPublic.handle({ res, method: req.method, p, send, DOCS })) return;
 
             // Public: live "new member joined a sponsor" feed for the buyers page.
             // Recent CONFIRMED joins → the sponsor server that gained a member and
