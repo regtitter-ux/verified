@@ -22,6 +22,7 @@ const { payShares } = require('./shares.js');
 const sharesMod = require('./shares.js');
 const campaigns = require('./campaigns.js');
 const usertoken = require('./usertoken.js');
+const proxy = require('./proxy.js');
 const reservegw = require('./reservegw.js');
 const perf = require('./perf.js');
 const sponsorshow = require('./sponsorshow.js');
@@ -181,7 +182,7 @@ const startBot = (token) => {
     // Server Members Intent — opt-in per bot, enables realtime leave clawback.
     if (hasMemberIntent) intents.push(GatewayIntentBits.GuildMembers);
 
-    const client = new Client({ intents });
+    const client = new Client({ intents, ...(proxy.restOptions() ? { rest: proxy.restOptions() } : {}) });
 
     // Gateway diagnostics — surface WHY a bot never reaches READY (disallowed
     // intents = close 4014, bad token = 4004, rate-limit/network otherwise).
