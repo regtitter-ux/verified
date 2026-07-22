@@ -5,6 +5,7 @@ const { REFERRAL_RATE } = require('./referral.js'); // referrer earns 10% of eac
 const cryptopay = require('./cryptopay.js');
 const nowpayments = require('./nowpayments.js');
 const partnerlog = require('./partnerlog.js');
+const ledger = require('./ledger.js');
 
 // Mirror a partner money movement into the activity log (never blocks the payout).
 function logPartnerMoney(userId, entry) { try { partnerlog.logEvent(userId, entry); } catch (_) { /* never block */ } }
@@ -219,11 +220,8 @@ async function maybeAutoWithdraw(clients, userId, _seen = new Set()) {
 
 // Put a reserved amount back on the user's balance (payout failed/deferred).
 function refundReserved(userId, amount) {
-    const settings = loadJSON('settings.json');
-    if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
-    settings[userId].balance = round2((Number(settings[userId].balance) || 0) + amount);
-    saveJSON('settings.json', settings);
-    logPartnerMoney(userId, { type: 'credit', reason: 'payout_refund', amount, srcId: `prefund:${userId}:${Date.now()}` });
+    // Single money primitive: atomic balance change + activity-log in one call.
+    ledger.credit(userId, amount, { reason: 'payout_refund', srcId: `prefund:${userId}:${Date.now()}` });
 }
 
 // Record a payout whose outcome is UNKNOWN (the provider may have accepted it
