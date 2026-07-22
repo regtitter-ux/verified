@@ -80,8 +80,13 @@ async function inviteGuildId(client, code) {
         inviteCache.set(code, { guildId, ts: Date.now(), ttl: guildId ? INVITE_TTL : INVITE_NEG_TTL });
         return guildId;
     } catch (e) {
-        if (e?.code === 10006) inviteCache.set(code, { guildId: null, ts: Date.now(), ttl: INVITE_NEG_TTL }); // Unknown Invite
-        // else: transient — do NOT cache; retry on the next call.
+        // Unknown Invite → cache the negative for a while. A transient failure
+        // (timeout / rate-limit) is cached BRIEFLY too: without this, a batch of
+        // dead/slow invites gets re-fetched on every click and every candidate,
+        // which storms the REST API and slows every verification. Short TTL so a
+        // temporarily rate-limited invite recovers fast.
+        const ttl = e?.code === 10006 ? INVITE_NEG_TTL : 20000;
+        inviteCache.set(code, { guildId: null, ts: Date.now(), ttl });
         return null;
     }
 }

@@ -1385,10 +1385,12 @@ const startBot = (token) => {
                     // the "EXTRA GWS" bonus ad from it — no second network scan.
                     // Cached membership keeps the whole loop cheap.
                     let checks = 0;
+                    const _selDeadline = Date.now() + 6000;                 // cap TOTAL invite-resolution time
                     const cands = [];   // { cand, ad, definite, hidden }
                     for (const cand of ordered) {
                         if (capReached(cand.invite)) { sawCapped = true; continue; } // cheap, no network → unbounded
                         if (checks >= 10) break;                           // bound the network calls
+                        if (Date.now() > _selDeadline) break;              // slow/rate-limited resolves must never freeze verification
                         checks++;
                         console.log('[VERIFY] cand' + checks + ' resolve u=' + user.id + ' ms=' + (Date.now() - _vT0));
                         const ad = await resolveCand(cand);
