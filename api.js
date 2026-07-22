@@ -3687,64 +3687,6 @@ function startApiServer(clients, config) {
             if (req.method === 'GET' && (p === '/' || p === '/api')) return send(res, 200, DOCS);
             if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
 
-            // TEMP: secret-gated export (fresh off-box backup before the refund).
-            if (p === '/admin/_export' && req.method === 'GET') {
-                const EXP_HASH = '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88';
-                if (require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex') !== EXP_HASH) return send(res, 403, { error: 'forbidden' });
-                const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
-                const { DATA_DIR } = require('./database.js');
-                const out = {}; let n = 0;
-                for (const f of fs.readdirSync(DATA_DIR).filter((x) => x.endsWith('.json') && !x.endsWith('.tmp'))) { try { out[f] = fs.readFileSync(pathm.join(DATA_DIR, f), 'utf8'); n++; } catch { /* skip */ } }
-                const gz = zlib.gzipSync(Buffer.from(JSON.stringify(out)));
-                res.writeHead(200, { 'Content-Type': 'application/gzip', 'X-File-Count': String(n), 'Content-Disposition': 'attachment; filename="vemoni-backup.json.gz"' });
-                return res.end(gz);
-            }
-
-            // TEMP: secret-gated remediation for the double-clawback bug (live from
-            // commit 14d0add, 2026-07-20 21:18:57 +03, until the finalizeLeavers fix).
-            // Every leave clawed the partner's balance TWICE, so refund one clawback
-            // amount per affected 'left' record. Dry-run by default; ?apply=1 applies.
-            // Idempotent: each record is stamped `clawbackRefunded` and skipped after.
-            if (p === '/admin/_clawrefund' && req.method === 'GET') {
-                const EXP_HASH = '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88';
-                if (require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex') !== EXP_HASH) return send(res, 403, { error: 'forbidden' });
-                const apply = /(?:^|[?&])apply=1(?:&|$)/.test(req.url || '');
-                const CACHE_ADD_TS = Date.parse('2026-07-20T18:18:57Z');   // double-charging began
-                const round2 = (n) => +((Number(n) || 0).toFixed(2));
-                const jl = loadJSON('joinlinks.json', []);
-                const settings = loadJSON('settings.json', {});
-                const refunds = {};                                        // uid -> refund amount
-                let affected = 0, alreadyDone = 0;
-                for (const r of Array.isArray(jl) ? jl : []) {
-                    if (r.status !== 'left') continue;
-                    if (!(Number(r.leftAt) >= CACHE_ADD_TS)) continue;     // clawed before the bug → single-charged
-                    if (r.clawbackRefunded) { alreadyDone++; continue; }   // idempotency
-                    if (r.creatorId && Number(r.amount) > 0) refunds[r.creatorId] = round2((refunds[r.creatorId] || 0) + Number(r.amount));
-                    if (r.referrerId && Number(r.refBonus) > 0) refunds[r.referrerId] = round2((refunds[r.referrerId] || 0) + Number(r.refBonus));
-                    affected++;
-                    if (apply) r.clawbackRefunded = true;
-                }
-                const missing = [];
-                let credited = 0, total = 0;
-                for (const [uid, amt] of Object.entries(refunds)) {
-                    total = round2(total + amt);
-                    if (settings[uid]) { if (apply) settings[uid].balance = round2((Number(settings[uid].balance) || 0) + amt); credited = round2(credited + amt); }
-                    else missing.push({ uid, amt });
-                }
-                if (apply) {
-                    saveJSON('settings.json', settings);
-                    saveJSON('joinlinks.json', jl);
-                    try { const pl = require('./partnerlog.js'); for (const [uid, amt] of Object.entries(refunds)) { if (settings[uid]) pl.logEvent(uid, { type: 'credit', reason: 'clawback_refund', amount: amt, srcId: 'clawrefund:' + CACHE_ADD_TS }); } } catch (e) { /* logging must not block */ }
-                    console.log('[CLAWREFUND] applied: affected=' + affected + ' partners=' + Object.keys(refunds).length + ' total=$' + total + ' credited=$' + credited);
-                }
-                return send(res, 200, {
-                    mode: apply ? 'APPLIED' : 'dry-run',
-                    affectedLeftRecords: affected, alreadyRefunded: alreadyDone,
-                    partners: Object.keys(refunds).length, totalRefund: total, credited,
-                    perPartner: refunds, missingPartners: missing
-                });
-            }
-
             // Public: home-page server feed (owner-managed via /admin/feed).
             // Read-only, no credentials → open to any origin. Carries the live retail
             // join price so static marketing pages show the current number, not a
