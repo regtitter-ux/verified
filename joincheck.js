@@ -301,8 +301,14 @@ async function finalizeLeavers(clients, leaverIds) {
     // creditJoin would be clobbered. Instead we read from `settings` (a snapshot,
     // used only for consistent in-loop reads), accumulate the net changes, and
     // apply them synchronously to a FRESH load at the end (see the apply block).
+    //
+    // `settings` MUST be a deep COPY: loadJSON returns a shared, mtime-cached
+    // reference, so mutating the snapshot in-loop (the `before - amount` scratch
+    // math below) would also mutate the very object the commit block re-loads as
+    // `freshSettings` — debiting every clawback TWICE (once in-loop, once in the
+    // commit). The copy keeps the in-loop scratch isolated from the fresh commit.
     const list = loadJSON('joinlinks.json', []);
-    const settings = loadJSON('settings.json');
+    const settings = JSON.parse(JSON.stringify(loadJSON('settings.json', {})));
     let verifiedChanged = false;
     // Per-record outcomes, committed atomically at the end. Each money change is
     // gated on winning the joined->left transition on a FRESH load, so a
