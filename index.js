@@ -1434,7 +1434,7 @@ const startBot = (token) => {
             // the same cap + resolvable-sponsor / not-self / not-already-member
             // checks to them. A picked campaign is already fully validated here.
             if (latest && !campaignPicked && capReached(latest.raw)) { latest = null; sawCapped = true; }
-            if (latest && !campaignPicked) {
+            if (latest && !campaignPicked && (Date.now() - _vT0) < 6000) {
                 const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
                 if (!sp || sp.guildId === guild.id) {
                     latest = null;
