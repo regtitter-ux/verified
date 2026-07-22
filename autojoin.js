@@ -49,22 +49,43 @@ function alreadyVerified(userId, cardGuildId, roleId) {
     const v = loadJSON('verified.json', []);
     return (Array.isArray(v) ? v : []).some((u) => u && u.id === userId && u.guildId === cardGuildId && (u.roleId || null) === (roleId || null));
 }
+// A COUNTED verification — a verified.json entry that actually carries an adKey
+// (i.e. the join was tallied toward the order). A bare `noAd` placeholder does
+// NOT count: it must not stop auto-join from later tallying the confirmed join.
+function alreadyCounted(userId, cardGuildId, roleId) {
+    const v = loadJSON('verified.json', []);
+    return (Array.isArray(v) ? v : []).some((u) => u && u.id === userId && u.guildId === cardGuildId && (u.roleId || null) === (roleId || null) && u.adKey);
+}
 
 // Confirmed membership → finish the verification. Mirrors the second-click path.
 async function complete(clients, e) {
     const dup = alreadyJoined(e.userId, e.sponsorGuildId);
     const adKey = (!dup && e.adRaw) ? touchCreative(e.adRaw) : '';
 
-    // verified.json entry (once per user+card+role) so delivery counts it.
-    if (!alreadyVerified(e.userId, e.cardGuildId, e.roleId)) {
+    // verified.json entry (once per user+card+role) so delivery counts it. If a
+    // placeholder `noAd` entry already exists (the user clicked "confirm" during a
+    // transient sponsor-resolution failure and got verified WITHOUT the join being
+    // tallied), UPGRADE it to a counted entry now that membership is confirmed —
+    // that is the whole point of auto-join: count at JOIN time even when the second
+    // confirm click never landed or failed. Load→mutate→save is await-free (atomic).
+    {
         const v = loadJSON('verified.json', []);
         const arr = Array.isArray(v) ? v : [];
-        const rec = { id: e.userId, guildId: e.cardGuildId, roleId: e.roleId || null, creatorId: e.creatorId, timestamp: Date.now(), viaAutoJoin: true };
-        if (e.viaExtra) rec.viaExtra = true;   // bonus-ad delivery, isolated from card stats
-        if (adKey) rec.adKey = adKey; else rec.noAd = true;
-        arr.push(rec);
-        saveJSON('verified.json', arr);
-        if (adKey) maybeNotifyAdComplete(clients, adKey, arr).catch(() => null);
+        const idx = arr.findIndex((u) => u && u.id === e.userId && u.guildId === e.cardGuildId && (u.roleId || null) === (e.roleId || null));
+        if (idx === -1) {
+            const rec = { id: e.userId, guildId: e.cardGuildId, roleId: e.roleId || null, creatorId: e.creatorId, timestamp: Date.now(), viaAutoJoin: true };
+            if (e.viaExtra) rec.viaExtra = true;   // bonus-ad delivery, isolated from card stats
+            if (adKey) rec.adKey = adKey; else rec.noAd = true;
+            arr.push(rec);
+            saveJSON('verified.json', arr);
+            if (adKey) maybeNotifyAdComplete(clients, adKey, arr).catch(() => null);
+        } else if (adKey && !arr[idx].adKey) {
+            arr[idx].adKey = adKey;
+            delete arr[idx].noAd; delete arr[idx].noAdReason;
+            arr[idx].viaAutoJoin = true;
+            saveJSON('verified.json', arr);
+            maybeNotifyAdComplete(clients, adKey, arr).catch(() => null);
+        }
     }
 
     // Grant the card role (best-effort — the credit is the point, access is a
@@ -117,7 +138,11 @@ async function sweepOnce(clients) {
     for (const e of list) {
         if (!e || !e.userId || !e.sponsorGuildId) continue;
         if (now - (Number(e.ts) || 0) >= WINDOW_MS) continue;                        // expired → drop
-        if (alreadyJoined(e.userId, e.sponsorGuildId) || alreadyVerified(e.userId, e.cardGuildId, e.roleId)) continue; // already done → drop
+        // Drop only when the join is ALREADY tallied: a joinlink exists for this
+        // sponsor (partner credited) OR a COUNTED verified entry exists. A bare
+        // `noAd` placeholder (e.g. the confirm click failed to resolve the sponsor)
+        // must NOT drop the entry — auto-join upgrades it to a counted join below.
+        if (alreadyJoined(e.userId, e.sponsorGuildId) || alreadyCounted(e.userId, e.cardGuildId, e.roleId)) continue;
         const bot = (Array.isArray(clients) ? clients : []).find((c) => c.guilds?.cache?.has(e.sponsorGuildId));
         const present = await isMember(bot || null, e.sponsorGuildId, e.userId).catch(() => null);
         if (present === true) {
