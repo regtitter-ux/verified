@@ -14,7 +14,7 @@ const {
     buildHistoryView, maybeAutoWithdraw, handleManualBalance, handleDone, startLtcPayoutSweep
 } = require('./payouts.js');
 const { startApiServer, createApiKey } = require('./api.js');
-const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave, extractInviteCodes } = require('./joincheck.js');
+const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave, extractInviteCodes, startInviteWarm } = require('./joincheck.js');
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
@@ -1692,6 +1692,10 @@ startApiServer(clients, config);
 
 // Join-check reconciliation: reverse payouts when users leave the sponsor server.
 startJoinCheckSweep(clients);
+
+// Keep the invite cache warm THROUGH THE PROXY (off the verify path) so ads resolve
+// instantly — the direct egress IP is invite-rate-limited, the proxy isn't.
+startInviteWarm();
 
 // Hub-role reconciliation: grant HUB_ROLE_ID on HUB_GUILD_ID to every user
 // with an active verification, revoke from anyone without one.

@@ -124,6 +124,58 @@ async function resolveSponsorPresence(clients, adText) {
     return null;
 }
 
+// Background invite-cache warmer.
+//
+// Our Railway egress IP is rate-limited by Discord on the invite endpoint, so a
+// DIRECT invite lookup fails/hangs and no ad resolves. The proxy (a clean rotating
+// residential IP, DISCORD_PROXY) resolves invites fine — but at ~2.5s, which is
+// too slow to sit in the synchronous verify path on a cold cache. So we keep the
+// invite cache continuously warm THROUGH THE PROXY off the user path: every active
+// ad's sponsor invite is pre-resolved here, so a real verification hits a warm
+// in-memory entry instantly. The proxy carries the invite traffic (IP stays clean)
+// without ever making the user wait on it.
+async function warmOne(code) {
+    const inv = await rateLimit.schedule(() => proxy.getInvite(code)); // via proxy
+    if (!inv) return;                                                  // transient — retry next cycle
+    if (inv.notFound) { inviteCache.set(code, { guildId: null, ts: Date.now(), ttl: INVITE_NEG_TTL }); return; }
+    const guildId = inv.guild?.id || null;
+    inviteCache.set(code, { guildId, ts: Date.now(), ttl: guildId ? INVITE_TTL : INVITE_NEG_TTL });
+}
+
+async function warmInviteCache() {
+    if (!proxy.enabled()) return;                    // only warm when a proxy carries the traffic
+    const codes = new Set();
+    try {
+        const camps = campaigns.loadCampaigns();
+        for (const k of Object.keys(camps)) {
+            const c = camps[k];
+            if (!c || typeof c !== 'object') continue;
+            for (const code of extractInviteCodes(c.invite)) codes.add(code);
+        }
+    } catch { /* ignore */ }
+    try {
+        const feed = require('./feed.js');
+        for (const s of feed.loadFeed()) { if (s && s.code) codes.add(String(s.code)); }
+    } catch { /* ignore */ }
+    // Refresh only entries that are missing or within 30 min of expiry, so a cycle
+    // costs a handful of proxy lookups, not the whole set every time.
+    const now = Date.now();
+    const stale = [...codes].filter((code) => {
+        const hit = inviteCache.get(code);
+        return !hit || (now - hit.ts) > (hit.ttl - 30 * 60 * 1000);
+    });
+    await Promise.all(stale.map((code) => warmOne(code).catch(() => null)));
+    if (stale.length) console.log(`[INVITEWARM] warmed ${stale.length}/${codes.size} invite(s) via proxy`);
+}
+
+function startInviteWarm() {
+    if (!proxy.enabled()) { console.log('[INVITEWARM] no proxy configured — skipped'); return; }
+    const tick = () => warmInviteCache().catch((e) => console.error('[INVITEWARM] error:', e.message));
+    setTimeout(tick, 8 * 1000);            // warm shortly after boot (cache is cold after every redeploy)
+    setInterval(tick, 10 * 60 * 1000);     // keep it hot; well within the 6h invite TTL
+    console.log('[INVITEWARM] proxy invite-cache warmer active');
+}
+
 // Is `userId` currently a member of `guildId`, seen through `bot`?
 // Returns true / false / null (null = couldn't determine, transient error).
 // When no bot covers the guild, falls back to the reserve user account for the
@@ -486,5 +538,6 @@ function startJoinCheckSweep(clients) {
 module.exports = {
     JOIN_BID, PER_JOIN, getJoinBid,
     extractInviteCodes, resolveSponsorPresence, isMember,
-    creditJoin, sweepOnce, startJoinCheckSweep, handleMemberLeave, finalizeLeavers
+    creditJoin, sweepOnce, startJoinCheckSweep, handleMemberLeave, finalizeLeavers,
+    startInviteWarm
 };
