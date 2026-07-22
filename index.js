@@ -1246,6 +1246,8 @@ const startBot = (token) => {
         }
 
         const pendingKey = `${user.id}_${guild.id}_${roleId || 'v'}`;
+        const _vT0 = Date.now();
+        console.log('[VERIFY] click u=' + user.id + ' g=' + guild.id + ' bot=' + (interaction.client.user && interaction.client.user.id) + ' first=' + (!pendingVerification.has(pendingKey)));
 
         if (!pendingVerification.has(pendingKey)) {
             // We store the raw !adv3/`/ad` argument (link or literal text) and
@@ -1476,6 +1478,7 @@ const startBot = (token) => {
             // Send the reply FIRST, then do the local bookkeeping (funnel click +
             // autojoin record) off the response path so they don't add to the
             // "thinking" time.
+            console.log('[VERIFY] first-reply u=' + user.id + ' ms=' + (Date.now() - _vT0) + ' ad=' + Boolean(latest));
             const firstReply = interaction.editReply({ content: responseText, components: firstComponents }).catch(() => null);
             try { cards.trackClick(guild.id, roleId, creatorId, user.id); } catch (e) { /* stats must never break verification */ }
             if (latest && latest.sponsorGuildId && roleId) {
@@ -1491,6 +1494,7 @@ const startBot = (token) => {
         }
 
         const pending = pendingVerification.get(pendingKey);
+        console.log('[VERIFY] second-click u=' + user.id + ' adShown=' + Boolean(pending && pending.adShown) + ' sponsorGid=' + (pending && pending.sponsorGuildId || '-'));
 
         // Join-check mode: if the ad points to a server one of our bots is on, the
         // user must actually be a member before we verify them. Until they join, every
@@ -1522,9 +1526,11 @@ const startBot = (token) => {
                 // excluding the sponsor they're being asked to join. Still 'pre'.
                 const retryExtraRow = await buildExtraRow(clients, guild, creatorId, user.id, sponsor.guildId, 'pre', interaction.channelId).catch(() => null);
                 const retryComponents = [retryJoinRow, retryExtraRow].filter(Boolean);
+                console.log('[VERIFY] second-retry u=' + user.id + ' ms=' + (Date.now() - _vT0) + ' joined=' + joined);
                 return interaction.editReply({ content, components: retryComponents }).catch(() => null);
             }
         }
+        console.log('[VERIFY] second-success u=' + user.id + ' ms=' + (Date.now() - _vT0) + ' sponsor=' + (sponsor && sponsor.guildId || '-'));
 
         // Same bonus "EXTRA GWS" ad under the success message (excluding the sponsor
         // they just joined). 'post' = shown after verification.
