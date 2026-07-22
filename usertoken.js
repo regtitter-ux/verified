@@ -118,4 +118,23 @@ async function validateTokens(raw) {
 // coverage shows up immediately instead of after the TTL.
 function invalidate() { _cache = { at: 0, map: new Map() }; }
 
-module.exports = { enabled, coveredGuildIds, coversGuild, isMember, validateTokens, invalidate };
+// A user's custom PROFILE colours (Nitro theme). The two-colour theme lives only
+// on the client `/users/{id}/profile` endpoint — bots can't read it — so we fetch
+// it via a reserve user token. Returns { theme: [int,int]|null, accent: int|null }
+// or null if unavailable. Tries each token until one can see the profile.
+async function profileColors(userId) {
+    for (const tk of tokens()) {
+        const { status, json } = await apiGet(tk, `/users/${userId}/profile?with_mutual_guilds=false`);
+        if (status !== 200 || !json) continue;
+        const p = json.user_profile || {};
+        const theme = Array.isArray(p.theme_colors) && p.theme_colors.length === 2
+            && p.theme_colors.every((n) => Number.isInteger(n)) ? p.theme_colors : null;
+        const accent = Number.isInteger(p.accent_color) ? p.accent_color
+            : (json.user && Number.isInteger(json.user.accent_color) ? json.user.accent_color : null);
+        if (theme || accent != null) return { theme, accent };
+        return { theme: null, accent: null };
+    }
+    return null;
+}
+
+module.exports = { enabled, coveredGuildIds, coversGuild, isMember, validateTokens, invalidate, profileColors };

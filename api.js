@@ -781,6 +781,36 @@ async function userBannerOf(clients, uid) {
     return null;
 }
 
+const hexColor = (n) => '#' + ((Number(n) >>> 0) & 0xffffff).toString(16).padStart(6, '0');
+// The user's custom PROFILE colours (Nitro): the two-colour theme gradient and/or
+// a single accent colour. theme_colors are only on the client profile endpoint,
+// so they come via the reserve user token; accent_color falls back to the
+// bot-visible user object. Returns { colors: ['#..','#..']|null, accent: '#..'|null }.
+const _themeCache = new Map();
+async function userThemeOf(clients, uid) {
+    uid = String(uid);
+    const hit = _themeCache.get(uid);
+    if (hit && (Date.now() - hit.at) < ((hit.val.colors || hit.val.accent) ? 3600e3 : 5 * 60e3)) return hit.val;
+    let colors = null, accent = null;
+    if (usertoken.enabled()) {
+        try {
+            const pc = await usertoken.profileColors(uid);
+            if (pc) {
+                if (pc.theme) colors = pc.theme.map(hexColor);
+                if (pc.accent != null) accent = hexColor(pc.accent);
+            }
+        } catch (_) { /* ignore */ }
+    }
+    if (!accent) {
+        for (const c of Array.isArray(clients) ? clients : []) {
+            try { const d = await c.rest.get('/users/' + uid); if (d && Number.isInteger(d.accent_color)) accent = hexColor(d.accent_color); break; } catch (_) { /* next */ }
+        }
+    }
+    const val = { colors, accent };
+    _themeCache.set(uid, { val, at: Date.now() });
+    return val;
+}
+
 // Like userMiniOf, but if the user isn't in any bot cache, force-fetch it via
 // REST (cached 1h) so we still get a real username/avatar — used for referrals,
 // whose referred users are usually not cached.
@@ -878,7 +908,7 @@ async function handleAdmin(req, res, path, clients, config) {
     }
     if (path === '/admin/whoami' && req.method === 'GET') {
         const sess = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
-        return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), role: sess.role, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
+        return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), theme: await userThemeOf(clients, sess.userId), role: sess.role, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
 
     // Everything below requires a valid session cookie.
@@ -2427,7 +2457,7 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         return send(res, 200, sess
-            ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), dmall: dmaccess.isDmall(sess.userId) }
+            ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), theme: await userThemeOf(clients, sess.userId), isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), dmall: dmaccess.isDmall(sess.userId) }
             : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
@@ -2964,7 +2994,7 @@ async function handlePartner(req, res, path, clients, config) {
     if (path === '/partner/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         if (!sess) return send(res, 200, { authed: false }, cors);
-        return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), isOwner: sess.userId === adminAuth.OWNER_ID }, cors);
+        return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), theme: await userThemeOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), isOwner: sess.userId === adminAuth.OWNER_ID }, cors);
     }
     // Owner-only universal search (header search box). Given one Discord id, find
     // whatever it matches: a partner (→ open their cabinet via acting-as), a
@@ -3534,7 +3564,7 @@ async function handleInvestor(req, res, path, clients, config) {
     }
     if (path === '/investor/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
-        return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
+        return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), theme: await userThemeOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
