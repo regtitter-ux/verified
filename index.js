@@ -1690,23 +1690,6 @@ config.tokens.forEach(startBot);
 // Partner REST API (same balance/verify system). Shares the live `clients` array.
 startApiServer(clients, config);
 
-// TEMP diagnostic: from THIS server's IP, time a known-good invite fetch every
-// minute. If it's slow/failing here while a probe from another IP is instant,
-// the Railway egress IP is being rate-limited / Cloudflare-banned (that would
-// make every campaign invite time out → no ads, slow verification).
-setInterval(async () => {
-    const c = clients.find((x) => { try { return x.isReady(); } catch { return false; } });
-    if (!c) { console.log('[PROBE] no ready client'); return; }
-    const t0 = Date.now();
-    try {
-        const inv = await c.rest.get('/invites/discord');
-        console.log('[PROBE] discord.gg/discord OK ' + (Date.now() - t0) + 'ms guild=' + (inv && inv.guild && inv.guild.id));
-    } catch (e) {
-        console.log('[PROBE] discord.gg/discord FAIL ' + (Date.now() - t0) + 'ms status=' + (e && (e.status || e.httpStatus || e.code)) + ' msg=' + (e && e.message));
-    }
-}, 60000);
-setTimeout(() => { const c = clients.find((x) => { try { return x.isReady(); } catch { return false; } }); if (c) c.rest.get('/invites/discord').then((inv) => console.log('[PROBE] boot discord OK guild=' + (inv && inv.guild && inv.guild.id))).catch((e) => console.log('[PROBE] boot discord FAIL status=' + (e && (e.status || e.code)) + ' ' + (e && e.message))); }, 20000);
-
 // Join-check reconciliation: reverse payouts when users leave the sponsor server.
 startJoinCheckSweep(clients);
 
