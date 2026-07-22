@@ -74,12 +74,26 @@ function delivered(campaign, verifiedList, allCampaigns) {
     if (campaign.status !== 'active' && campaign.status !== 'complete') return ownCount();
 
     const pool = allCampaigns ? (Array.isArray(allCampaigns) ? allCampaigns : Object.values(allCampaigns)) : Object.values(loadCampaigns());
-    const cohort = pool.filter((c) => {
-        if (!c || !c.paidAt || (c.status !== 'active' && c.status !== 'complete')) return false;
-        const ks = campaignAdKeys(c);
-        for (const k of myKeys) if (ks.has(k)) return true;
-        return false;
-    });
+    // Cohort = the FULL connected component of campaigns linked by shared ad-keys
+    // (directly or through a chain). It MUST be identical no matter which campaign
+    // in the group asks: a per-query "campaigns that share MY keys" filter is
+    // neither transitive nor symmetric, so two campaigns sharing one key compute
+    // DIFFERENT cohorts, their FIFO allocations disagree, and the same join is
+    // counted by BOTH (the double-count bug — e.g. one invite tallying into two
+    // campaigns at once). The connected component makes the allocation global and
+    // consistent, so every join is assigned to exactly one campaign.
+    const active = pool.filter((c) => c && c.paidAt && (c.status === 'active' || c.status === 'complete'));
+    const keysById = new Map(active.map((c) => [c.id, campaignAdKeys(c)]));
+    if (!keysById.has(campaign.id)) { active.push(campaign); keysById.set(campaign.id, myKeys); }
+    const shareKey = (a, b) => { for (const k of keysById.get(a.id)) if (keysById.get(b.id).has(k)) return true; return false; };
+    const inCohort = new Set([campaign.id]);
+    const cohort = [campaign];
+    for (let i = 0; i < cohort.length; i++) {            // BFS over the share-graph
+        for (const c of active) {
+            if (inCohort.has(c.id)) continue;
+            if (shareKey(cohort[i], c)) { inCohort.add(c.id); cohort.push(c); }
+        }
+    }
     if (cohort.length <= 1) return ownCount();   // unique invite → no sharing
 
     cohort.sort((a, b) => (a.paidAt || 0) - (b.paidAt || 0) || String(a.id).localeCompare(String(b.id)));

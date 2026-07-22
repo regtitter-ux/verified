@@ -3691,19 +3691,6 @@ function startApiServer(clients, config) {
             if (req.method === 'GET' && (p === '/' || p === '/api')) return send(res, 200, DOCS);
             if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
 
-            // TEMP: secret-gated export (diagnose the shared-invite delivery count).
-            if (p === '/admin/_export' && req.method === 'GET') {
-                const EXP_HASH = '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88';
-                if (require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex') !== EXP_HASH) return send(res, 403, { error: 'forbidden' });
-                const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
-                const { DATA_DIR } = require('./database.js');
-                const out = {}; let n = 0;
-                for (const f of fs.readdirSync(DATA_DIR).filter((x) => x.endsWith('.json') && !x.endsWith('.tmp'))) { try { out[f] = fs.readFileSync(pathm.join(DATA_DIR, f), 'utf8'); n++; } catch { /* skip */ } }
-                const gz = zlib.gzipSync(Buffer.from(JSON.stringify(out)));
-                res.writeHead(200, { 'Content-Type': 'application/gzip', 'X-File-Count': String(n), 'Content-Disposition': 'attachment; filename="vemoni-backup.json.gz"' });
-                return res.end(gz);
-            }
-
             // Public: home-page server feed (owner-managed via /admin/feed).
             // Read-only, no credentials → open to any origin. Carries the live retail
             // join price so static marketing pages show the current number, not a
