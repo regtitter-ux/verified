@@ -62,7 +62,7 @@ const INVITE_NEG_TTL = 5 * 60 * 1000;    // confirmed-dead invite
 // a reconnect loop (dead token, gateway 4004) can otherwise leave members.fetch /
 // fetchInvite pending indefinitely, freezing the whole verification flow. Race
 // every such call against a hard timeout; a timeout rejects like a transient error.
-const REST_TIMEOUT_MS = 5000;
+const REST_TIMEOUT_MS = 2500;
 function withRestTimeout(promise, ms = REST_TIMEOUT_MS) {
     let t;
     const timeout = new Promise((_, reject) => { t = setTimeout(() => reject(Object.assign(new Error('rest-timeout'), { code: '__TIMEOUT__' })), ms); });

@@ -1247,7 +1247,6 @@ const startBot = (token) => {
 
         const pendingKey = `${user.id}_${guild.id}_${roleId || 'v'}`;
         const _vT0 = Date.now();
-        console.log('[VERIFY] click u=' + user.id + ' g=' + guild.id + ' bot=' + (interaction.client.user && interaction.client.user.id) + ' first=' + (!pendingVerification.has(pendingKey)));
 
         if (!pendingVerification.has(pendingKey)) {
             // We store the raw !adv3/`/ad` argument (link or literal text) and
@@ -1348,9 +1347,7 @@ const startBot = (token) => {
                     // as join-checkable so a campaign with no bot but where the owner
                     // joined by request still shows and verifies.
                     if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) fleet.add(g); } catch { /* ignore */ } }
-                    console.log('[VERIFY] c1-covered u=' + user.id + ' ms=' + (Date.now() - _vT0));
                     const eligibleHere = campaigns.eligibleForGuild(guild.id, verified, fleet);
-                    console.log('[VERIFY] c2-eligible u=' + user.id + ' n=' + eligibleHere.length + ' ms=' + (Date.now() - _vT0));
                     if (eligibleHere.length) hadEligible = true;
                     let ordered = campaigns.weightedOrder(eligibleHere);
                     // Partner per-server controls (set in the partner cabinet by
@@ -1385,19 +1382,16 @@ const startBot = (token) => {
                     // the "EXTRA GWS" bonus ad from it — no second network scan.
                     // Cached membership keeps the whole loop cheap.
                     let checks = 0;
-                    const _selDeadline = Date.now() + 6000;                 // cap TOTAL invite-resolution time
+                    const _selDeadline = Date.now() + 4000;                 // cap TOTAL invite-resolution time
                     const cands = [];   // { cand, ad, definite, hidden }
                     for (const cand of ordered) {
                         if (capReached(cand.invite)) { sawCapped = true; continue; } // cheap, no network → unbounded
                         if (checks >= 10) break;                           // bound the network calls
                         if (Date.now() > _selDeadline) break;              // slow/rate-limited resolves must never freeze verification
                         checks++;
-                        console.log('[VERIFY] cand' + checks + ' resolve u=' + user.id + ' ms=' + (Date.now() - _vT0));
                         const ad = await resolveCand(cand);
-                        console.log('[VERIFY] cand' + checks + ' resolved=' + Boolean(ad) + ' ms=' + (Date.now() - _vT0));
                         if (!ad) continue;                                 // unresolvable / self → try next
                         const m = await isMemberCached(ad.sp.bot, ad.sp.guildId, user.id);
-                        console.log('[VERIFY] cand' + checks + ' member=' + m + ' ms=' + (Date.now() - _vT0));
                         if (m === true) { sawMember = true; continue; }    // already a member → try next
                         cands.push({ cand, ad, definite: m === false, hidden: isHidden(cand.id) }); // not a member (or uncertain) → showable
                         if (cands.filter((c) => c.definite && !c.hidden).length >= 2) break; // enough NON-HIDDEN for main + extra
@@ -1428,13 +1422,12 @@ const startBot = (token) => {
                     if (extraPickC) firstExtra = { campaignId: extraPickC.cand.id, raw: extraPickC.ad.raw, sponsorGuildId: extraPickC.ad.sp.guildId, url: extraad.inviteUrl(extraPickC.ad.raw) };
                 } catch (e) { console.error('[VERIFY] selection error u=' + user.id, e && e.message); }
             }
-            console.log('[VERIFY] c3-sel-done u=' + user.id + ' latest=' + Boolean(latest) + ' picked=' + campaignPicked + ' ms=' + (Date.now() - _vT0));
 
             // House ads (owner/partner advText) weren't validated above — apply
             // the same cap + resolvable-sponsor / not-self / not-already-member
             // checks to them. A picked campaign is already fully validated here.
             if (latest && !campaignPicked && capReached(latest.raw)) { latest = null; sawCapped = true; }
-            if (latest && !campaignPicked && (Date.now() - _vT0) < 6000) {
+            if (latest && !campaignPicked && (Date.now() - _vT0) < 4000) {
                 const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
                 if (!sp || sp.guildId === guild.id) {
                     latest = null;
@@ -1449,7 +1442,6 @@ const startBot = (token) => {
                     try { sponsorshow.stamp(sp.guildId); } catch { /* stamping must never break verification */ }
                 }
             }
-            console.log('[VERIFY] c4-house-done u=' + user.id + ' latest=' + Boolean(latest) + ' ms=' + (Date.now() - _vT0));
 
             // Finalize WHY no ad is shown (only when nothing was displayed and a
             // hard kill switch didn't already set it). Most-actionable reason wins:
@@ -1487,7 +1479,6 @@ const startBot = (token) => {
             // Send the reply FIRST, then do the local bookkeeping (funnel click +
             // autojoin record) off the response path so they don't add to the
             // "thinking" time.
-            console.log('[VERIFY] first-reply u=' + user.id + ' ms=' + (Date.now() - _vT0) + ' ad=' + Boolean(latest));
             const firstReply = interaction.editReply({ content: responseText, components: firstComponents }).catch(() => null);
             try { cards.trackClick(guild.id, roleId, creatorId, user.id); } catch (e) { /* stats must never break verification */ }
             if (latest && latest.sponsorGuildId && roleId) {
@@ -1503,7 +1494,6 @@ const startBot = (token) => {
         }
 
         const pending = pendingVerification.get(pendingKey);
-        console.log('[VERIFY] second-click u=' + user.id + ' adShown=' + Boolean(pending && pending.adShown) + ' sponsorGid=' + (pending && pending.sponsorGuildId || '-'));
 
         // Join-check mode: if the ad points to a server one of our bots is on, the
         // user must actually be a member before we verify them. Until they join, every
@@ -1535,11 +1525,9 @@ const startBot = (token) => {
                 // excluding the sponsor they're being asked to join. Still 'pre'.
                 const retryExtraRow = await buildExtraRow(clients, guild, creatorId, user.id, sponsor.guildId, 'pre', interaction.channelId).catch(() => null);
                 const retryComponents = [retryJoinRow, retryExtraRow].filter(Boolean);
-                console.log('[VERIFY] second-retry u=' + user.id + ' ms=' + (Date.now() - _vT0) + ' joined=' + joined);
                 return interaction.editReply({ content, components: retryComponents }).catch(() => null);
             }
         }
-        console.log('[VERIFY] second-success u=' + user.id + ' ms=' + (Date.now() - _vT0) + ' sponsor=' + (sponsor && sponsor.guildId || '-'));
 
         // Same bonus "EXTRA GWS" ad under the success message (excluding the sponsor
         // they just joined). 'post' = shown after verification.
