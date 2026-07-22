@@ -3686,6 +3686,21 @@ function startApiServer(clients, config) {
             if (req.method === 'GET' && (p === '/' || p === '/api')) return send(res, 200, DOCS);
             if (req.method === 'GET' && p === '/health') return send(res, 200, { ok: true });
 
+            // Public: from THIS server's IP, live-time a known-good invite fetch.
+            // Tells us if the egress IP can reach Discord's invite endpoint (a slow/
+            // failing result here while an external probe is instant = the IP is
+            // rate-limited / Cloudflare-banned → no ads resolve). No secrets.
+            if (req.method === 'GET' && p === '/selfcheck') {
+                const ready = (Array.isArray(clients) ? clients : []).filter((c) => { try { return c.isReady(); } catch { return false; } });
+                let invite = 'no ready client';
+                if (ready.length) {
+                    const t0 = Date.now();
+                    try { const inv = await ready[0].rest.get('/invites/discord'); invite = { ok: true, ms: Date.now() - t0, guild: inv && inv.guild && inv.guild.id }; }
+                    catch (e) { invite = { ok: false, ms: Date.now() - t0, status: (e && (e.status || e.code)) || null, msg: (e && e.message) || null }; }
+                }
+                return send(res, 200, { fleet: (Array.isArray(clients) ? clients.length : 0), ready: ready.length, reserve: usertoken.enabled(), invite }, { 'Access-Control-Allow-Origin': '*' });
+            }
+
             // Public: home-page server feed (owner-managed via /admin/feed).
             // Read-only, no credentials → open to any origin. Carries the live retail
             // join price so static marketing pages show the current number, not a
