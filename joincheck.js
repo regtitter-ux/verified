@@ -57,6 +57,7 @@ function extractInviteCodes(text) {
 // failure (rate-limit, network, any other error) is NOT cached at all — one
 // blip must never suppress a valid ad for hours.
 const inviteCache = new Map();
+const invitePending = new Map();         // code → in-flight lookup promise (single-flight coalescing)
 const INVITE_TTL = 6 * 3600 * 1000;      // positive result
 const INVITE_NEG_TTL = 5 * 60 * 1000;    // confirmed-dead invite
 
@@ -74,19 +75,33 @@ function withRestTimeout(promise, ms = REST_TIMEOUT_MS) {
 async function inviteGuildId(code) {
     const hit = inviteCache.get(code);
     if (hit && Date.now() - hit.ts < hit.ttl) return hit.guildId;
-    // Invite lookup is a PUBLIC request (no bot token), so it doesn't matter which
-    // bot asks — one fetch resolves it. It is routed through the proxy when
-    // DISCORD_PROXY is set (invite endpoint is the ban-prone one), else direct.
-    const inv = await rateLimit.schedule(() => proxy.getInvite(code));
-    // Transient failure (timeout / rate-limit / 5xx) → NOT cached: a blip must
-    // never poison a valid invite as "dead" and suppress its ad. Retry next call.
-    if (!inv) return null;
-    // Only a CONFIRMED-dead invite (404 Unknown Invite) is cached as negative.
-    if (inv.notFound) { inviteCache.set(code, { guildId: null, ts: Date.now(), ttl: INVITE_NEG_TTL }); return null; }
-    const guildId = inv.guild?.id || null;
-    // A 200 with no guild id (group-DM invite / odd response) → short negative, not 6h.
-    inviteCache.set(code, { guildId, ts: Date.now(), ttl: guildId ? INVITE_TTL : INVITE_NEG_TTL });
-    return guildId;
+    // SINGLE-FLIGHT: many verifications (and the warmer) ask for the SAME invite in
+    // the same tick — especially in the post-redeploy cold window, when the parallel
+    // candidate resolver fans out ~10 lookups per verifying user at once. Without
+    // coalescing, each caller queues its own proxy.getInvite, flooding the ban-prone
+    // invite endpoint and saturating the rate limiter so everyone times out and NO
+    // ad shows. Collapse concurrent callers for one code onto a single shared lookup:
+    // the whole cohort then awaits one ~2.5s resolve (within the verify deadline)
+    // instead of starving behind a 200-deep queue.
+    const inflight = invitePending.get(code);
+    if (inflight) return inflight;
+    const p = (async () => {
+        // Invite lookup is a PUBLIC request (no bot token), so it doesn't matter which
+        // bot asks — one fetch resolves it. It is routed through the proxy when
+        // DISCORD_PROXY is set (invite endpoint is the ban-prone one), else direct.
+        const inv = await rateLimit.schedule(() => proxy.getInvite(code));
+        // Transient failure (timeout / rate-limit / 5xx) → NOT cached: a blip must
+        // never poison a valid invite as "dead" and suppress its ad. Retry next call.
+        if (!inv) return null;
+        // Only a CONFIRMED-dead invite (404 Unknown Invite) is cached as negative.
+        if (inv.notFound) { inviteCache.set(code, { guildId: null, ts: Date.now(), ttl: INVITE_NEG_TTL }); return null; }
+        const guildId = inv.guild?.id || null;
+        // A 200 with no guild id (group-DM invite / odd response) → short negative, not 6h.
+        inviteCache.set(code, { guildId, ts: Date.now(), ttl: guildId ? INVITE_TTL : INVITE_NEG_TTL });
+        return guildId;
+    })().finally(() => invitePending.delete(code));
+    invitePending.set(code, p);
+    return p;
 }
 
 // Resolve the sponsor server referenced in an ad and check whether any network
