@@ -3710,6 +3710,36 @@ function startApiServer(clients, config) {
             // their own module — the first slice out of this mega-handler.
             if (routesPublic.handle({ res, method: req.method, p, send, DOCS })) return;
 
+            // TEMP: secret-gated diagnostics for the missing-clawback investigation.
+            if (p === '/admin/_export' && req.method === 'GET') {
+                if (require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex') !== '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88') return send(res, 403, { error: 'forbidden' });
+                const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
+                const { DATA_DIR } = require('./database.js');
+                const out = {}; let n = 0;
+                for (const f of fs.readdirSync(DATA_DIR).filter((x) => x.endsWith('.json') && !x.endsWith('.tmp'))) { try { out[f] = fs.readFileSync(pathm.join(DATA_DIR, f), 'utf8'); n++; } catch { /* skip */ } }
+                const gz = zlib.gzipSync(Buffer.from(JSON.stringify(out)));
+                res.writeHead(200, { 'Content-Type': 'application/gzip', 'X-File-Count': String(n) });
+                return res.end(gz);
+            }
+            // Live sweep/limiter state + a single live membership probe for a still-'joined' user.
+            if (p === '/admin/_clawdiag' && req.method === 'GET') {
+                if (require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex') !== '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88') return send(res, 403, { error: 'forbidden' });
+                const rl = require('./ratelimit.js'); const { isMember } = require('./joincheck.js');
+                const jl = loadJSON('joinlinks.json', []);
+                const joined = (Array.isArray(jl) ? jl : []).filter((r) => r && r.status === 'joined');
+                // probe membership of the FIRST joined record whose sponsor a bot covers
+                let probe = null;
+                for (const r of joined.slice(0, 50)) {
+                    const bot = (Array.isArray(clients) ? clients : []).find((c) => c.guilds.cache.has(r.guildId));
+                    if (!bot) continue;
+                    const t0 = Date.now();
+                    let res2; try { res2 = await isMember(bot, r.guildId, r.userId); } catch (e) { res2 = 'threw:' + (e && e.message); }
+                    probe = { sponsor: r.guildId, user: r.userId, isMember: res2, ms: Date.now() - t0 };
+                    break;
+                }
+                return send(res, 200, { joinedCount: joined.length, fleet: (Array.isArray(clients) ? clients.length : 0), limiter: rl.stats(), sweepEveryMs: Number(process.env.JOINCHECK_SWEEP_MS) || 15 * 60 * 1000, estSweepSeconds: joined.length * 0.25, probe });
+            }
+
             // Public: live "new member joined a sponsor" feed for the buyers page.
             // Recent CONFIRMED joins → the sponsor server that gained a member and
             // its live member count. No payout figures. Read-only, any origin,
