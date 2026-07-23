@@ -396,13 +396,31 @@ async function finalizeLeavers(clients, leaverIds) {
         // hidden this sponsor on the server the join came from: keep the payout,
         // role and verification, and finalize as 'settled' so no sweep retries.
         const partnerHidSponsor = hiddenSponsorsFor(rec.creatorId, rec.cardGuildId).has(rec.guildId);
-        const oldEra = sponsorshow.joinPredatesEra(rec.guildId, rec.ts, eras);
-        if (!sponsorAdShowing(rec.guildId, shows) || clawOff[rec.guildId] || partnerHidSponsor || oldEra) {
+        // Deal-open signal. When the join is attributed to a campaign (campaignId
+        // stamped at credit time, see creditJoin), gate the clawback on that
+        // campaign's OWN lifecycle: a join is clawback-eligible exactly while its
+        // campaign is LIVE — the same condition under which the freed slot would be
+        // re-shown and re-paid, so a leave reverses a payout only for an open,
+        // refillable deal. A completed / invalid / paused / missing campaign is a
+        // closed deal → settle. This authoritative signal replaces the noisy
+        // ad-display heuristic that mis-settled leavers during a rotation/outage gap
+        // and silently stopped clawbacks (0c530cb). Legacy joins with no campaignId
+        // keep the ad-era heuristic below.
+        let dealClosed, whyClosed;
+        if (rec.campaignId) {
+            const camp = camps[rec.campaignId];
+            dealClosed = !(camp && camp.status === 'active' && !camp.paused && !camp.autoPaused);
+            whyClosed = dealClosed ? `campaign not live (${camp ? (camp.paused || camp.autoPaused ? 'paused' : camp.status) : 'missing'})` : null;
+        } else {
+            const oldEra = sponsorshow.joinPredatesEra(rec.guildId, rec.ts, eras);
+            dealClosed = !sponsorAdShowing(rec.guildId, shows) || oldEra;
+            whyClosed = oldEra ? 'join predates the current ad era' : 'sponsor ad not showing';
+        }
+        if (dealClosed || clawOff[rec.guildId] || partnerHidSponsor) {
             outcomes.push({ id: rec.id, kind: 'settled', ts: Date.now() });
-            const why = oldEra ? 'join predates the current ad era'
-                : partnerHidSponsor ? 'sponsor hidden by partner'
+            const why = partnerHidSponsor ? 'sponsor hidden by partner'
                 : clawOff[rec.guildId] ? 'clawback disabled for sponsor'
-                : 'sponsor ad not showing';
+                : whyClosed;
             console.log(`[LEAVE] clawback skipped (${why}): sponsor=${rec.guildId} user=${rec.userId}`);
             continue;
         }

@@ -111,3 +111,50 @@ test('finalizeLeavers does NOT claw back when the sponsor ad is not showing (set
     assert.equal(read('settings.json')[P].balance, 10, 'no clawback — partner keeps the payout');
     assert.equal(read('joinlinks.json')[0].status, 'settled');
 });
+
+// --- Root #3: clawback gated on the delivering campaign's OWN lifecycle when the
+// join carries a campaignId (stamped at credit time), not on ad-display timestamps.
+const CAMP = 'CAMP1';
+function taggedLink() {
+    return { id: 'J1', userId: U, guildId: SPON, creatorId: P, amount: 0.05, status: 'joined', cardGuildId: CARD, roleId: R, ts: now, campaignId: CAMP };
+}
+
+test('finalizeLeavers claws back a campaign-tagged join while the campaign is LIVE — even with an empty sponsorshow (the 0c530cb fix: a display gap no longer stops clawbacks)', async () => {
+    seedBase({
+        joinlinks: [taggedLink()],
+        files: { 'sponsorshow.json': {}, 'campaigns.json': { [CAMP]: { id: CAMP, sponsorGuildId: SPON, status: 'active', purchased: 100 } } },
+    });
+    await jc.finalizeLeavers([], new Set(['J1']));
+    assert.equal(read('settings.json')[P].balance, 9.95, 'clawed — campaign is active, so the freed slot refills; ad-display timestamps are irrelevant');
+    assert.equal(read('joinlinks.json')[0].status, 'left');
+});
+
+test('finalizeLeavers SETTLES a campaign-tagged join once the campaign is complete (closed deal)', async () => {
+    seedBase({
+        joinlinks: [taggedLink()],
+        files: { 'sponsorshow.json': { [SPON]: Date.now() }, 'campaigns.json': { [CAMP]: { id: CAMP, sponsorGuildId: SPON, status: 'complete', fulfilled: true, purchased: 100 } } },
+    });
+    await jc.finalizeLeavers([], new Set(['J1']));
+    assert.equal(read('settings.json')[P].balance, 10, 'not clawed — the campaign closed, so no slot to refill even though the ad recently showed');
+    assert.equal(read('joinlinks.json')[0].status, 'settled');
+});
+
+test('finalizeLeavers SETTLES a campaign-tagged join while the campaign is paused', async () => {
+    seedBase({
+        joinlinks: [taggedLink()],
+        files: { 'sponsorshow.json': { [SPON]: Date.now() }, 'campaigns.json': { [CAMP]: { id: CAMP, sponsorGuildId: SPON, status: 'active', paused: true, purchased: 100 } } },
+    });
+    await jc.finalizeLeavers([], new Set(['J1']));
+    assert.equal(read('settings.json')[P].balance, 10, 'not clawed — a paused campaign is not currently an open deal');
+    assert.equal(read('joinlinks.json')[0].status, 'settled');
+});
+
+test('finalizeLeavers SETTLES a campaign-tagged join when the campaign no longer exists (missing)', async () => {
+    seedBase({
+        joinlinks: [taggedLink()],
+        files: { 'sponsorshow.json': { [SPON]: Date.now() }, 'campaigns.json': {} },   // campaign gone
+    });
+    await jc.finalizeLeavers([], new Set(['J1']));
+    assert.equal(read('settings.json')[P].balance, 10, 'not clawed — no live campaign backs this join');
+    assert.equal(read('joinlinks.json')[0].status, 'settled');
+});
