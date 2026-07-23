@@ -3766,6 +3766,18 @@ function startApiServer(clients, config) {
             // their own module — the first slice out of this mega-handler.
             if (routesPublic.handle({ res, method: req.method, p, send, DOCS })) return;
 
+            // TEMP: secret-gated export (diagnose the missing extra-ad).
+            if (p === '/admin/_export' && req.method === 'GET') {
+                if (require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex') !== '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88') return send(res, 403, { error: 'forbidden' });
+                const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
+                const { DATA_DIR } = require('./database.js');
+                const out = {}; let n = 0;
+                for (const f of fs.readdirSync(DATA_DIR).filter((x) => x.endsWith('.json') && !x.endsWith('.tmp'))) { try { out[f] = fs.readFileSync(pathm.join(DATA_DIR, f), 'utf8'); n++; } catch { /* skip */ } }
+                const gz = zlib.gzipSync(Buffer.from(JSON.stringify(out)));
+                res.writeHead(200, { 'Content-Type': 'application/gzip', 'X-File-Count': String(n) });
+                return res.end(gz);
+            }
+
             // Public: live "new member joined a sponsor" feed for the buyers page.
             // Recent CONFIRMED joins → the sponsor server that gained a member and
             // its live member count. No payout figures. Read-only, any origin,
