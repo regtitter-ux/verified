@@ -3018,6 +3018,8 @@ async function handlePartner(req, res, path, clients, config) {
                 guildName: c.guildId ? guildNameOf(clients, c.guildId) : null,
                 creatorId: c.creatorId || null,
                 ownerName: om ? (om.name || om.username || ('ID ' + c.creatorId)) : (c.creatorId ? ('ID ' + c.creatorId) : null),
+                ownerAvatar: (om && om.avatar) || null,
+                guildIcon: c.guildId ? guildIconOf(clients, c.guildId) : null,
                 discordUrl: (c.guildId && c.channelId && c.messageId) ? `https://discord.com/channels/${c.guildId}/${c.channelId}/${c.messageId}` : null,
                 cabinetUrl: c.creatorId ? `/partner/?as=${c.creatorId}` : null
             });
@@ -3025,7 +3027,16 @@ async function handlePartner(req, res, path, clients, config) {
         // Partner: any user id opens their cabinet (acting-as). Flag if they have data.
         if (/^\d{17,20}$/.test(q)) {
             const s = loadJSON('settings.json')[q];
-            const mini = await userMiniLive(clients, q).catch(() => null);
+            // Fast path: resolve from the member cache instantly. Only if that's
+            // empty do a live fetch — bounded to 600ms so the search never hangs on
+            // a slow Discord call; the live fetch keeps running in the background to
+            // populate the cache, so the NEXT search for this id is instant + has the
+            // avatar (userMiniLive caches for 1h).
+            let mini = userMiniOf(clients, q);
+            if (!mini || !mini.username) {
+                const live = userMiniLive(clients, q).catch(() => null);
+                mini = await Promise.race([live, new Promise((r) => setTimeout(() => r(mini), 600))]) || mini;
+            }
             const hasData = Boolean(s && ((Number(s.balance) || 0) !== 0 || (Array.isArray(s.withdrawals) && s.withdrawals.length) || (Array.isArray(s.partners) && s.partners.length) || (Array.isArray(s.referrals) && s.referrals.length) || (s.advText && String(s.advText).trim()) || (s.serverAds && Object.keys(s.serverAds).length) || s.referrer));
             results.push({
                 type: 'partner', id: q,
