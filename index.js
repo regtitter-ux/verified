@@ -1343,6 +1343,10 @@ const startBot = (token) => {
                         if (!sp || sp.guildId === guild.id) return null;
                         return { text, raw, sp };
                     };
+                    // Cap a single resolve so one slow (cold-cache/proxy) invite can't
+                    // hold up the whole concurrent batch below; a timeout → treated as
+                    // "unresolvable this pass" (null) and simply skipped.
+                    const withDeadline = (pr, ms) => Promise.race([Promise.resolve(pr).catch(() => null), new Promise((r) => setTimeout(() => r(null), ms))]);
                     const fleet = campaigns.fleetGuildIds(clients);
                     // Reserve (invisible): also treat the personal account's servers
                     // as join-checkable so a campaign with no bot but where the owner
@@ -1382,20 +1386,32 @@ const startBot = (token) => {
                     // known member) in queue order, so we pick BOTH the main ad and
                     // the "EXTRA GWS" bonus ad from it — no second network scan.
                     // Cached membership keeps the whole loop cheap.
-                    let checks = 0;
-                    const _selDeadline = Date.now() + 4000;                 // cap TOTAL invite-resolution time
-                    const cands = [];   // { cand, ad, definite, hidden }
+                    // Pre-filter capped campaigns (cheap, no network) keeping queue
+                    // order, then take a bounded window of candidates to resolve.
+                    const windowCands = [];
                     for (const cand of ordered) {
                         if (capReached(cand.invite)) { sawCapped = true; continue; } // cheap, no network → unbounded
-                        if (checks >= 10) break;                           // bound the network calls
-                        if (Date.now() > _selDeadline) break;              // slow/rate-limited resolves must never freeze verification
-                        checks++;
-                        const ad = await resolveCand(cand);
-                        if (!ad) continue;                                 // unresolvable / self → try next
+                        windowCands.push(cand);
+                        if (windowCands.length >= 10) break;               // bound the network calls
+                    }
+                    // Resolve every candidate's sponsor CONCURRENTLY. Resolving them
+                    // one-by-one let a single cold-cache invite (a proxy miss can take
+                    // several seconds) burn the whole selection budget, so the loop
+                    // saw only 1-2 campaigns and often showed NOTHING even with a full
+                    // queue. In parallel the batch takes as long as the SLOWEST lookup,
+                    // not their sum, so a slow outlier can't starve the fast (warm)
+                    // ones. Each lookup is individually capped so verification never
+                    // freezes; warm-cache lookups return instantly with no proxy call.
+                    const resolvedCands = await Promise.all(windowCands.map(async (cand) => ({ cand, ad: await withDeadline(resolveCand(cand), 4000) })));
+                    // Membership checks are cached and cheap → do them in queue order
+                    // to build the candidate list (main = first non-member, extra = a
+                    // different showable one), preserving the original selection order.
+                    const cands = [];   // { cand, ad, definite, hidden }
+                    for (const { cand, ad } of resolvedCands) {
+                        if (!ad) continue;                                 // unresolvable / self / timed out → skip
                         const m = await isMemberCached(ad.sp.bot, ad.sp.guildId, user.id);
-                        if (m === true) { sawMember = true; continue; }    // already a member → try next
+                        if (m === true) { sawMember = true; continue; }    // already a member → skip
                         cands.push({ cand, ad, definite: m === false, hidden: isHidden(cand.id) }); // not a member (or uncertain) → showable
-                        if (cands.filter((c) => c.definite && !c.hidden).length >= 2) break; // enough NON-HIDDEN for main + extra
                     }
                     // main = first definite non-member, else first uncertain — from
                     // NON-HIDDEN candidates only (the main ad respects the hide).

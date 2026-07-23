@@ -150,6 +150,11 @@ async function warmInviteCache() {
         for (const k of Object.keys(camps)) {
             const c = camps[k];
             if (!c || typeof c !== 'object') continue;
+            // Only ACTIVE campaigns are ever shown, so only their invites need to be
+            // hot in the verify path. Warming every complete/invalid campaign too
+            // (dozens of them) diluted the proxy budget and left the handful of live
+            // invites cold — the exact cause of "queue full but no ad shows".
+            if (c.status && c.status !== 'active') continue;
             for (const code of extractInviteCodes(c.invite)) codes.add(code);
         }
     } catch { /* ignore */ }
@@ -171,8 +176,12 @@ async function warmInviteCache() {
 function startInviteWarm() {
     if (!proxy.enabled()) { console.log('[INVITEWARM] no proxy configured — skipped'); return; }
     const tick = () => warmInviteCache().catch((e) => console.error('[INVITEWARM] error:', e.message));
-    setTimeout(tick, 8 * 1000);            // warm shortly after boot (cache is cold after every redeploy)
-    setInterval(tick, 10 * 60 * 1000);     // keep it hot; well within the 6h invite TTL
+    // The cache is fully cold after every redeploy (and we redeploy often), so a
+    // single warm at +8s isn't enough — an early lookup can transiently fail and
+    // stay cold until the next 10-min cycle. Re-warm a few times up front to close
+    // that window fast, then settle into the steady interval.
+    for (const t of [8, 35, 90, 180]) setTimeout(tick, t * 1000);
+    setInterval(tick, 5 * 60 * 1000);      // keep it hot; well within the 6h invite TTL
     console.log('[INVITEWARM] proxy invite-cache warmer active');
 }
 
