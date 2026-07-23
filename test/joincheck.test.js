@@ -139,14 +139,38 @@ test('finalizeLeavers SETTLES a campaign-tagged join once the campaign is comple
     assert.equal(read('joinlinks.json')[0].status, 'settled');
 });
 
-test('finalizeLeavers SETTLES a campaign-tagged join while the campaign is paused', async () => {
+test('finalizeLeavers DEFERS (neither claws nor settles) a leave while the campaign is paused — a resume must still be able to claw', async () => {
     seedBase({
         joinlinks: [taggedLink()],
         files: { 'sponsorshow.json': { [SPON]: Date.now() }, 'campaigns.json': { [CAMP]: { id: CAMP, sponsorGuildId: SPON, status: 'active', paused: true, purchased: 100 } } },
     });
     await jc.finalizeLeavers([], new Set(['J1']));
-    assert.equal(read('settings.json')[P].balance, 10, 'not clawed — a paused campaign is not currently an open deal');
-    assert.equal(read('joinlinks.json')[0].status, 'settled');
+    assert.equal(read('settings.json')[P].balance, 10, 'not clawed while paused');
+    assert.equal(read('joinlinks.json')[0].status, 'joined', 'NOT settled — a transient pause is irreversible if settled, so the record stays joined for re-evaluation on resume');
+});
+
+test('finalizeLeavers claws a paused-then-RESUMED campaign leaver (defer→claw): a normal pause/resume cycle must not leak clawbacks', async () => {
+    seedBase({
+        joinlinks: [taggedLink()],
+        files: { 'sponsorshow.json': {}, 'campaigns.json': { [CAMP]: { id: CAMP, sponsorGuildId: SPON, status: 'active', paused: true, purchased: 100 } } },
+    });
+    await jc.finalizeLeavers([], new Set(['J1']));                 // paused → deferred (still 'joined')
+    assert.equal(read('joinlinks.json')[0].status, 'joined', 'deferred while paused');
+    // Campaign resumes → the still-'joined' record is re-evaluated and clawed.
+    seed({ 'campaigns.json': { [CAMP]: { id: CAMP, sponsorGuildId: SPON, status: 'active', purchased: 100 } } });
+    await jc.finalizeLeavers([], new Set(['J1']));
+    assert.equal(read('settings.json')[P].balance, 9.95, 'clawed once the campaign resumed (open, refillable deal)');
+    assert.equal(read('joinlinks.json')[0].status, 'left');
+});
+
+test('finalizeLeavers still SETTLES a paused campaign leaver when the owner explicitly disabled clawback for the sponsor', async () => {
+    seedBase({
+        joinlinks: [taggedLink()],
+        files: { 'sponsorshow.json': { [SPON]: Date.now() }, 'siteconfig.json': { clawbackOffAfterComplete: { [SPON]: true } }, 'campaigns.json': { [CAMP]: { id: CAMP, sponsorGuildId: SPON, status: 'active', paused: true, purchased: 100 } } },
+    });
+    await jc.finalizeLeavers([], new Set(['J1']));
+    assert.equal(read('settings.json')[P].balance, 10, 'not clawed — explicit owner suppression');
+    assert.equal(read('joinlinks.json')[0].status, 'settled', 'explicit suppression finalizes even during a pause');
 });
 
 test('finalizeLeavers SETTLES a campaign-tagged join when the campaign no longer exists (missing)', async () => {

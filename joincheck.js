@@ -406,17 +406,33 @@ async function finalizeLeavers(clients, leaverIds) {
         // ad-display heuristic that mis-settled leavers during a rotation/outage gap
         // and silently stopped clawbacks (0c530cb). Legacy joins with no campaignId
         // keep the ad-era heuristic below.
-        let dealClosed, whyClosed;
+        // Explicit owner/partner suppression always finalizes as settled.
+        const explicitSettle = Boolean(clawOff[rec.guildId] || partnerHidSponsor);
+        // Deal state for a campaign-tagged join → one of:
+        //  • CLAW   — campaign live (active, not paused): the freed slot refills and
+        //             is re-paid, so reverse the payout symmetrically.
+        //  • SETTLE — campaign closed (complete/invalid/missing): no slot to refill.
+        //  • DEFER  — campaign in a TRANSIENT hold (paused/autoPaused): neither claw
+        //             nor settle. 'settled' is irreversible, so settling a paused
+        //             deal would let the partner keep pay for a member who left an ad
+        //             that later resumes. Leave the record 'joined' so the next sweep
+        //             re-evaluates once the campaign resumes (→ claw) or closes
+        //             (→ settle). (autoPaused = bot left the sponsor → sweepOnce
+        //             already skips the uncovered sponsor, so this only defers a
+        //             manual pause; resume then claws via the normal sweep.)
+        let dealClosed, whyClosed, defer = false;
         if (rec.campaignId) {
             const camp = camps[rec.campaignId];
-            dealClosed = !(camp && camp.status === 'active' && !camp.paused && !camp.autoPaused);
-            whyClosed = dealClosed ? `campaign not live (${camp ? (camp.paused || camp.autoPaused ? 'paused' : camp.status) : 'missing'})` : null;
+            if (!camp || camp.status !== 'active') { dealClosed = true; whyClosed = `campaign not live (${camp ? camp.status : 'missing'})`; }
+            else if (camp.paused || camp.autoPaused) { defer = !explicitSettle; dealClosed = false; }
+            else { dealClosed = false; }
         } else {
             const oldEra = sponsorshow.joinPredatesEra(rec.guildId, rec.ts, eras);
             dealClosed = !sponsorAdShowing(rec.guildId, shows) || oldEra;
             whyClosed = oldEra ? 'join predates the current ad era' : 'sponsor ad not showing';
         }
-        if (dealClosed || clawOff[rec.guildId] || partnerHidSponsor) {
+        if (defer) continue;   // transient pause — keep 'joined' for re-evaluation on resume/close
+        if (dealClosed || explicitSettle) {
             outcomes.push({ id: rec.id, kind: 'settled', ts: Date.now() });
             const why = partnerHidSponsor ? 'sponsor hidden by partner'
                 : clawOff[rec.guildId] ? 'clawback disabled for sponsor'

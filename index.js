@@ -1578,8 +1578,10 @@ const startBot = (token) => {
             // tagged noAd instead, so it never counts as a paid ad verification.
             const adKey = counts ? touchCreative(pending.adRaw) : '';
             const rec = { id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() };
-            if (adKey) rec.adKey = adKey;
-            if (adKey && pending?.campaignId) rec.campaignId = pending.campaignId;   // authoritative delivery attribution (see joincheck.creditJoin)
+            if (adKey) {
+                rec.adKey = adKey;
+                if (pending?.campaignId) rec.campaignId = pending.campaignId;   // authoritative delivery attribution (see joincheck.creditJoin)
+            }
             // Verification that displayed no ad = organic activity. Tagged so
             // the admin panel's "без рекламы" mode can gauge how much stays
             // volume a server could sell in a future ad order.
