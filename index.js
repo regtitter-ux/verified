@@ -1332,21 +1332,25 @@ const startBot = (token) => {
             // and still shows, so we still do the selection pass to find it.
             if (!globalOff) {
                 try {
-                    // Resolve a candidate's sponsor (network) → { text, raw, sp }
-                    // or null (self-target / unresolvable). The cheap cap check is
-                    // done in the loop BEFORE this, so capped campaigns are skipped
-                    // without a network call.
-                    const resolveCand = async (cand) => {
-                        const raw = cand.invite;
-                        const text = applyTemplate(guild.id, raw);
-                        const sp = await resolveSponsorPresence(clients, text).catch(() => null);
-                        if (!sp || sp.guildId === guild.id) return null;
-                        return { text, raw, sp };
+                    // Resolve a candidate's sponsor presence WITHOUT a network call.
+                    // The campaign record already carries the authoritative
+                    // sponsorGuildId (set at order-create, kept in sync on invite-swap,
+                    // and re-validated OFF the user path by reconcile/isInviteValid — a
+                    // dead invite flips the campaign to status 'invalid' and drops out
+                    // of eligibleForGuild). So selection never re-fetches the invite
+                    // over Discord's ban-prone endpoint: it reads the guild id from the
+                    // record and finds the covering bot in the in-memory gateway cache.
+                    // eligibleForGuild already guaranteed coverage (fleet.has), so a
+                    // null bot means a reserve (usertoken) guild — isMemberCached takes
+                    // bot:null via the reserve path. This removes the whole proxy /
+                    // warmer / rate-limiter / timing-budget stack from the hot path,
+                    // which is exactly what kept the "no ad shows" symptom recurring.
+                    const resolveCand = (cand) => {
+                        const guildId = cand.sponsorGuildId;
+                        if (!guildId || guildId === guild.id) return null;   // missing / self-target
+                        const bot = clients.find((c) => { try { return c.isReady() && c.guilds.cache.has(guildId); } catch { return false; } }) || null;
+                        return { text: applyTemplate(guild.id, cand.invite), raw: cand.invite, sp: { guildId, bot } };
                     };
-                    // Cap a single resolve so one slow (cold-cache/proxy) invite can't
-                    // hold up the whole concurrent batch below; a timeout → treated as
-                    // "unresolvable this pass" (null) and simply skipped.
-                    const withDeadline = (pr, ms) => Promise.race([Promise.resolve(pr).catch(() => null), new Promise((r) => setTimeout(() => r(null), ms))]);
                     const fleet = campaigns.fleetGuildIds(clients);
                     // Reserve (invisible): also treat the personal account's servers
                     // as join-checkable so a campaign with no bot but where the owner
@@ -1382,37 +1386,34 @@ const startBot = (token) => {
                         const pi = ordered.findIndex((c) => c.id === prioId);
                         if (pi > 0) { const [pc] = ordered.splice(pi, 1); ordered.unshift(pc); }
                     }
-                    // One pass collects the showable candidates (resolved, not a
-                    // known member) in queue order, so we pick BOTH the main ad and
-                    // the "EXTRA GWS" bonus ad from it — no second network scan.
-                    // Cached membership keeps the whole loop cheap.
-                    // Pre-filter capped campaigns (cheap, no network) keeping queue
-                    // order, then take a bounded window of candidates to resolve.
+                    // One pass collects the showable candidates (sponsor resolved from
+                    // the record, user not a known member) in queue order, so we pick
+                    // BOTH the main ad and the "EXTRA GWS" bonus ad from it. Sponsor
+                    // resolution is now network-free (in-memory), so the only remaining
+                    // work is the membership check — a direct, per-route-throttled
+                    // member fetch (NOT the ban-prone invite endpoint), cached 60s.
+                    // Pre-filter capped campaigns and resolve sponsors synchronously,
+                    // keeping queue order, up to a bounded window.
                     const windowCands = [];
                     for (const cand of ordered) {
-                        if (capReached(cand.invite)) { sawCapped = true; continue; } // cheap, no network → unbounded
-                        windowCands.push(cand);
-                        if (windowCands.length >= 10) break;               // bound the network calls
+                        if (capReached(cand.invite)) { sawCapped = true; continue; }   // cheap → unbounded
+                        const ad = resolveCand(cand);
+                        if (!ad) continue;                                 // missing guild / self → skip
+                        windowCands.push({ cand, ad });
+                        if (windowCands.length >= 10) break;               // bound the membership checks
                     }
-                    // Resolve every candidate's sponsor CONCURRENTLY. Resolving them
-                    // one-by-one let a single cold-cache invite (a proxy miss can take
-                    // several seconds) burn the whole selection budget, so the loop
-                    // saw only 1-2 campaigns and often showed NOTHING even with a full
-                    // queue. In parallel the batch takes as long as the SLOWEST lookup,
-                    // not their sum, so a slow outlier can't starve the fast (warm)
-                    // ones. Each lookup is individually capped so verification never
-                    // freezes; warm-cache lookups return instantly with no proxy call.
-                    const resolvedCands = await Promise.all(windowCands.map(async (cand) => ({ cand, ad: await withDeadline(resolveCand(cand), 4000) })));
-                    // Membership checks are cached and cheap → do them in queue order
-                    // to build the candidate list (main = first non-member, extra = a
-                    // different showable one), preserving the original selection order.
+                    // Membership checks run CONCURRENTLY across the window — they hit
+                    // distinct sponsor guilds (distinct Discord per-route buckets) and
+                    // the member endpoint isn't the ban-prone one, so unlike the old
+                    // invite fan-out this is safe and keeps the interaction snappy
+                    // (already deferred → no 3s pressure). Results stay in queue order.
+                    const membership = await Promise.all(windowCands.map(({ ad }) => isMemberCached(ad.sp.bot, ad.sp.guildId, user.id).catch(() => null)));
                     const cands = [];   // { cand, ad, definite, hidden }
-                    for (const { cand, ad } of resolvedCands) {
-                        if (!ad) continue;                                 // unresolvable / self / timed out → skip
-                        const m = await isMemberCached(ad.sp.bot, ad.sp.guildId, user.id);
-                        if (m === true) { sawMember = true; continue; }    // already a member → skip
+                    windowCands.forEach(({ cand, ad }, i) => {
+                        const m = membership[i];
+                        if (m === true) { sawMember = true; return; }      // already a member → skip
                         cands.push({ cand, ad, definite: m === false, hidden: isHidden(cand.id) }); // not a member (or uncertain) → showable
-                    }
+                    });
                     // main = first definite non-member, else first uncertain — from
                     // NON-HIDDEN candidates only (the main ad respects the hide).
                     const mainCands = cands.filter((c) => !c.hidden);
