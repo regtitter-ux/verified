@@ -19,7 +19,6 @@ const shares = require('./shares.js');
 const { loadShares, dayNumberOf, payShares, distributeProfit } = shares;
 const { boostActive, BOOST_RATE, BOOST_MS, REFERRAL_RATE } = require('./referral.js');
 const cryptopay = require('./cryptopay.js');
-const cryptomus = require('./cryptomus.js');
 const nowpayments = require('./nowpayments.js');
 const usertoken = require('./usertoken.js');
 const reservegw = require('./reservegw.js');
@@ -2605,12 +2604,6 @@ async function handleBuyer(req, res, path, clients, config) {
                             }
                         }
                     }
-                    if (cryptomus.enabled()) {
-                        for (const t of wallet.pendingByProvider(buyerId, 'cryptomus')) {
-                            const st = await cryptomus.paymentStatus(t.orderId).catch(() => null);
-                            if (cryptomus.isPaidStatus(st)) wallet.settlePending(buyerId, { orderId: t.orderId });
-                        }
-                    }
                 } catch (_) { /* background best-effort */ }
                 finally { _walletReconciling.delete(buyerId); }
             })();
@@ -2621,7 +2614,7 @@ async function handleBuyer(req, res, path, clients, config) {
             topups: wallet.recentTopups(buyerId),
             minTopup,
             cryptoEnabled: cryptopay.enabled(),
-            cryptoWebEnabled: nowpayments.enabled() || cryptomus.enabled()
+            cryptoWebEnabled: nowpayments.enabled()
         }, cors);
     }
     // Top up the wallet via a CryptoBot invoice. Body: { amount }.
@@ -2641,24 +2634,21 @@ async function handleBuyer(req, res, path, clients, config) {
     }
 
     // Top up the wallet via a hosted WEB checkout — the buyer pays from ANY crypto
-    // wallet (no Telegram / no bot). Prefers NOWPayments, falls back to Cryptomus if
-    // only that one is configured. Body: { amount }.
+    // wallet (no Telegram / no bot), via NOWPayments. Body: { amount }. (The legacy
+    // /topup/cryptomus path is kept as an alias so old frontends keep working.)
     if ((path === '/order/wallet/topup/web' || path === '/order/wallet/topup/cryptomus') && req.method === 'POST') {
-        const useNow = nowpayments.enabled();
-        if (!useNow && !cryptomus.enabled()) return send(res, 503, { error: 'Оплата криптой временно недоступна' }, cors);
+        if (!nowpayments.enabled()) return send(res, 503, { error: 'Оплата криптой временно недоступна' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const amount = +(Number(body?.amount) || 0).toFixed(2);
         const minTopup = managers.isManager(buyerId) ? managers.MIN_TOPUP : wallet.MIN_TOPUP;
         if (!(amount >= minTopup)) return send(res, 400, { error: 'min-topup' }, cors);
-        const provider = useNow ? 'nowpayments' : 'cryptomus';
+        const provider = 'nowpayments';
         const orderId = `topup:${buyerId}:${crypto.randomBytes(5).toString('hex')}`;
         const apiBase = (process.env.PUBLIC_API_BASE || `https://${req.headers.host}`).replace(/\/+$/, '');
         let pay = null;
         try {
-            pay = useNow
-                ? await nowpayments.createPayment({ amount: amount.toFixed(2), orderId, callbackUrl: apiBase + '/nowpayments/webhook', returnUrl: 'https://vemoni.info/order/' })
-                : await cryptomus.createPayment({ amount: amount.toFixed(2), orderId, callbackUrl: apiBase + '/cryptomus/webhook', returnUrl: 'https://vemoni.info/order/' });
+            pay = await nowpayments.createPayment({ amount: amount.toFixed(2), orderId, callbackUrl: apiBase + '/nowpayments/webhook', returnUrl: 'https://vemoni.info/order/' });
         } catch (e) { return send(res, 502, { error: 'invoice-failed' }, cors); }
         if (!pay || !pay.url) return send(res, 502, { error: 'invoice-failed' }, cors);
         wallet.addTopup(buyerId, { provider, orderId, amount, status: 'pending', createdAt: Date.now() });
@@ -3799,25 +3789,6 @@ function startApiServer(clients, config) {
                     if (events.length >= 25) break;
                 }
                 return send(res, 200, { events }, { 'Access-Control-Allow-Origin': '*' });
-            }
-
-            // Public: Cryptomus payment webhook (server-to-server, no session). We
-            // never trust the posted status — we re-fetch it from Cryptomus and, if
-            // paid, credit the matching pending wallet top-up (idempotent).
-            if (req.method === 'POST' && p === '/cryptomus/webhook') {
-                try {
-                    const body = await readBody(req);
-                    const orderId = body && body.order_id;
-                    if (orderId && /^topup:\d{17,20}:/.test(String(orderId))) {
-                        const status = await cryptomus.paymentStatus(orderId).catch(() => null);
-                        if (cryptomus.isPaidStatus(status)) {
-                            const buyerId = String(orderId).split(':')[1];
-                            const credited = wallet.settlePending(buyerId, { orderId });
-                            if (credited > 0) console.log(`[CRYPTOMUS] credited $${credited} to ${buyerId} (${orderId})`);
-                        }
-                    }
-                } catch (e) { console.error('[CRYPTOMUS] webhook:', e.message); }
-                return send(res, 200, { ok: true }); // always 200 so Cryptomus doesn't retry-storm
             }
 
             // Public: NOWPayments IPN webhook. We never trust the posted status — we

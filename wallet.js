@@ -84,7 +84,7 @@ async function reconcileTopups(buyerId, isPaidFn) {
     return round2(credited);
 }
 
-// Pending top-ups for one provider (e.g. 'cryptomus') — used to reconcile against
+// Pending top-ups for one provider (e.g. 'nowpayments') — used to reconcile against
 // the gateway as a webhook fallback.
 function pendingByProvider(buyerId, provider) {
     const wa = loadWallets()[buyerId];
