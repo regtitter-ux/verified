@@ -361,25 +361,30 @@ async function reconcile(clients) {
                     continue;
                 }
             }
-            if (delivered(c, verified, camps) >= c.purchased) {
+            const del = delivered(c, verified, camps);
+            if (del >= c.purchased) {
                 c.status = 'complete'; c.completedAt = now; changed = true;
                 notifyBuyer(clients, c, 'complete').catch(() => null);
-            } else if (canJudgePresence && !(await serveable(c))) {
-                // Below target but the sponsor has no bot/reserve → it can't be
-                // delivered. Freeze it back to 'complete' (this is the settled state
-                // for a long-finished order whose bot has left) rather than leaving
-                // it hanging 'active' with nobody serving it.
+            } else if (canJudgePresence && !(await serveable(c)) && del > 0) {
+                // Delivered SOME but the sponsor's bot/reserve is now gone → a
+                // finished/settled order; freeze to 'complete'. A campaign that
+                // delivered NOTHING never started — freezing it to 'complete' shows
+                // the buyer a misleading "Выполнена 0/N". Leave THAT one 'active' so
+                // the dashboard surfaces the 'no_bot' warning (add-the-bot link) and
+                // it auto-delivers the moment a bot joins the sponsor.
                 c.status = 'complete'; c.completedAt = c.completedAt || now; changed = true;
-                console.log(`[CAMPAIGN] freeze ${c.id} — no bot/reserve on sponsor ${c.sponsorGuildId}, cannot deliver`);
+                console.log(`[CAMPAIGN] freeze ${c.id} — delivered ${del}, bot left sponsor ${c.sponsorGuildId}`);
             }
         } else if (c.status === 'complete') {
+            const del = delivered(c, verified, camps);
             // Self-heal a completion that dropped below target (shared-invite FIFO
-            // re-allocation, or leave clawbacks) — BUT only reopen it if it can
-            // actually still be delivered (a bot/reserve is on the sponsor). A
-            // long-finished order whose bot has left stays 'complete'.
-            if (delivered(c, verified, camps) < c.purchased && canJudgePresence && await serveable(c)) {
+            // re-allocation, or leave clawbacks) when it can still be delivered
+            // (a bot/reserve is on the sponsor). ALSO reopen an order that was
+            // wrongly frozen at 0 delivered — it never actually completed, so it
+            // should read as active (with the 'no_bot' warning), not "Выполнена".
+            if (del < c.purchased && canJudgePresence && (del === 0 || await serveable(c))) {
                 c.status = 'active'; changed = true;   // keep completedAt for history
-                console.log(`[CAMPAIGN] resume ${c.id} — below target and still deliverable`);
+                console.log(`[CAMPAIGN] resume ${c.id} — below target (${del}/${c.purchased})`);
             }
         }
     }

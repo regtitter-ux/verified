@@ -2676,6 +2676,14 @@ async function handleBuyer(req, res, path, clients, config) {
         const sponsorGuildId = (inv && inv.guild && inv.guild.id) || null;
         if (!sponsorGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
 
+        // The sponsor must be join-checkable — a network bot on it, OR the reserve
+        // covers it — otherwise NOTHING can deliver and the order would freeze at
+        // 0 delivered. Warn the buyer to add the bot (the frontend shows the invite
+        // link on 'no-bot') BEFORE taking any payment, instead of silently creating
+        // an undeliverable campaign. (The invite-change endpoint already does this.)
+        const covered = await coveredGuildIds(clients);
+        if (!covered.has(sponsorGuildId)) return send(res, 400, { error: 'no-bot' }, cors);
+
         const isMgr = managers.isManager(buyerId);
         const pricePer100 = isMgr ? managers.PRICE_PER_100 : campaigns.PRICE_PER_100;
         const price = +(joins * pricePer100 / 100).toFixed(2);
