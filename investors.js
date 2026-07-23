@@ -199,13 +199,28 @@ function accountOf(userId, verified) {
         for (const p of byServer[serverId]) { const n = (fills.get(p.id) || []).length; sold += n; returns += n * retPerInvite(); }
     }
     const withdrawn = Number(u.withdrawn) || 0;
-    const available = round2(topupsPaid - invested + returns - withdrawn);
+    const manualAdjust = Number(u.manualAdjust) || 0;   // owner correction to the balance
+    const available = round2(topupsPaid - invested + returns - withdrawn + manualAdjust);
     return {
         available: Math.max(0, available),
         invested: round2(invested), returned: round2(returns), withdrawn: round2(withdrawn),
+        manualAdjust: round2(manualAdjust), topupsPaid: round2(topupsPaid),
         profit: round2(returns - sold * buyPerInvite()),
         owned, sold, outstanding: owned - sold
     };
+}
+
+// Owner-only correction to a user's investor 'available' balance. Persisted as a
+// `manualAdjust` delta so the derived topups/positions math stays intact and the
+// correction is auditable. `delta` may be negative.
+function adjust(userId, delta) {
+    const d = Number(delta) || 0;
+    if (!d) return Number((load()[userId] || {}).manualAdjust) || 0;
+    const all = load();
+    if (!all[userId]) all[userId] = { topups: [], positions: [], withdrawn: 0 };
+    all[userId].manualAdjust = round2((Number(all[userId].manualAdjust) || 0) + d);
+    save(all);
+    return all[userId].manualAdjust;
 }
 
 // Keep pending top-ups (needed for reconciliation) + the most recent settled;
@@ -447,6 +462,6 @@ module.exports = {
     get BUY_PER_100(){return buyPer100();}, get SELL_PER_100(){return sellPer100();}, get RETURN_RATE(){return returnRate();}, get BUY_PER_INVITE(){return buyPerInvite();}, get RET_PER_INVITE(){return retPerInvite();}, get MIN_TOPUP(){return minTopup();}, get MIN_BUY(){return minBuy();}, get MIN_DAYS(){return minDays();}, get MIN_DAILY(){return minDaily();},
     serverMinInvites, serverMaxInvites, get MAX_DAYS(){return maxDays();}, serverDailyRate, isServerInvestable, occupancyOf, serverOutstanding, buyinProfitPerInvite,
     serverBroken, refundServer, sweepBrokenServers, startInvestSweep,
-    accountOf, addTopup, reconcileTopups, recentTopups, buy, recordBuyinCredits, withdraw, serversFor,
+    accountOf, adjust, addTopup, reconcileTopups, recentTopups, buy, recordBuyinCredits, withdraw, serversFor,
     loadEnabledServers, saveEnabledServers, isServerEnabled, addEnabledServer, removeEnabledServer, manualTopup
 };

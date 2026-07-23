@@ -15,6 +15,14 @@ test('debit reduces the balance and never overdraws', () => {
     assert.equal(wallet.balanceOf(B), 8, 'balance unchanged after a rejected debit');
 });
 
+test('setBalance sets the wallet to an exact value (owner edit)', () => {
+    seed({ 'wallets.json': { [B]: { balance: 20, topups: [] } } });
+    assert.equal(wallet.setBalance(B, 7.5), 7.5);
+    assert.equal(wallet.balanceOf(B), 7.5);
+    assert.equal(wallet.setBalance(B, 0), 0);
+    assert.equal(wallet.setBalance('NEWUSER', 3), 3, 'auto-creates the wallet');
+});
+
 test('reconcileTopups credits a paid invoice exactly once (idempotent)', async () => {
     seed({ 'wallets.json': { [B]: { balance: 0, topups: [
         { invoiceId: 'INV1', amount: 25, status: 'pending', createdAt: 1 },

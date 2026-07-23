@@ -23,6 +23,12 @@ function credit(buyerId, amount) {
     wa.balance = round2((wa.balance || 0) + (Number(amount) || 0));
     saveWallets(w); return wa.balance;
 }
+// Owner-only: set the wallet balance to an exact value (returns it).
+function setBalance(buyerId, value) {
+    const w = loadWallets(); const wa = ensure(w, buyerId);
+    wa.balance = round2(Number(value) || 0);
+    saveWallets(w); return wa.balance;
+}
 // Returns the new balance, or null if insufficient funds.
 function debit(buyerId, amount) {
     const amt = round2(amount);
@@ -128,4 +134,4 @@ function totalHeld() {
     return round2(Object.values(w).reduce((a, x) => a + (Number(x?.balance) || 0), 0));
 }
 
-module.exports = { get MIN_TOPUP() { return minTopup(); }, balanceOf, credit, debit, addTopup, reconcileTopups, pendingByProvider, settlePending, updatePending, recentTopups, totalHeld, round2 };
+module.exports = { get MIN_TOPUP() { return minTopup(); }, balanceOf, credit, debit, setBalance, addTopup, reconcileTopups, pendingByProvider, settlePending, updatePending, recentTopups, totalHeld, round2 };

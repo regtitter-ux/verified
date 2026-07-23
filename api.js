@@ -112,6 +112,7 @@ const backup = require('./backup.js');
 const poster = require('./poster.js');
 const extraad = require('./extraad.js');
 const wallet = require('./wallet.js');
+const ledger = require('./ledger.js');
 const lots = require('./lots.js');
 const lotmon = require('./lotmon.js');
 const investors = require('./investors.js');
@@ -3061,6 +3062,50 @@ async function handlePartner(req, res, path, clients, config) {
     const asParam = (() => { try { return (new URL(req.url, 'http://x').searchParams.get('as') || '').trim(); } catch { return ''; } })();
     const actingAs = (actorIsAdmin && /^\d{17,20}$/.test(asParam) && asParam !== actorId) ? asParam : null;
     const userId = actingAs || actorId;
+
+    // ---- Owner-only: view & edit this user's OTHER balances (buyer wallet + their
+    // orders, investor account). Surfaced as extra cabinet tabs when acting-as.
+    // Gated on actorIsAdmin; operate on `userId` (the acting-as target). ----
+    if (path === '/partner/x-orders' && req.method === 'GET') {
+        if (!actorIsAdmin) return send(res, 403, { error: 'owner only' }, cors);
+        const verified = loadJSON('verified.json', []);
+        const camps = campaigns.loadCampaigns();
+        const mine = Object.values(camps).filter((c) => c.buyerId === userId && c.status !== 'pending_payment')
+            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+            .map((c) => campaigns.publicView(c, verified));
+        return send(res, 200, { wallet: wallet.balanceOf(userId), campaigns: mine, topups: wallet.recentTopups(userId, 15) }, cors);
+    }
+    if (path === '/partner/x-investments' && req.method === 'GET') {
+        if (!actorIsAdmin) return send(res, 403, { error: 'owner only' }, cors);
+        const verified = loadJSON('verified.json', []);
+        return send(res, 200, { account: investors.accountOf(userId, verified), topups: investors.recentTopups(userId, 15) }, cors);
+    }
+    if (path === '/partner/x-balance' && req.method === 'POST') {
+        if (!actorIsAdmin) return send(res, 403, { error: 'owner only' }, cors);
+        const body = await readBody(req);
+        if (!body) return send(res, 400, { error: 'bad json' }, cors);
+        const kind = String(body.kind || '');
+        const mode = body.mode === 'add' ? 'add' : 'set';
+        const amount = Number(body.amount);
+        if (!Number.isFinite(amount)) return send(res, 400, { error: 'bad-amount' }, cors);
+        let value;
+        if (kind === 'partner') {
+            const cur = ledger.balanceOf(userId);
+            const delta = mode === 'add' ? amount : (amount - cur);
+            const reason = mode === 'add' ? 'owner_adjust' : 'owner_set';
+            if (delta >= 0) ledger.credit(userId, delta, { reason }); else ledger.debit(userId, -delta, { reason });
+            value = ledger.balanceOf(userId);
+        } else if (kind === 'wallet') {
+            value = wallet.setBalance(userId, mode === 'add' ? wallet.balanceOf(userId) + amount : amount);
+        } else if (kind === 'investor') {
+            const verified = loadJSON('verified.json', []);
+            const cur = investors.accountOf(userId, verified).available;
+            investors.adjust(userId, mode === 'add' ? amount : (amount - cur));
+            value = investors.accountOf(userId, verified).available;
+        } else return send(res, 400, { error: 'bad-kind' }, cors);
+        console.log(`[BALANCE] owner ${actorId} ${mode} ${kind}=${amount} for ${userId} → ${value}`);
+        return send(res, 200, { ok: true, kind, value }, cors);
+    }
 
     // Partner activity log for this partner, with filters (by server, by
     // verifying user, by type/reason, by period, sort order).
