@@ -1,4 +1,4 @@
-const { seed, reset } = require('./setup');
+const { seed, read, reset } = require('./setup');
 const { test, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const campaigns = require('../campaigns.js');
@@ -46,6 +46,23 @@ test('a brand-new campaign queued behind an unfilled earlier one delivers 0', ()
 
     assert.equal(campaigns.delivered(camps.A, verified, camps), 5);
     assert.equal(campaigns.delivered(camps.B, verified, camps), 0, 'newest campaign is queued, not double-counting A\'s joins');
+});
+
+test('a fulfilled (completed) campaign is NEVER reopened, even if it drops below target', async () => {
+    // Reached target once (fulfilled), but only 3 of 5 joins remain now (2 churned).
+    const camps = { A: { id: 'A', invite: INVITE, sponsorGuildId: 'S', purchased: 5, status: 'complete', fulfilled: true, paidAt: T1, completedAt: T1 + 1000, adKeys: [], inviteCheckedAt: T1 + 1000 } };
+    seed({ 'campaigns.json': camps, 'verified.json': joins(3), 'sponsorshow.json': {}, 'sponsorera.json': {}, 'siteconfig.json': {} });
+    await campaigns.reconcile([]);
+    assert.equal(read('campaigns.json').A.status, 'complete', 'fulfilled order stays complete — no re-open, no duplicate "Campaign complete!"');
+});
+
+test('a legacy completion still at/above target is stamped fulfilled (terminal) by reconcile', async () => {
+    const camps = { A: { id: 'A', invite: INVITE, sponsorGuildId: 'S', purchased: 3, status: 'complete', paidAt: T1, completedAt: T1 + 1000, adKeys: [], inviteCheckedAt: T1 + 1000 } };
+    seed({ 'campaigns.json': camps, 'verified.json': joins(4), 'sponsorshow.json': {}, 'sponsorera.json': {}, 'siteconfig.json': {} });
+    await campaigns.reconcile([]);
+    const A = read('campaigns.json').A;
+    assert.equal(A.status, 'complete');
+    assert.equal(A.fulfilled, true, 'backfilled terminal so it can never re-open later');
 });
 
 test('a unique-invite campaign counts its own joins (deduped by user)', () => {
