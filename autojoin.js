@@ -16,15 +16,13 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { isMember, creditJoin } = require('./joincheck.js');
 const { isDuplicateJoin } = require('./verifyrules.js');
 const { touchCreative, maybeNotifyAdComplete } = require('./adcreative.js');
-const { logFunds } = require('./fundslog.js');
 const { syncHubMember } = require('./hubrole.js');
-const { payShares } = require('./shares.js');
 const sharesMod = require('./shares.js');
-const { maybeAutoWithdraw } = require('./payouts.js');
 const managers = require('./managers.js');
 const campaigns = require('./campaigns.js');
 const investors = require('./investors.js');
 const partnerlog = require('./partnerlog.js');
+const { settleCreditedJoin } = require('./settlejoin.js');
 
 const FILE = 'pendingjoins.json';
 const WINDOW_MS = Number(process.env.AUTOJOIN_WINDOW_MS) || 6 * 3600 * 1000;   // still auto-credit for this long after the first click
@@ -119,11 +117,12 @@ async function complete(clients, e) {
     // for it — no balance credit, no shares, no funds-log entry.
     if (e.viaExtra) { console.log(`[AUTOJOIN] extra-ad delivery ${e.userId} on sponsor ${e.sponsorGuildId} (no partner credit)`); return; }
     const amount = credit.amount;
-    try { partnerlog.logEvent(e.creatorId, { type: 'grant', reason: 'paid', amount, userId: e.userId, guildId: e.cardGuildId, roleId: e.roleId, sponsorGuildId: e.sponsorGuildId, srcId: credit.linkId }); } catch { /* never block */ }
-    await logFunds(clients, { type: 'credit', creatorId: e.creatorId, userId: e.userId, guildId: e.cardGuildId, channelId: e.channelId, amount, sponsorGuildId: e.sponsorGuildId, reason: 'Join auto-verified — first click + confirmed join (no second click)' });
-    if (!investorOwned) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
-    await maybeAutoWithdraw(clients, e.creatorId);
-    if (credit.referrerId) await maybeAutoWithdraw(clients, credit.referrerId).catch(() => null); // referral bonus credited at join
+    // Shared bookkeeping tail — identical to the in-Discord second-click path, see settlejoin.js.
+    await settleCreditedJoin(clients, {
+        creatorId: e.creatorId, joinerId: e.userId, cardGuildId: e.cardGuildId, channelId: e.channelId, roleId: e.roleId,
+        sponsorGuildId: e.sponsorGuildId, amount, linkId: credit.linkId, referrerId: credit.referrerId,
+        investorOwned, revenue: econ.revenue, reason: 'Join auto-verified — first click + confirmed join (no second click)',
+    });
     console.log(`[AUTOJOIN] credited ${e.userId} on sponsor ${e.sponsorGuildId} (partner ${e.creatorId}) $${amount}`);
 }
 

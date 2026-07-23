@@ -19,7 +19,6 @@ const { shouldCountJoin, isDuplicateJoin } = require('./verifyrules.js');
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
-const { payShares } = require('./shares.js');
 const sharesMod = require('./shares.js');
 const campaigns = require('./campaigns.js');
 const usertoken = require('./usertoken.js');
@@ -32,8 +31,8 @@ const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
 const investors = require('./investors.js');
-const { logFunds } = require('./fundslog.js');
 const partnerlog = require('./partnerlog.js');
+const { settleCreditedJoin } = require('./settlejoin.js');
 const logincodes = require('./logincodes.js');
 
 // The "Join" link button under the ad is disabled by request — the ad text
@@ -1640,21 +1639,14 @@ const startBot = (token) => {
                     // as a duplicate grant, not a paid one.
                     try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'dup_join', userId: user.id, guildId: guild.id, roleId, sponsorGuildId: sponsor.guildId, srcId: sponsor ? `dup:${user.id}:${sponsor.guildId}` : undefined }); } catch { /* never block */ }
                 } else {
-                    const amount = credit.amount;
-                    try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'paid', amount, userId: user.id, guildId: guild.id, roleId, sponsorGuildId: sponsor.guildId, srcId: credit.linkId }); } catch { /* never block */ }
-                    await logFunds(clients, {
-                        type: 'credit', creatorId, userId: user.id, guildId: guild.id, channelId,
-                        amount, sponsorGuildId: sponsor.guildId,
-                        reason: 'Join verified — member joined the sponsor server'
+                    // Shared bookkeeping tail (partnerlog, funds embed, share split,
+                    // auto-withdraw) — identical to the auto-join path, see settlejoin.js.
+                    await settleCreditedJoin(clients, {
+                        creatorId, joinerId: user.id, cardGuildId: guild.id, channelId, roleId,
+                        sponsorGuildId: sponsor.guildId, amount: credit.amount, linkId: credit.linkId,
+                        referrerId: credit.referrerId, investorOwned: investorOwnedJoin,
+                        revenue: econ.revenue, reason: 'Join verified — member joined the sponsor server',
                     });
-                    // Split this join's service profit (revenue − partner payout −
-                    // acquiring) across shareholders — manager sales just use the
-                    // lower revenue. Skip for investor-owned joins: their revenue
-                    // funds the investor's return and the share split was already
-                    // done at buy-in (no double-counting).
-                    if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
-                    await maybeAutoWithdraw(clients, creatorId);
-                    if (credit.referrerId) await maybeAutoWithdraw(clients, credit.referrerId).catch(() => null); // referral bonus credited at join
                 }
             }
         } catch (e) {
