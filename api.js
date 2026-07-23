@@ -2826,9 +2826,20 @@ async function handleBuyer(req, res, path, clients, config) {
             if (isAdminBuyer) row.extra = extra;
             return row;
         };
-        let servers = Object.entries(perGuild).map(([gid, g]) =>
-            rowOf([...g.extra].filter((uid) => !g.paid.has(uid)).length, g.paid.size,
-                { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), disabled: (c.disabledGuilds || []).includes(gid) }));
+        // Show ALL active partner servers (a live verification card, bot present),
+        // not only those that already delivered — with count 0 by default — so the
+        // buyer sees the full reach. A campaign never advertises on its own sponsor.
+        const guildIds = new Set(Object.keys(perGuild));
+        try {
+            for (const card of cards.loadCards()) {
+                if (card && !card.deletedAt && card.guildId && String(card.guildId) !== String(c.sponsorGuildId)) guildIds.add(String(card.guildId));
+            }
+        } catch { /* if cards are unavailable, fall back to delivered-only */ }
+        let servers = [...guildIds].map((gid) => {
+            const g = perGuild[gid];
+            return rowOf(g ? [...g.extra].filter((uid) => !g.paid.has(uid)).length : 0, g ? g.paid.size : 0,
+                { gid, name: guildNameOf(clients, gid), icon: guildIconOf(clients, gid), disabled: (c.disabledGuilds || []).includes(gid) });
+        });
         // Resolve each bot's name/avatar and render it as a row alongside servers.
         const botRows = await Promise.all(Object.entries(perBot).map(async ([bid, b]) => {
             const mini = await userMiniLive(clients, bid).catch(() => null);
@@ -2836,8 +2847,7 @@ async function handleBuyer(req, res, path, clients, config) {
                 { isBot: true, botId: bid, name: (mini && (mini.name || mini.username)) || `Bot ${bid}`, icon: (mini && mini.avatar) || null, disabled: (c.disabledBots || []).includes(bid) });
         }));
         servers = servers.concat(botRows);
-        // Non-admins (buyer / partner / manager) don't see extra-only rows.
-        if (!isAdminBuyer) servers = servers.filter((s) => s.count > 0);
+        // Sort by paid joins desc — delivered servers on top, 0-count partners below.
         servers.sort((a, b) => b.count - a.count || ((b.extra || 0) - (a.extra || 0)));
         return send(res, 200, { servers }, cors);
     }
