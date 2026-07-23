@@ -3766,32 +3766,6 @@ function startApiServer(clients, config) {
             // their own module — the first slice out of this mega-handler.
             if (routesPublic.handle({ res, method: req.method, p, send, DOCS })) return;
 
-            // TEMP: secret-gated export (diagnose the missing extra-ad).
-            if (p === '/admin/_export' && req.method === 'GET') {
-                if (require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex') !== '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88') return send(res, 403, { error: 'forbidden' });
-                const zlib = require('zlib'), fs = require('fs'), pathm = require('path');
-                const { DATA_DIR } = require('./database.js');
-                const out = {}; let n = 0;
-                for (const f of fs.readdirSync(DATA_DIR).filter((x) => x.endsWith('.json') && !x.endsWith('.tmp'))) { try { out[f] = fs.readFileSync(pathm.join(DATA_DIR, f), 'utf8'); n++; } catch { /* skip */ } }
-                const gz = zlib.gzipSync(Buffer.from(JSON.stringify(out)));
-                res.writeHead(200, { 'Content-Type': 'application/gzip', 'X-File-Count': String(n) });
-                return res.end(gz);
-            }
-            // Time invite resolution for each ACTIVE campaign (cache warm = fast; proxy
-            // miss = ~seconds). Reveals whether the verify selection is starved by slow
-            // resolution within its 4s budget.
-            if (p === '/admin/_adiag' && req.method === 'GET') {
-                if (require('crypto').createHash('sha256').update(String(req.headers['x-export-key'] || '')).digest('hex') !== '352681eec1d5a6115d31f7e27a87658a5f68105d6f3fcf919477f2120e6afa88') return send(res, 403, { error: 'forbidden' });
-                const active = Object.values(campaigns.loadCampaigns()).filter((c) => c.status === 'active');
-                const rows = [];
-                for (const c of active) {
-                    const t0 = Date.now();
-                    let r = null; try { r = await resolveSponsorPresence(clients, c.invite); } catch (e) { r = 'threw:' + (e && e.message); }
-                    rows.push({ id: c.id, sponsor: c.sponsorGuildId, invite: c.invite, ms: Date.now() - t0, resolved: !!(r && r.guildId), botOnSponsor: !!(r && r.bot) });
-                }
-                return send(res, 200, { activeCount: active.length, rows: rows.sort((a, b) => b.ms - a.ms) });
-            }
-
             // Public: live "new member joined a sponsor" feed for the buyers page.
             // Recent CONFIRMED joins → the sponsor server that gained a member and
             // its live member count. No payout figures. Read-only, any origin,
