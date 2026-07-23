@@ -32,19 +32,11 @@ const managers = require('./managers.js');
 const cards = require('./cards.js');
 const backup = require('./backup.js');
 const investors = require('./investors.js');
-const refundMigration = require('./refundmigration.js');
-const refundCampaign = require('./refundcampaign.js');
 const { logFunds } = require('./fundslog.js');
 const partnerlog = require('./partnerlog.js');
 const logincodes = require('./logincodes.js');
 
 // The "Join" link button under the ad is disabled by request — the ad text
-// already carries the invite link. Returns null so the verification replies show
-// no button. (Kept as a no-op so both call sites stay unchanged.)
-function joinButtonRow() {
-    return null;
-}
-
 // Short-lived membership cache for AD SELECTION only (deciding which ad to show
 // and skipping a server the user is already in). This is the hot path's main cost
 // — `isMember` force-fetches Discord every call, and the main loop + the extra-ad
@@ -1490,9 +1482,8 @@ const startBot = (token) => {
 
             // Bonus "EXTRA GWS" ad — reuse the pick from the main selection pass
             // above (no second network scan). record + stamp happen inside.
-            const firstJoinRow = joinButtonRow(latest?.raw, responseText);
             const extraRow = attachExtraRow(guild, creatorId, user.id, firstExtra, 'pre', interaction.channelId);
-            const firstComponents = [firstJoinRow, extraRow].filter(Boolean);
+            const firstComponents = [extraRow].filter(Boolean);
 
             // Send the reply FIRST, then do the local bookkeeping (funnel click +
             // autojoin record) off the response path so they don't add to the
@@ -1531,7 +1522,6 @@ const startBot = (token) => {
         if (sponsor) {
             const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
             if (joined !== true) {
-                const retryJoinRow = joinButtonRow(pending.adRaw, pending.adText);
                 // Distinguish "not a member yet" (false) from "couldn't check right
                 // now" (null): the transient case must NOT read as "join first" (it
                 // misleads a user who already joined). We still don't grant access
@@ -1542,7 +1532,7 @@ const startBot = (token) => {
                 // Keep the bonus "EXTRA GWS" ad on repeat "please join" prompts too,
                 // excluding the sponsor they're being asked to join. Still 'pre'.
                 const retryExtraRow = await buildExtraRow(clients, guild, creatorId, user.id, sponsor.guildId, 'pre', interaction.channelId).catch(() => null);
-                const retryComponents = [retryJoinRow, retryExtraRow].filter(Boolean);
+                const retryComponents = [retryExtraRow].filter(Boolean);
                 return interaction.editReply({ content, components: retryComponents }).catch(() => null);
             }
         }
@@ -1789,14 +1779,6 @@ setTimeout(async () => {
 
 // Data backups: rolling local snapshots + off-site copies to a Discord channel.
 backup.startBackupSweep(clients);
-
-// One-time: refund clawbacks that fired while the sponsor's ad was off (the
-// old opt-out was keyed by the wrong guild). Guarded by a marker; delayed so
-// the bots are logged in when it posts the summary.
-setTimeout(() => refundMigration.runOnce(clients).catch((e) => console.error('[REFUND]', e.message)), 45 * 1000);
-// Return clawbacks charged for joins whose campaign had already finished (the ad
-// ERA fix in sponsorshow.js prevents new ones).
-setTimeout(() => refundCampaign.runOnce(clients).catch((e) => console.error('[REFUND]', e.message)), 50 * 1000);
 
 // Uptime monitoring: alert to alertChannel() when a bot goes offline / recovers.
 const alertChannel = () => (process.env.ALERT_CHANNEL || '').trim();
