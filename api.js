@@ -383,7 +383,7 @@ function resolveKey(key) {
 // (member, server), tagged with the creative's adKey (paid join) or noAd
 // (no active ad). Replaces any prior entry so repeats don't inflate stats.
 // Returns the fresh verified.json array (for the completion-notice check).
-function recordApiVerified({ creatorId, memberId, serverId, adKey, noAd, botId }) {
+function recordApiVerified({ creatorId, memberId, serverId, adKey, noAd, botId, campaignId }) {
     const verified = loadJSON('verified.json', []);
     const arr = Array.isArray(verified) ? verified : [];
     const gid = /^\d{17,20}$/.test(String(serverId || '')) ? String(serverId) : 'api';
@@ -393,6 +393,7 @@ function recordApiVerified({ creatorId, memberId, serverId, adKey, noAd, botId }
     if (botId) rec.botId = String(botId);
     if (adKey) rec.adKey = adKey;
     else if (noAd) rec.noAd = true;
+    if (adKey && campaignId) rec.campaignId = String(campaignId);   // authoritative delivery attribution
     kept.push(rec);
     saveJSON('verified.json', kept);
     return kept;
@@ -3982,7 +3983,7 @@ function startApiServer(clients, config) {
                 const camp = ad.campaignId ? campaigns.loadCampaigns()[ad.campaignId] : null;
                 const econ = managers.joinEconomics(camp, shares.REVENUE_PER_JOIN);
                 const credit = creditJoin(userId, sponsor.guildId, memberId, effServerId, 'api', null,
-                    { revenue: econ.revenue, managerId: econ.managerId, botId });
+                    { revenue: econ.revenue, managerId: econ.managerId, botId, campaignId: ad.campaignId });
                 // Race backstop: creditJoin's atomic guard caught a concurrent
                 // credit for the same (user, sponsor) — treat as already counted.
                 if (credit.duplicate) {
@@ -3998,7 +3999,7 @@ function startApiServer(clients, config) {
                 let investorOwnedJoin = false;
                 try { investorOwnedJoin = investors.serverOutstanding(effServerId, loadJSON('verified.json', [])) > 0; } catch { /* never block verification */ }
                 if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
-                const fresh = recordApiVerified({ creatorId: userId, memberId, serverId: effServerId, adKey, botId });
+                const fresh = recordApiVerified({ creatorId: userId, memberId, serverId: effServerId, adKey, botId, campaignId: ad.campaignId });
                 syncHubMember(clients, userId).catch(() => null); // partner (card owner)
                 await logFunds(clients, {
                     type: 'credit', creatorId: userId, userId: memberId, guildId: effServerId,

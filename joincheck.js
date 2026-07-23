@@ -293,6 +293,11 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
         if (extra.managerId) rec.managerId = String(extra.managerId);
         if (extra.botId) rec.botId = String(extra.botId); // developer API: which bot delivered the join
         if (extra.extraPlacement) rec.extraPlacement = String(extra.extraPlacement); // 'pre' | 'post' — extra-ad button
+        // Authoritative campaign attribution stamped at credit time (the winning
+        // campaign id is always known here). Lets the leave-clawback gate look up
+        // THIS deal's lifecycle state directly instead of guessing from ad-display
+        // timestamps, and lets delivery be a plain per-campaign count.
+        if (extra.campaignId) rec.campaignId = String(extra.campaignId);
     }
     arr.push(rec);
     saveJSON('joinlinks.json', arr);

@@ -1589,6 +1589,7 @@ const startBot = (token) => {
             const adKey = counts ? touchCreative(pending.adRaw) : '';
             const rec = { id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() };
             if (adKey) rec.adKey = adKey;
+            if (adKey && pending?.campaignId) rec.campaignId = pending.campaignId;   // authoritative delivery attribution (see joincheck.creditJoin)
             // Verification that displayed no ad = organic activity. Tagged so
             // the admin panel's "без рекламы" mode can gauge how much stays
             // volume a server could sell in a future ad order.
@@ -1640,7 +1641,7 @@ const startBot = (token) => {
                 // Confirmed member of the sponsor server: pay the join-check rate,
                 // reversible on leave (role + payout), see joincheck.js.
                 const credit = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId,
-                    { revenue: econ.revenue, managerId: econ.managerId });
+                    { revenue: econ.revenue, managerId: econ.managerId, campaignId: pending?.campaignId });
                 if (credit.duplicate) {
                     // Lost a race to another concurrent verify of the same (user,
                     // sponsor): it already credited. Nothing more to pay — log it

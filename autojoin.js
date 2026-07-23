@@ -72,6 +72,7 @@ async function complete(clients, e) {
             const rec = { id: e.userId, guildId: e.cardGuildId, roleId: e.roleId || null, creatorId: e.creatorId, timestamp: Date.now(), viaAutoJoin: true };
             if (e.viaExtra) rec.viaExtra = true;   // bonus-ad delivery, isolated from card stats
             if (adKey) rec.adKey = adKey; else rec.noAd = true;
+            if (adKey && e.campaignId) rec.campaignId = e.campaignId;   // authoritative delivery attribution
             arr.push(rec);
             saveJSON('verified.json', arr);
             if (adKey) maybeNotifyAdComplete(clients, adKey, arr).catch(() => null);
@@ -79,6 +80,7 @@ async function complete(clients, e) {
             arr[idx].adKey = adKey;
             delete arr[idx].noAd; delete arr[idx].noAdReason;
             arr[idx].viaAutoJoin = true;
+            if (e.campaignId) arr[idx].campaignId = e.campaignId;   // authoritative delivery attribution
             saveJSON('verified.json', arr);
             maybeNotifyAdComplete(clients, adKey, arr).catch(() => null);
         }
@@ -107,7 +109,7 @@ async function complete(clients, e) {
     try { investorOwned = investors.serverOutstanding(e.cardGuildId, loadJSON('verified.json', [])) > 0; } catch { /* never block */ }
     const camp = e.campaignId ? campaigns.loadCampaigns()[e.campaignId] : null;
     const econ = managers.joinEconomics(camp, sharesMod.REVENUE_PER_JOIN);
-    const credit = creditJoin(e.creatorId, e.sponsorGuildId, e.userId, e.cardGuildId, e.roleId, e.channelId, { revenue: econ.revenue, managerId: econ.managerId, extraPlacement: e.viaExtra ? (e.placement || 'pre') : undefined, noPay: e.viaExtra });
+    const credit = creditJoin(e.creatorId, e.sponsorGuildId, e.userId, e.cardGuildId, e.roleId, e.channelId, { revenue: econ.revenue, managerId: econ.managerId, extraPlacement: e.viaExtra ? (e.placement || 'pre') : undefined, noPay: e.viaExtra, campaignId: e.campaignId });
     if (credit.duplicate) {
         try { partnerlog.logEvent(e.creatorId, { type: 'grant', reason: 'dup_join', userId: e.userId, guildId: e.cardGuildId, roleId: e.roleId, sponsorGuildId: e.sponsorGuildId, srcId: `dup:${e.userId}:${e.sponsorGuildId}` }); } catch { /* never block */ }
         return;
