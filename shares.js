@@ -21,8 +21,7 @@ const acquiringRate = () => Number.isFinite(Number(process.env.ACQUIRING_RATE)) 
 const DEFAULT_HOLDER = process.env.SHARES_DEFAULT_HOLDER || '833442190427684914';
 const KEEP_DAYS = 40;                                       // daily buckets kept for the dashboard windows
 
-const round2 = (n) => +(Number(n) || 0).toFixed(2);
-const round4 = (n) => +(Number(n) || 0).toFixed(4);
+const { round2, round4 } = require('./round.js');
 const dayNumberOf = (ts) => Math.floor(ts / 86400000);
 
 // Current share config; falls back to a single 100% default holder when the

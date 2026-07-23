@@ -19,7 +19,7 @@ const proxy = require('./proxy.js');
 
 const pricePer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10; // $ per 100 verified joins (live: applies on Save)
 const minJoins = () => Number(process.env.MIN_ORDER_JOINS) || 1;
-const round2 = (n) => +(Number(n) || 0).toFixed(2);
+const { round2 } = require('./round.js');
 const newId = () => crypto.randomBytes(9).toString('hex');
 
 function priceFor(joins) { return round2((Number(joins) || 0) * pricePer100() / 100); }

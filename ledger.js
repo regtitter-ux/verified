@@ -16,7 +16,7 @@
 const { loadJSON, mutate } = require('./database.js');
 const partnerlog = require('./partnerlog.js');
 
-const round2 = (n) => +((Number(n) || 0).toFixed(2));
+const { round2 } = require('./round.js');
 
 function balanceOf(uid) {
     const s = loadJSON('settings.json', {});

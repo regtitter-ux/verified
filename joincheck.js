@@ -26,8 +26,7 @@ const proxy = require('./proxy.js');
 
 const JOIN_BID = 5;               // default $ per 100 successful (joined) verifications
 const PER_JOIN = JOIN_BID / 100;  // $0.05 per confirmed join (default rate)
-const round2 = (n) => +((Number(n) || 0).toFixed(2));
-const round4 = (n) => +((Number(n) || 0).toFixed(4));
+const { round2, round4 } = require('./round.js');
 
 // Per-user join-check rate ($ per 100 joins), overridable via "Bid extra" in /bal.
 const getJoinBid = (s) => {

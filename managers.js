@@ -20,8 +20,7 @@ const minTopup = () => Number(process.env.MANAGER_MIN_TOPUP) || 9;        // $ m
 const commissionRate = () => Number.isFinite(Number(process.env.MANAGER_COMMISSION_RATE))
     ? Number(process.env.MANAGER_COMMISSION_RATE) : 0.10;
 
-const round2 = (n) => +(Number(n) || 0).toFixed(2);
-const round4 = (n) => +(Number(n) || 0).toFixed(4);
+const { round2, round4 } = require('./round.js');
 
 function loadManagers() {
     const raw = loadJSON('managers.json', null);

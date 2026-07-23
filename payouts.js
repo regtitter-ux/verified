@@ -23,7 +23,7 @@ const CRYPTOPAY_ADMIN_ERRORS = new Set([
     'METHOD_DISABLED', 'ACCESS_TOKEN_INVALID', 'UNAUTHORIZED', 'CHECKS_DISABLED'
 ]);
 
-const round2 = (n) => +(Number(n) || 0).toFixed(2);
+const { round2 } = require('./round.js');
 
 // A user's `refBonusAccrued` tracks how much of their current balance came
 // from referral bonuses (rather than their own click/join/manual earnings).

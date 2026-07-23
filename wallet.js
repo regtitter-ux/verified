@@ -7,7 +7,7 @@
 const { loadJSON, saveJSON } = require('./database.js');
 
 const minTopup = () => Number(process.env.MIN_TOPUP) || 5; // $ (live: applies on Save)
-const round2 = (n) => +((Number(n) || 0).toFixed(2));
+const { round2 } = require('./round.js');
 
 function loadWallets() {
     const r = loadJSON('wallets.json', {});

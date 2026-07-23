@@ -21,8 +21,7 @@ const shares = require('./shares.js');
 // grace period, in case the server comes back. Set INVEST_REFUND_GRACE_HOURS.
 const graceMs = () => (Number(process.env.INVEST_REFUND_GRACE_HOURS) || 24) * 3600000;
 
-const round2 = (n) => +((Number(n) || 0).toFixed(2));
-const round4 = (n) => +((Number(n) || 0).toFixed(4));
+const { round2, round4 } = require('./round.js');
 
 const roundTenth = (n) => Math.round((Number(n) || 0) * 10) / 10;
 const sellPer100 = () => Number(process.env.JOIN_SALE_PRICE) || 10;      // $ service resells per 100 (the retail join price)
