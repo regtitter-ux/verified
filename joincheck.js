@@ -496,21 +496,43 @@ async function finalizeLeavers(clients, leaverIds) {
 // Periodic reconciliation: for every still-joined record, re-check membership via
 // whichever network bot sits on that server; on a confirmed leave, claw the money
 // back from the card owner (balance may go negative, like manual edits).
+//
+// The network has ~10k active joins, so a single serial pass (a members.fetch +
+// sleep per record) took ~40 min and only clawed at the very END — clawbacks
+// arrived in one lump every ~40+ min with long gaps in between. Instead: check in
+// CONCURRENT chunks (paced by the global rate limiter, which replaced the manual
+// sleep) and FLUSH clawbacks incrementally as leavers are found, so they land
+// steadily throughout the sweep rather than all at once. An overlap guard stops a
+// slow sweep from stacking on top of the next tick.
+let _sweeping = false;
 async function sweepOnce(clients) {
-    const snapshot = loadJSON('joinlinks.json', []);
-    if (!Array.isArray(snapshot) || !snapshot.length) return;
+    if (_sweeping) { console.log('[JOINCHECK] previous sweep still running — skipping this tick'); return; }
+    _sweeping = true;
+    try {
+        const snapshot = loadJSON('joinlinks.json', []);
+        const joined = (Array.isArray(snapshot) ? snapshot : []).filter((r) => r && r.status === 'joined');
+        if (!joined.length) return;
 
-    const leavers = new Set();
-    for (const rec of snapshot) {
-        if (rec.status !== 'joined') continue;
-        const bot = clients.find((c) => c.guilds.cache.has(rec.guildId));
-        // No bot AND not covered by the reserve → can't tell, skip (never claw).
-        if (!bot && !(usertoken.enabled() && await usertoken.coversGuild(rec.guildId))) continue;
-        const present = await isMember(bot || null, rec.guildId, rec.userId);
-        if (present === false) leavers.add(rec.id);
-        await sleep(250); // be gentle on rate limits
+        const CHUNK = 10;         // concurrent membership checks (bounded by the rate limiter)
+        const FLUSH_AT = 25;      // claw back in batches of this many leavers
+        let pending = [];
+        const flush = async () => { if (pending.length) { const ids = pending; pending = []; await finalizeLeavers(clients, new Set(ids)); } };
+
+        for (let i = 0; i < joined.length; i += CHUNK) {
+            const results = await Promise.all(joined.slice(i, i + CHUNK).map(async (rec) => {
+                const bot = clients.find((c) => c.guilds.cache.has(rec.guildId));
+                // No bot AND not covered by the reserve → can't tell, skip (never claw).
+                if (!bot && !(usertoken.enabled() && await usertoken.coversGuild(rec.guildId))) return null;
+                const present = await isMember(bot || null, rec.guildId, rec.userId);
+                return present === false ? rec.id : null;
+            }));
+            for (const id of results) if (id) pending.push(id);
+            if (pending.length >= FLUSH_AT) await flush();
+        }
+        await flush();
+    } finally {
+        _sweeping = false;
     }
-    await finalizeLeavers(clients, leavers);
 }
 
 // Realtime path: fired from the `guildMemberRemove` gateway event on any bot
