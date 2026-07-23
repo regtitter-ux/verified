@@ -312,7 +312,13 @@ async function matchJoinedSponsor(clients, ownerId, serverId, memberId, botId, w
         const raw = elig ? elig.invite
             : ((s.serverAds && s.serverAds[effSid] && String(s.serverAds[effSid]).trim()) ? s.serverAds[effSid] : (s.advText || ''));
         stampSponsorShow(gid);
-        return { ad: { adText: applyTemplate(effSid, raw), raw, sponsor: sp, campaignId: elig ? elig.id : null }, serverId: effSid };
+        // Attribute to the campaign that was ACTUALLY SHOWN (recorded at /api/ad, e.k)
+        // so the leave-clawback gate keys off the real deal — not a re-resolved
+        // sibling that merely shares the sponsor guild, and not null when the shown
+        // campaign has since completed. Legacy shown-records without k fall back to
+        // the re-resolved eligible campaign.
+        const campaignId = shown.k || (elig ? elig.id : null);
+        return { ad: { adText: applyTemplate(effSid, raw), raw, sponsor: sp, campaignId }, serverId: effSid };
     }
 
     // Legacy fallback (botId absent): scan eligible sponsors.
@@ -404,17 +410,17 @@ function recordApiVerified({ creatorId, memberId, serverId, adKey, noAd, botId, 
 // inflate it; pruned to a week. Keyed by bot so the cabinet can draw a per-bot
 // funnel (started → checked → stayed), mirroring the server verification cards.
 const API_CLICK_TTL = 7 * 86400000;
-function recordApiClick({ creatorId, botId, serverId, memberId, sponsorGuildId }) {
+function recordApiClick({ creatorId, botId, serverId, memberId, sponsorGuildId, campaignId }) {
     if (!creatorId || !botId) return;
     const now = Date.now();
     const raw = loadJSON('apiclicks.json', []);
     const arr = (Array.isArray(raw) ? raw : []).filter((e) => e.t > now - API_CLICK_TTL);
     // Refresh a recent record for the same (bot, server, user) — keeps the funnel
-    // "started" count honest — but always update the last-shown sponsor so
-    // join-check verifies exactly what we showed.
+    // "started" count honest — but always update the last-shown sponsor AND the
+    // shown campaign id so join-check verifies + attributes exactly what we showed.
     const recent = arr.find((e) => e.b === String(botId) && e.g === String(serverId || '') && e.u === String(memberId || '') && e.t > now - 60000);
-    if (recent) { if (sponsorGuildId) recent.s = String(sponsorGuildId); recent.t = now; saveJSON('apiclicks.json', arr); return; }
-    arr.push({ c: String(creatorId), b: String(botId), g: String(serverId || ''), u: String(memberId || ''), s: sponsorGuildId ? String(sponsorGuildId) : null, t: now });
+    if (recent) { if (sponsorGuildId) recent.s = String(sponsorGuildId); recent.k = campaignId ? String(campaignId) : null; recent.t = now; saveJSON('apiclicks.json', arr); return; }
+    arr.push({ c: String(creatorId), b: String(botId), g: String(serverId || ''), u: String(memberId || ''), s: sponsorGuildId ? String(sponsorGuildId) : null, k: campaignId ? String(campaignId) : null, t: now });
     saveJSON('apiclicks.json', arr);
 }
 
@@ -3896,7 +3902,7 @@ function startApiServer(clients, config) {
                 if (!/^\d{17,20}$/.test(botId)) return send(res, 400, { error: 'botId is required — your bot application (client) ID', code: 'botId_required' });
                 if (!/^\d{17,20}$/.test(endUserId)) return send(res, 400, { error: 'userId is required — the Discord user you are serving', code: 'userId_required' });
                 const ad = await adForServer(clients, config.ownerId, serverId, endUserId, botId);
-                try { recordApiClick({ creatorId: userId, botId, serverId, memberId: endUserId, sponsorGuildId: ad.sponsor ? ad.sponsor.guildId : null }); } catch { /* never block */ }
+                try { recordApiClick({ creatorId: userId, botId, serverId, memberId: endUserId, sponsorGuildId: ad.sponsor ? ad.sponsor.guildId : null, campaignId: ad.campaignId }); } catch { /* never block */ }
                 console.log('[API ad]', JSON.stringify({ dev: userId, botId, serverId, user: endUserId, sponsor: ad.sponsor ? ad.sponsor.guildId : null, campaignId: ad.campaignId || null, src: ad.campaignId ? 'campaign' : (ad.sponsor ? 'house' : 'none') }));
                 // Build your own message from sponsor.name + sponsor.invite.
                 // fallbackText is the owner's "заглушка" to show when there's no ad.
