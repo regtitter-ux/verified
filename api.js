@@ -2899,6 +2899,44 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, { ok: true, disabledBots: c.disabledBots }, cors);
     }
 
+    // Bulk toggle ALL shown targets for this campaign in ONE atomic write. { disabled:
+    // true } turns the ad OFF everywhere (every active partner server + every bot that
+    // delivered) so the buyer can then re-enable a chosen few; { disabled: false }
+    // clears both lists (ON everywhere). Doing this server-side in a single
+    // saveCampaigns avoids the concurrent-write clobber a per-server client loop would
+    // cause. Path is /servers/all (PUT) — distinct from the /servers list (GET).
+    if (path.startsWith('/order/campaigns/') && path.endsWith('/servers/all') && req.method === 'PUT') {
+        const id = path.slice('/order/campaigns/'.length, -('/servers/all'.length));
+        const camps = campaigns.loadCampaigns();
+        const c = camps[id];
+        if (!c || (c.buyerId !== buyerId && !isAdminBuyer)) return send(res, 404, { error: 'not found' }, cors);
+        const body = await readBody(req);
+        if (body?.disabled) {
+            // Every currently-shown target = all active partner card guilds (except the
+            // campaign's own sponsor) + every bot that has delivered a paid/extra join.
+            const guildIds = new Set();
+            try {
+                for (const card of cards.loadCards()) {
+                    if (card && !card.deletedAt && card.guildId && String(card.guildId) !== String(c.sponsorGuildId)) guildIds.add(String(card.guildId));
+                }
+            } catch { /* if cards are unavailable, disable only what already delivered */ }
+            const keys = campaigns.campaignAdKeys(c);
+            const botIds = new Set();
+            for (const u of loadJSON('verified.json', [])) {
+                if (u && u.roleId === 'api' && u.botId && keys.has(u.adKey)) { botIds.add(String(u.botId)); }
+                else if (u && keys.has(u.adKey) && u.guildId && String(u.guildId) !== String(c.sponsorGuildId)) { guildIds.add(String(u.guildId)); }
+            }
+            c.disabledGuilds = [...guildIds];
+            c.disabledBots = [...botIds];
+        } else {
+            c.disabledGuilds = [];
+            c.disabledBots = [];
+        }
+        campaigns.saveCampaigns(camps);
+        if (c.buyerId !== buyerId) audit.logAction(buyerId, 'order.servers.all', `${id} ${body?.disabled ? 'disable-all' : 'enable-all'} (owner ${c.buyerId})`);
+        return send(res, 200, { ok: true, disabledGuilds: c.disabledGuilds, disabledBots: c.disabledBots }, cors);
+    }
+
     // Change a running campaign's invite link mid-flight (e.g. the old one
     // expired). Validates that the new link actually resolves AND that a
     // network bot is on its server (otherwise joins can't be verified).
