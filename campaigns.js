@@ -168,6 +168,7 @@ function publicView(campaign, verifiedList) {
         limitReached: lp.reached,
         disabledGuilds: Array.isArray(campaign.disabledGuilds) ? campaign.disabledGuilds : [],
         disabledBots: Array.isArray(campaign.disabledBots) ? campaign.disabledBots : [],
+        onlySfw: Boolean(campaign.onlySfw),
         invoiceUrl: campaign.invoiceUrl || null,
         createdAt: campaign.createdAt || 0,
         paidAt: campaign.paidAt || 0,
@@ -200,10 +201,15 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds, botId) {
     const camps = loadCampaigns();
     const list = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
     const bid = botId ? String(botId) : null;
+    // NSFW gate: a buyer can restrict a campaign to SFW servers only (c.onlySfw);
+    // servers the owner flagged NSFW live in siteconfig.nsfwServers (keyed by guild).
+    const sc = loadJSON('siteconfig.json', {});
+    const displayIsNsfw = Boolean(sc && sc.nsfwServers && sc.nsfwServers[displayGuildId]);
     const eligible = [];
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active' || c.paused || c.autoPaused) continue;
         if (c.sponsorGuildId === displayGuildId) continue;                 // never on itself
+        if (c.onlySfw && displayIsNsfw) continue;                          // Only-SFW campaign never surfaces on an NSFW server
         if (Array.isArray(c.disabledGuilds) && c.disabledGuilds.includes(displayGuildId)) continue;
         // Developer API: the buyer can turn a campaign off for a specific bot,
         // exactly like the per-server opt-out (only applies when a botId is given).

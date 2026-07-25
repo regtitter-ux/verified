@@ -1330,6 +1330,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const SHOW_STALE_MS = Number(process.env.SPONSOR_SHOW_STALE_MS) || 30 * 60 * 1000;
         const adShowingOf = (gid) => (Date.now() - (Number(shows?.[gid]) || 0)) <= SHOW_STALE_MS;
         const clawOffCfg = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
+        const nsfwCfg = (cfg.nsfwServers && typeof cfg.nsfwServers === 'object') ? cfg.nsfwServers : {};
 
         // Group PAID entries for the with-ads numbers; keep a row for guilds
         // that only have organic (no-ad) activity so they still show in the
@@ -1599,6 +1600,7 @@ async function handleAdmin(req, res, path, clients, config) {
             networkFunnel,
             serverAdsOff: (cfg.serverAdsOff && typeof cfg.serverAdsOff === 'object') ? cfg.serverAdsOff : {},
             clawbackOffAfterComplete: clawOffCfg,
+            nsfwServers: nsfwCfg,
             fallbackText: typeof cfg.fallbackText === 'string' ? cfg.fallbackText : '',
             templates: {
                 default: typeof t.default === 'string' ? t.default : '',
@@ -2121,6 +2123,23 @@ async function handleAdmin(req, res, path, clients, config) {
         cfg.clawbackOffAfterCompleteAt = Date.now();
         saveJSON('siteconfig.json', cfg);
         return send(res, 200, { ok: true, gid, off }, cors);
+    }
+
+    // Mark a server NSFW (or clear it). A campaign set to "Only SFW" never shows on
+    // an NSFW server (see campaigns.eligibleForGuild). Keyed by guild in siteconfig.
+    if (path === '/admin/server-nsfw' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = body?.gid ? String(body.gid) : '';
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        const nsfw = Boolean(body?.nsfw);
+        const cfg = loadJSON('siteconfig.json', {});
+        if (!cfg.nsfwServers || typeof cfg.nsfwServers !== 'object') cfg.nsfwServers = {};
+        if (nsfw) cfg.nsfwServers[gid] = true;
+        else delete cfg.nsfwServers[gid];
+        saveJSON('siteconfig.json', cfg);
+        return send(res, 200, { ok: true, gid, nsfw }, cors);
     }
 
     if (path === '/admin/ads-off' && req.method === 'PUT') {
@@ -2864,6 +2883,20 @@ async function handleBuyer(req, res, path, clients, config) {
         campaigns.saveCampaigns(camps);
         if (c.buyerId !== buyerId) audit.logAction(buyerId, 'order.pause', `${id} ${c.paused ? 'pause' : 'resume'} (owner ${c.buyerId})`);
         return send(res, 200, { ok: true, paused: c.paused }, cors);
+    }
+
+    // Restrict a campaign to SFW servers only (or lift it). When onlySfw is set the
+    // ad is never shown on a server the owner flagged NSFW (campaigns.eligibleForGuild).
+    if (path.startsWith('/order/campaigns/') && path.endsWith('/only-sfw') && req.method === 'PUT') {
+        const id = path.slice('/order/campaigns/'.length, -('/only-sfw'.length));
+        const camps = campaigns.loadCampaigns();
+        const c = camps[id];
+        if (!c || (c.buyerId !== buyerId && !isAdminBuyer)) return send(res, 404, { error: 'not found' }, cors);
+        const body = await readBody(req);
+        c.onlySfw = Boolean(body?.onlySfw);
+        campaigns.saveCampaigns(camps);
+        if (c.buyerId !== buyerId) audit.logAction(buyerId, 'order.only-sfw', `${id} ${c.onlySfw ? 'only-sfw' : 'all-servers'} (owner ${c.buyerId})`);
+        return send(res, 200, { ok: true, onlySfw: c.onlySfw }, cors);
     }
 
     // Toggle a server on/off for this campaign.
