@@ -3221,6 +3221,39 @@ async function handlePartner(req, res, path, clients, config) {
         console.log(`[BALANCE] owner ${actorId} ${mode} ${kind}=${amount} for ${userId} → ${value}`);
         return send(res, 200, { ok: true, kind, value }, cors);
     }
+    // Owner-only: DM the viewed user via a RANDOM fleet bot that can actually reach
+    // them. Bots that already see the user in a shared guild are tried first (they
+    // can almost certainly DM), then the rest as a fallback; within each group the
+    // order is random. The first bot whose DM goes through wins — a bot with no
+    // mutual guild or closed DMs simply fails and we move on. ok=false = nobody could.
+    if (path === '/partner/x-dm' && req.method === 'POST') {
+        if (actorId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        const body = await readBody(req);
+        if (!body) return send(res, 400, { error: 'bad json' }, cors);
+        const text = String(body.text || '').trim();
+        if (!text) return send(res, 400, { error: 'empty' }, cors);
+        if (text.length > 2000) return send(res, 400, { error: 'too-long' }, cors);
+        const target = userId;   // the acting-as user (viewed profile)
+        if (!/^\d{17,20}$/.test(target)) return send(res, 400, { error: 'bad-target' }, cors);
+        const ready = (Array.isArray(clients) ? clients : []).filter((c) => { try { return c.isReady(); } catch { return false; } });
+        const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+        const inGuild = [], others = [];
+        for (const c of ready) { let has = false; try { has = c.guilds.cache.some((g) => g.members.cache.has(target)); } catch { /* ignore */ } (has ? inGuild : others).push(c); }
+        const order = [...shuffle(inGuild), ...shuffle(others)];
+        let sent = false, botId = null, botName = null, tried = 0;
+        for (const c of order) {
+            tried++;
+            try {
+                const u = await c.users.fetch(target);
+                await u.send({ content: text });
+                sent = true; botId = c.user && c.user.id; botName = (c.user && (c.user.username || c.user.tag)) || null;
+                break;
+            } catch (e) { /* this bot can't DM them → try the next */ }
+        }
+        if (sent) console.log(`[DM] owner ${actorId} → ${target} via bot ${botId} (${botName})`);
+        else console.log(`[DM] owner ${actorId} → ${target}: no bot could deliver (tried ${tried})`);
+        return send(res, 200, { ok: sent, botId, botName, tried }, cors);
+    }
 
     // Partner activity log for this partner, with filters (by server, by
     // verifying user, by type/reason, by period, sort order).
