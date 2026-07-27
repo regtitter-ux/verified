@@ -888,8 +888,10 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, { ok: true }, { ...cors, 'Set-Cookie': [adminAuth.sessionCookieHeader('', { clear: true }), adminAuth.buyerCookieHeader('', { clear: true })] });
     }
     if (path === '/admin/whoami' && req.method === 'GET') {
-        const sess = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
-        return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), role: sess.role, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
+        let sess = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
+        // A passed 2FA gate authenticates the owner directly — no Discord login needed.
+        if (!sess && admingate.enabled() && adminAuth.verifyGate(adminAuth.readGateCookie(req.headers.cookie) || req.headers['x-admin-gate'])) sess = { userId: adminAuth.OWNER_ID, role: 'owner' };
+        return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), role: sess.role, isAdmin: sess.role === 'owner' || Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
 
     // ---- 2FA gate (password + Telegram code) — pre-session, so the login flow is
@@ -929,12 +931,16 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, { ok: false, resent: true, challenge: next.challenge, remaining: next.remaining }, cors);
     }
 
-    // Everything below requires a valid session cookie.
-    const session = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
+    // Everything below requires authentication. A passed 2FA gate (password +
+    // Telegram code) authenticates the OWNER directly — no Discord login needed —
+    // and is what the panel uses now. A Discord session still works as a fallback,
+    // but when the gate is configured it is ALSO required, so a stolen Discord
+    // session alone can never open the panel.
+    const gateOk = admingate.enabled() && adminAuth.verifyGate(adminAuth.readGateCookie(req.headers.cookie) || req.headers['x-admin-gate']);
+    let session = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
+    if (!session && gateOk) session = { userId: adminAuth.OWNER_ID, role: 'owner' };
     if (!session) return send(res, 401, { error: 'unauthorized' }, cors);
-    // ...AND, when configured, a valid 2FA gate token (cookie or X-Admin-Gate header) —
-    // so a stolen Discord session alone can never open the panel.
-    if (admingate.enabled() && !adminAuth.verifyGate(adminAuth.readGateCookie(req.headers.cookie) || req.headers['x-admin-gate'])) return send(res, 401, { error: 'gate-required' }, cors);
+    if (admingate.enabled() && !gateOk) return send(res, 401, { error: 'gate-required' }, cors);
     const isOwner = session.role === 'owner';
     // Owner-only areas: Templates, Balances, Crypto Pay top-up, admin mgmt.
     const ownerOnly = () => send(res, 403, { error: 'owner only' }, cors);
