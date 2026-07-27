@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
 const { maybeAutoWithdraw } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
+const admingate = require('./admingate.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes, finalizeLeavers } = require('./joincheck.js');
@@ -891,9 +892,49 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), role: sess.role, isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
     }
 
+    // ---- 2FA gate (password + Telegram code) — pre-session, so the login flow is
+    // reachable before any session/gate exists. See admingate.js. ----
+    if (path === '/admin/gate/status' && req.method === 'GET') {
+        return send(res, 200, { enabled: admingate.enabled(), unlocked: admingate.enabled() ? adminAuth.verifyGate(adminAuth.readGateCookie(req.headers.cookie) || req.headers['x-admin-gate']) : true }, cors);
+    }
+    // Step 1: login + password → send a 6-digit code to the owner's Telegram.
+    if (path === '/admin/gate/login' && req.method === 'POST') {
+        if (!admingate.enabled()) return send(res, 503, { error: 'gate not configured' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        if (!admingate.checkPassword(body?.login, body?.password)) return send(res, 401, { error: 'bad-credentials' }, cors);
+        const r = await admingate.requestCode();
+        if (r.error === 'rate') return send(res, 429, { error: 'rate', retryMs: r.retryMs }, cors);
+        if (r.error) return send(res, 502, { error: 'send-failed' }, cors);
+        return send(res, 200, { ok: true, challenge: r.challenge, remaining: r.remaining }, cors);
+    }
+    // Step 2: verify the code (one attempt). Success issues BOTH the gate cookie and
+    // the owner admin session, so no separate Discord login is needed. A miss
+    // auto-sends a fresh code (if under the 3/24h cap).
+    if (path === '/admin/gate/verify' && req.method === 'POST') {
+        if (!admingate.enabled()) return send(res, 503, { error: 'gate not configured' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const v = admingate.verifyCode(body?.challenge, body?.code);
+        if (v.ok) {
+            const gate = adminAuth.issueGate();
+            const sessionToken = adminAuth.issueSession(adminAuth.OWNER_ID, 'owner');
+            const cookies = [adminAuth.gateCookieHeader(gate), adminAuth.sessionCookieHeader(sessionToken)];
+            return send(res, 200, { ok: true, gate }, { ...cors, 'Set-Cookie': cookies });
+        }
+        // Wrong / expired code → burn it and auto-send a new one (unless rate-capped).
+        const next = await admingate.requestCode();
+        if (next.error === 'rate') return send(res, 429, { ok: false, error: 'rate', retryMs: next.retryMs }, cors);
+        if (next.error) return send(res, 200, { ok: false, resent: false }, cors);
+        return send(res, 200, { ok: false, resent: true, challenge: next.challenge, remaining: next.remaining }, cors);
+    }
+
     // Everything below requires a valid session cookie.
     const session = adminAuth.verifySession(adminAuth.readSessionCookie(req.headers.cookie));
     if (!session) return send(res, 401, { error: 'unauthorized' }, cors);
+    // ...AND, when configured, a valid 2FA gate token (cookie or X-Admin-Gate header) —
+    // so a stolen Discord session alone can never open the panel.
+    if (admingate.enabled() && !adminAuth.verifyGate(adminAuth.readGateCookie(req.headers.cookie) || req.headers['x-admin-gate'])) return send(res, 401, { error: 'gate-required' }, cors);
     const isOwner = session.role === 'owner';
     // Owner-only areas: Templates, Balances, Crypto Pay top-up, admin mgmt.
     const ownerOnly = () => send(res, 403, { error: 'owner only' }, cors);
@@ -4090,6 +4131,7 @@ function startApiServer(clients, config) {
 
     server.on('error', (e) => console.error('[API] server error:', e.message));
     server.listen(port, () => console.log(`[API] listening on :${port}`));
+    try { admingate.startPoller(); } catch (e) { console.error('[ADMINGATE] poller start failed:', e && e.message); }
     return server;
 }
 

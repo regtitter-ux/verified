@@ -289,12 +289,39 @@ function verifyBuyerSession(token) {
 function readBuyerCookie(cookieHeader) { return readCookie(cookieHeader, BUYER_COOKIE); }
 function buyerCookieHeader(token, opts) { return cookieHeaderFor(BUYER_COOKIE, token, opts); }
 
+// ---------- Admin 2FA gate cookie ----------
+// A signed token proving the password + Telegram-code gate was passed. When the
+// gate is configured (see admingate.js) it is REQUIRED — on top of the session —
+// for every /admin data route, so a stolen Discord session alone can't open the
+// panel. Signed with the same session secret; TTL = the session TTL.
+const GATE_COOKIE = 'vemoni_gate';
+function issueGate() {
+    const expires = Date.now() + SESSION_TTL_MS;
+    const payload = `${expires}.${crypto.randomBytes(10).toString('hex')}`;
+    return `${payload}.${sign(payload)}`;
+}
+function verifyGate(token) {
+    if (!token) return false;
+    const s = String(token);
+    const i = s.lastIndexOf('.');
+    if (i <= 0) return false;
+    const payload = s.slice(0, i), mac = s.slice(i + 1);
+    const expected = sign(payload);
+    if (expected.length !== mac.length) return false;
+    if (!crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(mac))) return false;
+    const expires = Number(payload.split('.')[0]);
+    return Number.isFinite(expires) && expires > Date.now();
+}
+function readGateCookie(cookieHeader) { return readCookie(cookieHeader, GATE_COOKIE); }
+function gateCookieHeader(token, opts) { return cookieHeaderFor(GATE_COOKIE, token, opts); }
+
 module.exports = {
     SESSION_COOKIE, BUYER_COOKIE, SESSION_TTL_MS, OWNER_ID,
     enabled, adminOrigin,
     oauthAuthorizeUrl, resolveOauthUser, issueState, verifyState,
     issueSession, verifySession, readSessionCookie, sessionCookieHeader,
     issueBuyerSession, verifyBuyerSession, readBuyerCookie, buyerCookieHeader,
+    issueGate, verifyGate, readGateCookie, gateCookieHeader,
     roleOf, loadAdmins, saveAdmins,
     getUserGuilds
 };
