@@ -618,7 +618,11 @@ function bearerToken(req) {
 }
 function buyerSessionOf(req) {
     return adminAuth.verifyBuyerSession(bearerToken(req))
-        || adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie));
+        || adminAuth.verifyBuyerSession(adminAuth.readBuyerCookie(req.headers.cookie))
+        // A passed admin 2FA gate signs the owner in EVERYWHERE — the gate cookie
+        // (first-party, so it rides cabinet requests too) is a valid owner buyer
+        // session, so the order/partner/investor cabinets open without a Discord login.
+        || (admingate.enabled() && adminAuth.verifyGate(adminAuth.readGateCookie(req.headers.cookie) || req.headers['x-admin-gate']) ? { userId: adminAuth.OWNER_ID } : null);
 }
 
 // How long the whole order book would take to deliver at the network's recent
