@@ -920,9 +920,13 @@ async function handleAdmin(req, res, path, clients, config) {
         const v = admingate.verifyCode(body?.challenge, body?.code);
         if (v.ok) {
             const gate = adminAuth.issueGate();
+            // Sign the owner in EVERYWHERE: the admin session opens /admin, and the
+            // buyer session opens the order / partner / investor cabinets as the owner
+            // — so one 2FA login covers the whole site, no separate Discord step.
             const sessionToken = adminAuth.issueSession(adminAuth.OWNER_ID, 'owner');
-            const cookies = [adminAuth.gateCookieHeader(gate), adminAuth.sessionCookieHeader(sessionToken)];
-            return send(res, 200, { ok: true, gate }, { ...cors, 'Set-Cookie': cookies });
+            const buyerToken = adminAuth.issueBuyerSession(adminAuth.OWNER_ID);
+            const cookies = [adminAuth.gateCookieHeader(gate), adminAuth.sessionCookieHeader(sessionToken), adminAuth.buyerCookieHeader(buyerToken)];
+            return send(res, 200, { ok: true, gate, buyer: buyerToken }, { ...cors, 'Set-Cookie': cookies });
         }
         // Wrong / expired code → burn it and auto-send a new one (unless rate-capped).
         const next = await admingate.requestCode();
