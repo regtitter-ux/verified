@@ -2677,6 +2677,20 @@ async function handleBuyer(req, res, path, clients, config) {
         audit.logAction(buyerId, 'dmall.launch', `${job.id} count=${norm.count} price=${price} guild=${norm.target.guildId}`);
         return send(res, 200, { ok: true, jobId: job.id, price, messageCount: norm.count, balance: wallet.balanceOf(buyerId) }, cors);
     }
+    // DMALL: the external-API bearer key, shown to the OWNER in the API docs panel
+    // so they can hand it to the broadcast service. Owner-only.
+    if (path === '/order/dmall/apikey' && req.method === 'GET') {
+        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        return send(res, 200, { configured: dmalljobs.apiEnabled(), key: dmalljobs.currentKey() || null, base: (process.env.PUBLIC_API_BASE || `https://${req.headers.host}`).replace(/\/+$/, '') }, cors);
+    }
+    // Owner-only: (re)generate the external DMALL API key from the panel — no redeploy.
+    // The old key stops working immediately.
+    if (path === '/order/dmall/apikey/generate' && req.method === 'POST') {
+        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        const key = dmalljobs.generateKey();
+        audit.logAction(buyerId, 'dmall.apikey.generate', 'rotated');
+        return send(res, 200, { ok: true, key }, cors);
+    }
     // DMALL: the buyer's own broadcast jobs + live status (pulled from the service).
     if (path === '/order/dmall/jobs' && req.method === 'GET') {
         const allowed = buyerId === adminAuth.OWNER_ID || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);

@@ -9,16 +9,31 @@ const database = require('./database.js');
 const { loadJSON } = database;
 
 const FILE = 'dmalljobs.json';
+const KEYFILE = 'dmallkey.json';   // the external service's bearer key, generatable from the panel
 const PRICE_PER_1000 = Number(process.env.DMALL_PRICE_PER_1000) || 1;   // USD per 1000 messages
-const API_KEY = (process.env.DMALL_API_KEY || '').trim();               // the external service's bearer key
 
 const STATUSES = ['paid', 'claimed', 'running', 'done', 'failed', 'cancelled'];
 
 function load() { const r = loadJSON(FILE, []); return Array.isArray(r) ? r : []; }
 function priceFor(count) { const n = Math.max(0, Math.floor(Number(count) || 0)); return Math.round((n / 1000) * PRICE_PER_1000 * 100) / 100; }
 function newId() { return 'dm_' + Date.now().toString(36) + crypto.randomBytes(4).toString('hex'); }
-function apiEnabled() { return Boolean(API_KEY); }
-function checkKey(key) { return Boolean(API_KEY) && String(key || '') === API_KEY; }
+
+// The active key is the one generated in the panel (stored) if present, else the
+// DMALL_API_KEY env fallback — so an existing env deployment keeps working, but the
+// owner can (re)generate a key at runtime with no redeploy.
+function currentKey() {
+    const s = loadJSON(KEYFILE, {});
+    const stored = (s && typeof s === 'object' && typeof s.key === 'string') ? s.key.trim() : '';
+    return stored || (process.env.DMALL_API_KEY || '').trim();
+}
+function apiEnabled() { return Boolean(currentKey()); }
+function checkKey(key) { const k = currentKey(); return Boolean(k) && String(key || '') === k; }
+// Generate + persist a fresh key (invalidates the old one immediately).
+function generateKey() {
+    const key = 'dmall_' + crypto.randomBytes(24).toString('hex');
+    database.mutate(KEYFILE, (o) => { o.key = key; o.updatedAt = Date.now(); return o; }, {});
+    return key;
+}
 
 // Normalize the raw configurator payload into a STABLE external schema (what the
 // service actually needs), while keeping the full original config under `raw`.
@@ -134,6 +149,6 @@ function complete(id, { status, sent, failed, note } = {}) {
 }
 
 module.exports = {
-    FILE, PRICE_PER_1000, STATUSES, apiEnabled, checkKey,
+    FILE, PRICE_PER_1000, STATUSES, apiEnabled, checkKey, currentKey, generateKey,
     priceFor, normalize, create, apiView, list, get, forBuyer, claim, progress, complete,
 };
