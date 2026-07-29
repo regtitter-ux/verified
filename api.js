@@ -10,6 +10,7 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { maybeAutoWithdraw } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
 const admingate = require('./admingate.js');
+const dmalljobs = require('./dmalljobs.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes, finalizeLeavers } = require('./joincheck.js');
@@ -2654,6 +2655,35 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, { ok: true, users: dmaccess.saveAccess(next) }, cors);
     }
 
+    // DMALL: buy a broadcast. Charges the wallet ($1/1000 messages) and stores a
+    // PAID job the external sending service pulls via /dmall/v1. Access-gated to the
+    // DMALL console (owner/admin or an allow-listed user). Body: the configurator
+    // payload { fields, embeds } + { target: { guildId } } (or a bare { config }).
+    if (path === '/order/dmall/launch' && req.method === 'POST') {
+        const allowed = buyerId === adminAuth.OWNER_ID || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
+        if (!allowed) return send(res, 403, { error: 'no dmall access' }, cors);
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const cfg = (body && body.config) ? body.config : body;
+        const norm = dmalljobs.normalize(cfg);
+        if (!/^\d{17,20}$/.test(norm.target.guildId)) return send(res, 400, { error: 'bad-target', hint: 'target.guildId (the server to broadcast to) is required' }, cors);
+        if (!norm.count || norm.count < 1) return send(res, 400, { error: 'bad-count', hint: 'message count must be >= 1' }, cors);
+        if (!norm.message.content && !(norm.message.embeds || []).length) return send(res, 400, { error: 'empty-message' }, cors);
+        const price = dmalljobs.priceFor(norm.count);
+        const bal = wallet.balanceOf(buyerId);
+        if (bal < price) return send(res, 402, { error: 'insufficient', balance: bal, price, shortfall: +(price - bal).toFixed(2) }, cors);
+        if (wallet.debit(buyerId, price) === null) return send(res, 402, { error: 'insufficient', balance: bal, price }, cors);
+        const job = dmalljobs.create(buyerId, cfg);
+        audit.logAction(buyerId, 'dmall.launch', `${job.id} count=${norm.count} price=${price} guild=${norm.target.guildId}`);
+        return send(res, 200, { ok: true, jobId: job.id, price, messageCount: norm.count, balance: wallet.balanceOf(buyerId) }, cors);
+    }
+    // DMALL: the buyer's own broadcast jobs + live status (pulled from the service).
+    if (path === '/order/dmall/jobs' && req.method === 'GET') {
+        const allowed = buyerId === adminAuth.OWNER_ID || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
+        if (!allowed) return send(res, 403, { error: 'no dmall access' }, cors);
+        return send(res, 200, { jobs: dmalljobs.forBuyer(buyerId, 50) }, cors);
+    }
+
     // Wallet: balance + recent top-ups (reconciles pending top-ups first).
     if (path === '/order/wallet' && req.method === 'GET') {
         // Reconcile pending top-ups against the payment gateways in the BACKGROUND.
@@ -3869,6 +3899,43 @@ async function handleInvestor(req, res, path, clients, config) {
     return send(res, 404, { error: 'unknown endpoint' }, cors);
 }
 
+// ---- External DMALL API. An outside service pulls PAID broadcast jobs, runs the
+// actual Discord DM sending, and reports progress/completion back. Auth is a single
+// bearer key (DMALL_API_KEY env). Server-to-server (no cookies); permissive CORS so
+// a browser tool can poke it too. Full docs live in the DMALL console → API tab. ----
+async function handleDmallApi(req, res, p) {
+    const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Api-Key', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };
+    if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
+    if (!dmalljobs.apiEnabled()) return send(res, 503, { error: 'dmall api not configured', code: 'not_configured' }, cors);
+    const auth = req.headers.authorization || '';
+    const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : (req.headers['x-api-key'] || '');
+    if (!dmalljobs.checkKey(key)) return send(res, 401, { error: 'unauthorized', code: 'bad_key' }, cors);
+
+    if (req.method === 'GET' && p === '/dmall/v1/ping') return send(res, 200, { ok: true, service: 'vemoni-dmall', ts: Date.now() }, cors);
+    if (req.method === 'GET' && p === '/dmall/v1/jobs') {
+        const q = new URL(req.url, 'http://x').searchParams;
+        const status = q.get('status') || '';
+        const filter = status ? (dmalljobs.STATUSES.includes(status) ? status : '__none__') : undefined;
+        return send(res, 200, { jobs: dmalljobs.list({ status: filter, limit: Number(q.get('limit')) || 100 }) }, cors);
+    }
+    const m = p.match(/^\/dmall\/v1\/jobs\/([A-Za-z0-9_]+)(?:\/(claim|progress|complete))?$/);
+    if (m) {
+        const id = m[1], action = m[2];
+        if (req.method === 'GET' && !action) { const j = dmalljobs.get(id); return j ? send(res, 200, { job: j }, cors) : send(res, 404, { error: 'not found', code: 'no_job' }, cors); }
+        if (req.method === 'POST' && action) {
+            const body = await readBody(req);
+            if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+            let j = null, conflict = '';
+            if (action === 'claim') { j = dmalljobs.claim(id, body?.worker); conflict = 'not claimable (missing, or not in status \'paid\')'; }
+            else if (action === 'progress') { j = dmalljobs.progress(id, body || {}); conflict = 'not updatable (missing, or already done/cancelled)'; }
+            else if (action === 'complete') { j = dmalljobs.complete(id, body || {}); conflict = 'not completable (missing, or already done/cancelled)'; }
+            if (!j) return send(res, 409, { error: conflict, code: 'conflict' }, cors);
+            return send(res, 200, { ok: true, job: j }, cors);
+        }
+    }
+    return send(res, 404, { error: 'unknown endpoint', code: 'no_route' }, cors);
+}
+
 // Lenient per-IP fixed-window rate limit — defense-in-depth against floods
 // and credential brute-forcing. The cap is high so normal panel polling and
 // many bots behind one NAT stay well under it; only abusive bursts trip it.
@@ -3971,6 +4038,12 @@ function startApiServer(clients, config) {
                     }
                 } catch (e) { console.error('[NOWPAYMENTS] webhook:', e.message); }
                 return send(res, 200, { ok: true }); // always 200 so NOWPayments doesn't retry-storm
+            }
+
+            // External DMALL API (server-to-server, bearer key) — the outside
+            // broadcast service pulls paid jobs + reports status here.
+            if (p === '/dmall/v1' || p.startsWith('/dmall/v1/')) {
+                return await handleDmallApi(req, res, p);
             }
 
             // Admin panel (TOTP-gated, CORS-scoped to ADMIN_ORIGIN).
