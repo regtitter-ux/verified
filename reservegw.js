@@ -119,15 +119,29 @@ function connect(st) {
     ws.on('close', (code) => {
         clearHb(st); st.ready = false;
         if (code === 4004) { console.error('[RESERVE_GW] auth failed (bad USER_TOKEN) — connection disabled'); st.closed = true; return; }
-        console.log(`[RESERVE_GW] closed (code ${code}) — reconnecting`);
+        // A session that stayed READY a while ended cleanly → reset the backoff. One
+        // that dies within seconds of READY is flapping — keep escalating instead of
+        // resetting (resetting on every brief READY made it reconnect every ~5s,
+        // hammering the gateway and poisoning the shared egress IP's rate limit for
+        // the WHOLE fleet — all bots then 4008'd too and none stayed ready).
+        if (st.readyAt && Date.now() - st.readyAt > 60000) { st.reconnectDelay = 5000; st.rl4008 = 0; }
+        // Gateway rate-limit (4008): back off hard, and give up after a few in a row —
+        // Discord is persistently rejecting this connection, so stop trying rather than
+        // keep burning the shared IP's gateway budget.
+        if (code === 4008) {
+            st.rl4008 = (st.rl4008 || 0) + 1;
+            st.reconnectDelay = Math.max(st.reconnectDelay || 0, 60000);
+            if (st.rl4008 >= 3) { console.error(`[RESERVE_GW] persistent gateway rate-limit (4008 ×${st.rl4008}) — disabling reserve to protect the fleet`); st.closed = true; return; }
+        }
+        console.log(`[RESERVE_GW] closed (code ${code}) — reconnecting in ~${Math.round(Math.min(st.reconnectDelay || 5000, 300000) / 1000)}s`);
         scheduleReconnect(st);
     });
 }
 function scheduleReconnect(st) {
     if (st.closed) return;
-    const d = Math.min(st.reconnectDelay || 5000, 60000);
+    const d = Math.min(st.reconnectDelay || 5000, 300000);
     setTimeout(() => connect(st), d);
-    st.reconnectDelay = Math.min((st.reconnectDelay || 5000) * 2, 60000);
+    st.reconnectDelay = Math.min((st.reconnectDelay || 5000) * 2, 300000);
 }
 
 function onMessage(st, data) {
@@ -151,7 +165,7 @@ function onMessage(st, data) {
 function onDispatch(st, t, d) {
     if (t === 'READY') {
         st.ready = true;
-        st.reconnectDelay = 5000;
+        st.readyAt = Date.now();   // backoff is reset only if THIS session proves stable (see the close handler)
         st.guilds = new Set();
         for (const g of (d.guilds || [])) if (g && g.id) { st.guilds.add(String(g.id)); setInfo(g); }
         console.log(`[RESERVE_GW] ready — ${st.guilds.size} guild(s)`);
