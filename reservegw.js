@@ -9,9 +9,9 @@
 //
 // ToS note: a persistent user-account gateway connection is a stronger automation
 // signal than occasional REST calls → higher ban risk. Operator's own risk.
-const https = require('https');
 const WebSocket = require('ws');
 const config = require('./config.js');
+const reserveproxy = require('./reserveproxy.js');
 
 const GATEWAY_URL = 'wss://gateway.discord.gg/?v=9&encoding=json';
 
@@ -54,20 +54,10 @@ function setInfo(g) {
 // Belt-and-braces: REST always returns id+name+icon for the account's guilds, and
 // with_counts adds the member count — fill in anything the gateway payload didn't
 // carry. One request per connection.
-function restGuilds(token) {
-    return new Promise((resolve) => {
-        const req = https.request({
-            host: 'discord.com', path: '/api/v10/users/@me/guilds?with_counts=true', method: 'GET',
-            headers: { Authorization: token, 'Content-Type': 'application/json' }
-        }, (res) => {
-            let data = '';
-            res.on('data', (c) => { data += c; });
-            res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
-        });
-        req.on('error', () => resolve(null));
-        req.setTimeout(12000, () => req.destroy());
-        req.end();
-    });
+async function restGuilds(token) {
+    // Through the residential proxy with the client fingerprint (see reserveproxy.js).
+    const { status, json } = await reserveproxy.restFetch('/users/@me/guilds?with_counts=true', { token });
+    return (status === 200 && Array.isArray(json)) ? json : null;
 }
 async function backfillNames(st) {
     const list = await restGuilds(st.token);
@@ -89,14 +79,9 @@ function identify(st) {
         d: {
             token: st.token,
             capabilities: 16381,
-            properties: {
-                os: 'Windows', browser: 'Chrome', device: '',
-                system_locale: 'en-US',
-                browser_user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                browser_version: '120.0.0.0', os_version: '10',
-                referrer: '', referring_domain: '', referrer_current: '', referring_domain_current: '',
-                release_channel: 'stable', client_build_number: 250000, client_event_source: null
-            },
+            // Shared with the REST fingerprint (reserveproxy.js) so the account looks
+            // consistent across the gateway identify AND its REST calls.
+            properties: reserveproxy.identifyProperties(),
             presence: { status: 'online', since: 0, activities: [], afk: false },
             compress: false,
             client_state: {
@@ -111,7 +96,9 @@ function identify(st) {
 function connect(st) {
     if (st.closed) return;
     let ws;
-    try { ws = new WebSocket(GATEWAY_URL); } catch { scheduleReconnect(st); return; }
+    // Tunnel the gateway WebSocket through the residential proxy too — a user-account
+    // gateway login from a datacenter IP is the strongest self-bot signal.
+    try { const agent = reserveproxy.wsAgent(); ws = new WebSocket(GATEWAY_URL, agent ? { agent } : undefined); } catch { scheduleReconnect(st); return; }
     st.ws = ws;
     st.ready = false;
     ws.on('message', (data) => onMessage(st, data));

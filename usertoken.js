@@ -10,9 +10,9 @@
 //
 // NOTE: automating a user account is against Discord's ToS and can get the account
 // banned — operate at your own risk, on disposable accounts.
-const https = require('https');
 const config = require('./config.js');
 const reservegw = require('./reservegw.js');
+const reserveproxy = require('./reserveproxy.js');
 
 // Current tokens, read live so panel edits apply without a restart.
 function tokens() {
@@ -20,21 +20,10 @@ function tokens() {
 }
 const enabled = () => tokens().length > 0;
 
-function apiGet(token, path) {
-    return new Promise((resolve) => {
-        const req = https.request({
-            host: 'discord.com', path: '/api/v10' + path, method: 'GET',
-            headers: { Authorization: token, 'Content-Type': 'application/json' }
-        }, (res) => {
-            let data = '';
-            res.on('data', (c) => { data += c; });
-            res.on('end', () => { let json = null; try { json = data ? JSON.parse(data) : null; } catch { /* non-json */ } resolve({ status: res.statusCode || 0, json }); });
-        });
-        req.on('error', () => resolve({ status: 0, json: null }));
-        req.setTimeout(12000, () => req.destroy());
-        req.end();
-    });
-}
+// Every user-token REST read goes through the residential proxy with a realistic
+// Discord web-client fingerprint (see reserveproxy.js) — a bare-header request from
+// the datacenter IP is the fastest way to get the account flagged.
+function apiGet(token, path) { return reserveproxy.restFetch(path, { token }); }
 
 // guildId -> token that covers it. Refreshed lazily across all accounts.
 let _cache = { at: 0, map: new Map() };
