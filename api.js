@@ -442,8 +442,25 @@ function userStats(userId) {
     });
     const grouped = {};
     for (const u of mine) (grouped[u.guildId] ||= []).push(u);
-    const perGuild = Object.keys(grouped)
-        .map(gid => ({ guildId: gid, ...win(grouped[gid]) }))
+    // The Overview server list follows CURRENT card ownership, not just historical
+    // verification rows (which stay under whoever owned the card AT the time). So a
+    // card transferred to a new owner shows up for THEM (0 stats until it earns) and
+    // disappears for the one who gave it away — instead of lingering by old rows.
+    // A guild is shown if the partner owns a live card there, OR they have paid
+    // verifications there and NO OTHER partner owns a card there (keeps dev-API
+    // servers and just-deleted-card history, drops only cards handed to someone else).
+    const owned = new Set(), otherOwned = new Set();
+    try {
+        for (const c of cards.loadCards()) {
+            if (!c || c.deletedAt || !c.guildId) continue;
+            const g = String(c.guildId);
+            if (String(c.creatorId) === String(userId)) owned.add(g); else otherOwned.add(g);
+        }
+    } catch { /* if cards are unavailable, fall back to the verification-derived list */ }
+    const guildIds = new Set(owned);
+    for (const g of Object.keys(grouped)) if (owned.has(g) || !otherOwned.has(g)) guildIds.add(g);
+    const perGuild = [...guildIds]
+        .map(gid => ({ guildId: gid, ...win(grouped[gid] || []) }))
         .sort((a, b) => b.total - a.total);
     return { total: win(mine), perGuild };
 }
