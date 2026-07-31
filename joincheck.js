@@ -446,7 +446,13 @@ async function finalizeLeavers(clients, leaverIds) {
         // applied to a fresh load in the commit block.
         const before = settings[rec.creatorId] ? (Number(settings[rec.creatorId].balance) || 0) : 0;
         const outcome = { id: rec.id, kind: 'left', ts: Date.now(), userId: rec.userId, cardGuildId: rec.cardGuildId, channelId: rec.channelId, sponsorGuildId: rec.guildId, roleId: rec.roleId, partnerId: rec.creatorId };
-        if (settings[rec.creatorId]) {
+        // Only reverse a payout that ACTUALLY happened. Bonus "EXTRA GWS" joins are
+        // recorded with noPay (amount 0) — the partner was never paid for them — so a
+        // leave must not debit or even log a clawback against them (it wrongly showed
+        // the partner "charged" for a join they never earned, esp. on ads-off/NSFW
+        // servers where only the extra button shows). The join still finalizes as
+        // 'left' below, so the buyer's delivery is reversed as usual.
+        if (settings[rec.creatorId] && Number(rec.amount) > 0) {
             settings[rec.creatorId].balance = round2(before - rec.amount);
             outcome.creatorId = rec.creatorId;
             outcome.amt = rec.amount;

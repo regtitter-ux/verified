@@ -163,6 +163,17 @@ test('finalizeLeavers claws a paused-then-RESUMED campaign leaver (defer→claw)
     assert.equal(read('joinlinks.json')[0].status, 'left');
 });
 
+test('finalizeLeavers does NOT charge the partner for a no-pay / EXTRA-ad join (amount 0) on leave', async () => {
+    seedBase({
+        // A bonus "EXTRA GWS" join: recorded with amount 0 (partner never paid), sentinel extra: role.
+        joinlinks: [{ id: 'JX', userId: U, guildId: SPON, creatorId: P, amount: 0, status: 'joined', cardGuildId: CARD, roleId: 'extra:CAMP1', extraPlacement: 'pre', ts: now }],
+        files: { 'sponsorshow.json': { [SPON]: Date.now() } },   // sponsor advertised → a PAID join here WOULD claw; proves it's the amount-0 gate
+    });
+    await jc.finalizeLeavers([], new Set(['JX']));
+    assert.equal(read('settings.json')[P].balance, 10, 'partner NOT charged — never paid for the extra/bonus-ad join');
+    assert.equal(read('joinlinks.json')[0].status, 'left', 'join still finalized as left (buyer delivery reversed)');
+});
+
 test('finalizeLeavers still SETTLES a paused campaign leaver when the owner explicitly disabled clawback for the sponsor', async () => {
     seedBase({
         joinlinks: [taggedLink()],
