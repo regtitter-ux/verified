@@ -32,7 +32,7 @@ async function settleCreditedJoin(clients, {
 }) {
     try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'paid', amount, userId: joinerId, guildId: cardGuildId, roleId, sponsorGuildId, srcId: linkId }); } catch { /* never block */ }
     await logFunds(clients, { type: 'credit', creatorId, userId: joinerId, guildId: cardGuildId, channelId, amount, sponsorGuildId, reason });
-    if (!investorOwned) await payShares(clients, amount, { revenuePerJoin: revenue }).catch(() => null);
+    if (!investorOwned) await payShares(clients, amount, { revenuePerJoin: revenue, guildId: sponsorGuildId }).catch(() => null);
     await maybeAutoWithdraw(clients, creatorId);
     if (referrerId) await maybeAutoWithdraw(clients, referrerId).catch(() => null);
 }

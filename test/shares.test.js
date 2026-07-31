@@ -31,3 +31,32 @@ test('under-100% leaves the remainder with the house', async () => {
     const credited = await shares.distributeProfit([], 1.00, T);
     assert.ok(near(credited.H1, 0.30), 'holder gets exactly their 30%; the other 70% stays house profit');
 });
+
+const GID = '100000000000000001';
+const SRV_OWNER = '200000000000000002';
+
+test('payShares routes 100% of a server\'s net profit to its assigned owner (bypassing the global split)', async () => {
+    seed({
+        'siteconfig.json': { serverProfitOwner: { [GID]: SRV_OWNER } },
+        'shares.json': { H1: { pct: 100 } }, 'settings.json': {}, 'shareearnings.json': {}, 'serverprofit.json': {}
+    });
+    // profit = revenue(0.10) − partner(0.05) − acquiring(0.05*0.03=0.0015) = 0.0485
+    await shares.payShares([], 0.05, { revenuePerJoin: 0.10, guildId: GID, nowMs: T });
+    const s = read('settings.json');
+    const led = read('serverprofit.json');
+    assert.ok(near(s[SRV_OWNER]?.balance, 0.04), `owner credited whole cents of the profit, got ${s[SRV_OWNER]?.balance}`);
+    assert.ok(near(led[SRV_OWNER]?.earned, 0.0485), 'exact profit recorded in the per-server ledger');
+    assert.ok(!s.H1 || !(Number(s.H1.balance) > 0), 'the global shareholder gets nothing for an assigned server');
+});
+
+test('payShares falls back to the global split when the server has no assigned owner', async () => {
+    seed({
+        'siteconfig.json': { serverProfitOwner: { [GID]: SRV_OWNER } },
+        'shares.json': { H1: { pct: 100 } }, 'settings.json': {}, 'shareearnings.json': {}, 'serverprofit.json': {}
+    });
+    await shares.payShares([], 0.05, { revenuePerJoin: 0.10, guildId: '999000000000000999', nowMs: T });
+    const s = read('settings.json');
+    const led = read('serverprofit.json');
+    assert.ok(near(s.H1?.balance, 0.04), 'unassigned server profit goes to the global holder');
+    assert.ok(!led[SRV_OWNER] || !(Number(led[SRV_OWNER].earned) > 0), 'no per-server credit for an unassigned server');
+});

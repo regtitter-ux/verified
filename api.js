@@ -1404,6 +1404,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const adShowingOf = (gid) => (Date.now() - (Number(shows?.[gid]) || 0)) <= SHOW_STALE_MS;
         const clawOffCfg = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
         const nsfwCfg = (cfg.nsfwServers && typeof cfg.nsfwServers === 'object') ? cfg.nsfwServers : {};
+        const profitOwnerCfg = (cfg.serverProfitOwner && typeof cfg.serverProfitOwner === 'object') ? cfg.serverProfitOwner : {};
 
         // Group PAID entries for the with-ads numbers; keep a row for guilds
         // that only have organic (no-ad) activity so they still show in the
@@ -1674,6 +1675,8 @@ async function handleAdmin(req, res, path, clients, config) {
             serverAdsOff: (cfg.serverAdsOff && typeof cfg.serverAdsOff === 'object') ? cfg.serverAdsOff : {},
             clawbackOffAfterComplete: clawOffCfg,
             nsfwServers: nsfwCfg,
+            serverProfitOwner: profitOwnerCfg,
+            defaultProfitOwner: shares.DEFAULT_HOLDER,
             fallbackText: typeof cfg.fallbackText === 'string' ? cfg.fallbackText : '',
             templates: {
                 default: typeof t.default === 'string' ? t.default : '',
@@ -2213,6 +2216,27 @@ async function handleAdmin(req, res, path, clients, config) {
         else delete cfg.nsfwServers[gid];
         saveJSON('siteconfig.json', cfg);
         return send(res, 200, { ok: true, gid, nsfw }, cors);
+    }
+
+    // Owner-only: assign the recipient of a server's net join profit ("доля сервера").
+    // 100% of this server's per-join service profit is routed to userId, bypassing
+    // the global shareholder pct split (see shares.payShares). An empty userId clears
+    // the override → the server falls back to the normal split. Keyed by guild in
+    // siteconfig; read live by shares.serverProfitOwner on the next credited join.
+    if (path === '/admin/server-profit-owner' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = body?.gid ? String(body.gid) : '';
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        const userId = body?.userId ? String(body.userId).trim() : '';
+        if (userId && !/^\d{17,20}$/.test(userId)) return send(res, 400, { error: 'bad userId' }, cors);
+        const cfg = loadJSON('siteconfig.json', {});
+        if (!cfg.serverProfitOwner || typeof cfg.serverProfitOwner !== 'object') cfg.serverProfitOwner = {};
+        if (userId) cfg.serverProfitOwner[gid] = userId;
+        else delete cfg.serverProfitOwner[gid];
+        saveJSON('siteconfig.json', cfg);
+        return send(res, 200, { ok: true, gid, userId }, cors);
     }
 
     if (path === '/admin/ads-off' && req.method === 'PUT') {
@@ -4241,7 +4265,7 @@ function startApiServer(clients, config) {
                 // already happened at the investor buy-in, so skip payShares.
                 let investorOwnedJoin = false;
                 try { investorOwnedJoin = investors.serverOutstanding(effServerId, loadJSON('verified.json', [])) > 0; } catch { /* never block verification */ }
-                if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue }).catch(() => null);
+                if (!investorOwnedJoin) await payShares(clients, amount, { revenuePerJoin: econ.revenue, guildId: sponsor.guildId }).catch(() => null);
                 const fresh = recordApiVerified({ creatorId: userId, memberId, serverId: effServerId, adKey, botId, campaignId: ad.campaignId });
                 syncHubMember(clients, userId).catch(() => null); // partner (card owner)
                 await logFunds(clients, {

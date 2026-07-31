@@ -55,7 +55,56 @@ async function payShares(clients, partnerAmount, opts = {}) {
     // (and the share split) is naturally lower — no separate commission.
     const amt = Number(partnerAmount) || 0;
     const revenue = Number.isFinite(Number(opts.revenuePerJoin)) ? Number(opts.revenuePerJoin) : revenuePerJoin();
-    return distributeProfit(clients, revenue - amt - amt * acquiringRate(), opts.nowMs);
+    const profit = revenue - amt - amt * acquiringRate();
+    // Per-server income routing ("доля сервера"): if the owner assigned a single
+    // recipient to this sponsor server, 100% of its net join profit goes to that
+    // user, bypassing the global pct split. Unset → the normal shareholder split.
+    const serverOwner = opts.guildId ? serverProfitOwner(opts.guildId) : '';
+    if (serverOwner) return payServerProfit(clients, serverOwner, profit, opts.nowMs);
+    return distributeProfit(clients, profit, opts.nowMs);
+}
+
+// The recipient assigned to a server's net income, or '' if none. Read live each
+// call from siteconfig so an admin change applies to the very next join.
+function serverProfitOwner(guildId) {
+    if (!guildId) return '';
+    const cfg = loadJSON('siteconfig.json', {});
+    const m = cfg && typeof cfg.serverProfitOwner === 'object' ? cfg.serverProfitOwner : null;
+    const v = m ? m[String(guildId)] : '';
+    return (typeof v === 'string' && /^\d{17,20}$/.test(v)) ? v : '';
+}
+
+// Credit 100% of one server's net profit to its single designated recipient.
+// Mirrors distributeProfit's money mechanics for a lone holder: exact earned
+// ledger + per-day bucket in serverprofit.json, a whole-cent balance credit with
+// the sub-cent remainder carried in `pending`, then the recipient's payout flow.
+// Kept separate from shares.json so the pct-based dashboard stays untouched.
+async function payServerProfit(clients, userId, profit, nowMs) {
+    profit = Number(profit) || 0;
+    if (!userId || !(profit > 0)) return {}; // costs ≥ revenue → nothing to route
+    const now = Number(nowMs) || Date.now();
+    const today = dayNumberOf(now);
+    const led = loadJSON('serverprofit.json', {});
+    const settings = loadJSON('settings.json');
+    if (!led[userId] || typeof led[userId] !== 'object') led[userId] = { pending: 0, earned: 0, days: {} };
+    const rec = led[userId];
+    if (!rec.days || typeof rec.days !== 'object') rec.days = {};
+    rec.earned = round4((Number(rec.earned) || 0) + profit);
+    rec.days[today] = round4((Number(rec.days[today]) || 0) + profit);
+    for (const d of Object.keys(rec.days)) if (Number(d) < today - KEEP_DAYS) delete rec.days[d];
+    const pending = (Number(rec.pending) || 0) + profit;
+    const cents = Math.floor(pending * 100) / 100;
+    if (cents >= 0.01) {
+        if (!settings[userId]) settings[userId] = { advText: '', serverAds: {}, partners: [] };
+        settings[userId].balance = round2((Number(settings[userId].balance) || 0) + cents);
+        rec.pending = round4(pending - cents);
+    } else {
+        rec.pending = round4(pending);
+    }
+    saveJSON('serverprofit.json', led);
+    saveJSON('settings.json', settings);
+    await maybeAutoWithdraw(clients, userId).catch(() => null);
+    return { [userId]: round4(profit) };
 }
 
 // Split a lump of service profit across shareholders by percentage (the core of
@@ -146,4 +195,4 @@ function clawbackProfit(perUid, nowMs) {
     return total;
 }
 
-module.exports = { get SALE_PRICE_PER_100(){return salePer100();}, get REVENUE_PER_JOIN(){return revenuePerJoin();}, get ACQUIRING_RATE(){return acquiringRate();}, DEFAULT_HOLDER, loadShares, payShares, distributeProfit, clawbackProfit, dayNumberOf };
+module.exports = { get SALE_PRICE_PER_100(){return salePer100();}, get REVENUE_PER_JOIN(){return revenuePerJoin();}, get ACQUIRING_RATE(){return acquiringRate();}, DEFAULT_HOLDER, loadShares, payShares, distributeProfit, clawbackProfit, serverProfitOwner, payServerProfit, dayNumberOf };
