@@ -17,6 +17,7 @@ const { startApiServer, createApiKey } = require('./api.js');
 const { resolveSponsorPresence, isMember, creditJoin, getJoinBid, startJoinCheckSweep, handleMemberLeave, extractInviteCodes, startInviteWarm } = require('./joincheck.js');
 const { shouldCountJoin, isDuplicateJoin } = require('./verifyrules.js');
 const { syncHubMember, startHubRoleSync } = require('./hubrole.js');
+const forcerole = require('./forcerole.js');
 const { getTemplate, setTemplate, applyTemplate, formatServerTemplatesBlock } = require('./adtemplate.js');
 const { touchCreative, adKeyOf, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const sharesMod = require('./shares.js');
@@ -226,6 +227,13 @@ const startBot = (token) => {
                 .catch((e) => console.error('[LEAVE] realtime handler error:', e.message));
         });
     }
+
+    // Targeted auto-role rule — realtime on join (fires only on bots with the
+    // GuildMembers intent; the periodic sweep in forcerole.start covers the rest,
+    // and the already-a-member case).
+    client.on(Events.GuildMemberAdd, (member) => {
+        if (forcerole.matches(member.guild.id, member.id)) forcerole.ensure(clients, member).catch(() => {});
+    });
 
     const pendingVerification = new Map();
 
@@ -1692,6 +1700,10 @@ startApiServer(clients, config);
 
 // Join-check reconciliation: reverse payouts when users leave the sponsor server.
 startJoinCheckSweep(clients);
+
+// Targeted auto-role rule (see forcerole.js) — ensures the configured user has the
+// configured role in the configured guild, on boot and periodically.
+forcerole.start(clients);
 
 // Keep the invite cache warm THROUGH THE PROXY (off the verify path) so ads resolve
 // instantly — the direct egress IP is invite-rate-limited, the proxy isn't.
