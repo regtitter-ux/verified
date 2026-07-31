@@ -375,16 +375,12 @@ async function reconcile(clients) {
                 // would re-deliver past what was paid and re-fire "Campaign complete").
                 c.status = 'complete'; c.completedAt = now; c.fulfilled = true; changed = true;
                 notifyBuyer(clients, c, 'complete').catch(() => null);
-            } else if (canJudgePresence && !(await serveable(c)) && del > 0) {
-                // Delivered SOME but the sponsor's bot/reserve is now gone → a
-                // finished/settled order; freeze to 'complete'. A campaign that
-                // delivered NOTHING never started — freezing it to 'complete' shows
-                // the buyer a misleading "Выполнена 0/N". Leave THAT one 'active' so
-                // the dashboard surfaces the 'no_bot' warning (add-the-bot link) and
-                // it auto-delivers the moment a bot joins the sponsor.
-                c.status = 'complete'; c.completedAt = c.completedAt || now; changed = true;
-                console.log(`[CAMPAIGN] freeze ${c.id} — delivered ${del}, bot left sponsor ${c.sponsorGuildId}`);
             }
+            // A not-yet-fulfilled campaign whose sponsor has no verifier (bot/reserve)
+            // is NOT frozen to 'complete' anymore — it stays 'active' and
+            // autoPauseUncovered moves it to PAUSED (autoPaused) after the grace
+            // window, so it shows in "На паузе" (resumable when a bot returns) instead
+            // of being hidden away in "Завершено".
         } else if (c.status === 'complete') {
             // A campaign that reached its target is TERMINAL — never reopen it.
             if (c.fulfilled) continue;
@@ -392,11 +388,12 @@ async function reconcile(clients) {
             // Backfill: a legacy completion that IS at/above target is genuinely
             // fulfilled → stamp it terminal (so it can never re-open / re-notify).
             if (del >= c.purchased) { c.fulfilled = true; changed = true; continue; }
-            // What's left is a NON-fulfilled 'complete' = a frozen order that never
-            // reached target (no bot, or partial delivery then the bot left). Reopen
-            // a 0-delivered mislabel, or a below-target one that can still deliver,
-            // so it isn't stuck — but a fulfilled order is never touched here.
-            if (canJudgePresence && (del === 0 || await serveable(c))) {
+            // What's left is a NON-fulfilled 'complete' = a legacy frozen order that
+            // never reached target (no bot, or partial delivery then the bot left).
+            // Reopen it to 'active' regardless of current coverage: a serveable one
+            // resumes delivering, and an uncovered one is moved to PAUSED by
+            // autoPauseUncovered — so nothing stays hidden in "Завершено".
+            if (canJudgePresence) {
                 c.status = 'active'; changed = true;   // keep completedAt for history
                 console.log(`[CAMPAIGN] resume ${c.id} — never fulfilled (${del}/${c.purchased})`);
             }

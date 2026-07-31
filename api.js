@@ -2876,7 +2876,8 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/all-campaigns' && req.method === 'GET') {
         if (!isAdminBuyer && !managers.isManager(buyerId)) return send(res, 403, { error: 'staff only' }, cors);
         campaigns.reconcile(clients).catch(() => null); // fire-and-forget: don't block the list load on sequential invite re-checks (the 60s background sweep keeps statuses fresh)
-        const scope = new URL(req.url, 'http://x').searchParams.get('scope') === 'done' ? 'done' : 'active';
+        const _sp = new URL(req.url, 'http://x').searchParams.get('scope');
+        const scope = _sp === 'done' ? 'done' : _sp === 'paused' ? 'paused' : 'active';
         const camps = campaigns.loadCampaigns();
         const verified = loadJSON('verified.json', []);
         const joinlinks = loadJSON('joinlinks.json', []);
@@ -2885,7 +2886,9 @@ async function handleBuyer(req, res, path, clients, config) {
         const pinId = adminPriorityId();
         const wanted = scope === 'done'
             ? (c) => c.status !== 'active' && c.status !== 'pending_payment'
-            : (c) => c.status === 'active';
+            : scope === 'paused'
+                ? (c) => c.status === 'active' && (c.paused || c.autoPaused)          // all paused/auto-paused orders, every client
+                : (c) => c.status === 'active' && !c.paused && !c.autoPaused;          // running only (paused live in their own tab)
         const fifoKey = (c) => Number(c.paidAt) || Number(c.createdAt) || 0;
         const list = Object.values(camps).filter((c) => c && wanted(c))
             .sort((a, b) => {
