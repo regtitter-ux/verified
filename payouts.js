@@ -313,13 +313,20 @@ async function autoPayViaLtc(clients, userId, amount, _seen, eligibleForReferral
     let batch;
     try { batch = await nowpayments.createPayout({ address, amount: coin }); }
     catch (e) {
-        // AMBIGUOUS: NOWPayments may have accepted the batch before the response
-        // was lost (timeout / dropped connection). Auto-refunding would let the
-        // next earnings cycle pay AGAIN — a DOUBLE payout. So DON'T refund; record
-        // it for manual reconciliation and alert the owner. The reserved balance
-        // stays consumed (holding money pending a check beats paying twice).
-        recordReviewPayout(userId, amount, coin, address, e && e.message);
-        return alertPayoutReview(clients, userId, amount, coin, address, e && e.message);
+        // Only a TRULY ambiguous failure (our request timed out, the socket dropped
+        // after we sent the body, or NOWPayments accepted with an unreadable
+        // response — all flagged e.ambiguous) risks a DOUBLE payout on refund, so
+        // those alone go to manual review WITHOUT a refund. Every DEFINITE failure
+        // (auth error, HTTP rejection, connection refused) created NO batch — refund
+        // the reservation and let it retry automatically instead of stranding the
+        // money in 'review' forever. This misclassification (all errors → review)
+        // was the cause of the recurring stuck withdrawals.
+        if (e && e.ambiguous) {
+            recordReviewPayout(userId, amount, coin, address, e && e.message);
+            return alertPayoutReview(clients, userId, amount, coin, address, e && e.message);
+        }
+        refundReserved(userId, amount);
+        return alertPayoutDeferred(clients, userId, amount, `LTC payout failed (${(e && e.message) || 'error'})`);
     }
     const wd = (batch && Array.isArray(batch.withdrawals) && batch.withdrawals[0]) || null;
     if (!wd && !(batch && batch.id)) { refundReserved(userId, amount); return alertPayoutDeferred(clients, userId, amount, 'LTC payout was not accepted'); }
@@ -615,6 +622,39 @@ async function alertOwnerTransferConfig(clients, userId, amount, why) {
     console.error(`[CRYPTOPAY] transfer config issue for ${userId}: ${why}`);
 }
 
+// Owner escape-hatch (admin panel): re-attempt a stuck ('review') or dead
+// ('failed') withdrawal. A 'review' record had its balance consumed but never
+// refunded (an ambiguous send that couldn't be auto-resolved), so restore the
+// balance before re-running. A 'failed' record was already refunded by the
+// settle sweep, so its money is back on the balance — don't credit it twice.
+// Either way the old record is marked 'retried' so it can't be actioned again,
+// then a fresh auto-withdraw is kicked. CAUTION: retrying a 'review' assumes the
+// original never actually sent — the owner is expected to confirm that in
+// NOWPayments first (a genuine double-send would pay twice). Returns
+// { ok, restored } or { ok:false, error }.
+async function retryWithdrawal(clients, userId, withdrawalId) {
+    const settings = loadJSON('settings.json');
+    const s = settings[userId];
+    const list = Array.isArray(s?.withdrawals) ? s.withdrawals : null;
+    if (!list) return { ok: false, error: 'no withdrawals for this user' };
+    const w = list.find((x) => x && x.id === withdrawalId);
+    if (!w) return { ok: false, error: 'withdrawal not found' };
+    if (w.status !== 'review' && w.status !== 'failed') {
+        return { ok: false, error: `cannot retry a '${w.status}' withdrawal` };
+    }
+    const amount = round2(w.amount);
+    const wasReview = w.status === 'review';
+    w.status = 'retried';
+    w.retriedAt = Date.now();
+    // Only the 'review' path stranded the money — restore it. 'failed' is already back.
+    if (wasReview) s.balance = round2((Number(s.balance) || 0) + amount);
+    saveJSON('settings.json', settings);
+    if (wasReview) logPartnerMoney(userId, { type: 'credit', reason: 'payout_retry_refund', amount, srcId: `retry:${withdrawalId}` });
+    // Kick a fresh payout attempt (best-effort; the balance is on the account now).
+    await maybeAutoWithdraw(clients, userId).catch((e) => console.error('[RETRY] re-run failed:', e && e.message));
+    return { ok: true, restored: wasReview ? amount : 0 };
+}
+
 // Mark a withdrawal as completed. Returns the withdrawal object or null.
 function completeWithdrawal(userId, withdrawalId) {
     const settings = loadJSON('settings.json');
@@ -747,6 +787,7 @@ module.exports = {
     startLtcPayoutSweep,
     buildHistoryView,
     maybeAutoWithdraw,
+    retryWithdrawal,
     completeWithdrawal,
     handleManualBalance,
     handleDone,

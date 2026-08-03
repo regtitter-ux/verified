@@ -16,25 +16,44 @@ const HOST = 'api.nowpayments.io';
 const enabled = () => Boolean(apiKey());
 const hasSecret = () => Boolean(ipnSecret());
 
+// Rejections carry an `ambiguous` flag for write endpoints (esp. /v1/payout): it
+// is TRUE only when the request may have been processed despite the error — a
+// timeout after we sent the body, a socket drop mid-flight, or a 2xx we couldn't
+// parse. It is FALSE for a definite non-2xx rejection (server decided, no
+// resource created), an auth failure, or a connection that never reached the
+// host. Callers use it to decide refund-and-retry (safe) vs. manual review.
 function call(path, method, params, extraHeaders) {
     return new Promise((resolve, reject) => {
         const body = params ? JSON.stringify(params) : null;
         const headers = { 'x-api-key': apiKey(), 'Content-Type': 'application/json', ...(extraHeaders || {}) };
         if (body) headers['Content-Length'] = Buffer.byteLength(body);
+        let wrote = false;
         const req = https.request({ host: HOST, path, method, headers }, (res) => {
             let data = '';
             res.on('data', (c) => { data += c; });
             res.on('end', () => {
-                try {
-                    const j = JSON.parse(data);
-                    if (res.statusCode >= 200 && res.statusCode < 300) resolve(j);
-                    else reject(new Error(j.message || `nowpayments ${res.statusCode}`));
-                } catch (e) { reject(new Error('bad response')); }
+                const ok2xx = res.statusCode >= 200 && res.statusCode < 300;
+                let j = null;
+                try { j = JSON.parse(data); } catch { /* unparseable body */ }
+                if (j && ok2xx) return resolve(j);
+                const e = new Error((j && j.message) || `nowpayments ${res.statusCode}`);
+                e.httpStatus = res.statusCode;
+                // Non-2xx = the server responded with a rejection → no batch created.
+                // A 2xx we couldn't parse = accepted but unreadable → truly ambiguous.
+                e.ambiguous = ok2xx;
+                reject(e);
             });
         });
-        req.on('error', reject);
-        req.setTimeout(15000, () => req.destroy(new Error('timeout')));
-        if (body) req.write(body);
+        req.on('error', (e) => {
+            // Connection never reached the host (refused / DNS / TLS / connect
+            // timeout) → nothing was processed. A socket error AFTER we wrote the
+            // body could have been processed server-side → ambiguous.
+            const preConnect = ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNABORTED'].includes(e.code || '');
+            if (!('ambiguous' in e)) e.ambiguous = wrote && !preConnect;
+            reject(e);
+        });
+        req.setTimeout(15000, () => { const e = new Error('timeout'); e.ambiguous = true; req.destroy(e); });
+        if (body) { req.write(body); wrote = true; }
         req.end();
     });
 }

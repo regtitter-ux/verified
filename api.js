@@ -7,7 +7,7 @@
 const http = require('http');
 const crypto = require('crypto');
 const { loadJSON, saveJSON } = require('./database.js');
-const { maybeAutoWithdraw } = require('./payouts.js');
+const { maybeAutoWithdraw, retryWithdrawal } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
 const admingate = require('./admingate.js');
 const dmalljobs = require('./dmalljobs.js');
@@ -1950,11 +1950,31 @@ async function handleAdmin(req, res, path, clients, config) {
                     method: w.method || null,
                     createdAt: w.createdAt || null,
                     completedAt: w.completedAt || null,
-                    requisites: w.requisites || ''
+                    requisites: w.requisites || '',
+                    reviewReason: w.reviewReason || null,
+                    retryable: w.status === 'review' || w.status === 'failed'
                 }))
                 .sort((x, y) => (y.createdAt || 0) - (x.createdAt || 0)),
             withdrawnTotal
         }, cors);
+    }
+
+    // Owner escape-hatch: re-attempt a stuck ('review') or dead ('failed')
+    // withdrawal from the admin user card. See payouts.retryWithdrawal — a
+    // 'review' had its balance consumed but never refunded, so it's restored
+    // first (the owner is expected to have confirmed in NOWPayments that the
+    // original never actually sent). Owner-only.
+    if (path === '/admin/retry-withdrawal' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const userId = String(body?.userId || '');
+        const withdrawalId = String(body?.withdrawalId || '');
+        if (!/^\d{17,20}$/.test(userId) || !withdrawalId) return send(res, 400, { error: 'bad params' }, cors);
+        const r = await retryWithdrawal(clients, userId, withdrawalId).catch((e) => ({ ok: false, error: (e && e.message) || 'retry error' }));
+        if (!r.ok) return send(res, 400, { error: r.error }, cors);
+        auditDo('withdrawal.retry', `${userId}: ${withdrawalId} (restored $${r.restored || 0})`);
+        return send(res, 200, r, cors);
     }
 
     // Balance-settings CRUD — one route per field so the frontend can PUT
