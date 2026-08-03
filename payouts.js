@@ -6,6 +6,7 @@ const cryptopay = require('./cryptopay.js');
 const nowpayments = require('./nowpayments.js');
 const partnerlog = require('./partnerlog.js');
 const ledger = require('./ledger.js');
+const adminAuth = require('./admin-auth.js');
 
 // Mirror a partner money movement into the activity log (never blocks the payout).
 function logPartnerMoney(userId, entry) { try { partnerlog.logEvent(userId, entry); } catch (_) { /* never block */ } }
@@ -15,6 +16,11 @@ const THRESHOLD = 10;                       // auto-withdraw once balance reache
 const MANUAL_USER = '833442190427684914';   // only this user may adjust balances manually
 const ADMIN_BOT_ID = process.env.ADMIN_BOT_ID || '1514533989434789998'; // authors payout requests
 const OWNER_ID = process.env.OWNER_ID || '743913502997086219';         // bot owner — gets admin-side alerts
+
+// May this Discord user run owner-level bot money commands? The hardcoded manual
+// user, the bot owner, OR any site owner / co-owner added in the admin panel
+// (owners.json, read live) — so co-owners get the same bot rights as on the site.
+const canManage = (id) => Boolean(id) && (id === MANUAL_USER || id === OWNER_ID || adminAuth.isOwnerId(id));
 
 // Crypto Pay error names that only the bot owner can fix (app settings /
 // token). Ping the OWNER, not the affected user — and don't promise the
@@ -685,7 +691,7 @@ function completeWithdrawal(userId, withdrawalId) {
 async function handleManualBalance(message, clients) {
     const m = message.content.trim().match(/^([+-])\s*(\d+(?:[.,]\d+)?)\s+(\d{17,20})$/);
     if (!m) return false;
-    if (message.author.id !== MANUAL_USER) return false;
+    if (!canManage(message.author.id)) return false;
 
     const sign = m[1] === '-' ? -1 : 1;
     const amount = round2(m[2].replace(',', '.'));
@@ -744,7 +750,7 @@ async function handleDone(message, clients) {
     const withdrawalId = fm[2];
 
     const isAdmin = message.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
-    if (!isAdmin && message.author.id !== MANUAL_USER) return false; // not staff → ignore
+    if (!isAdmin && !canManage(message.author.id)) return false; // not staff → ignore
 
     // Proof can be a photo (screenshot) OR text (e.g. a redeemable check link).
     const photo = message.attachments.find(a => (a.contentType || '').startsWith('image/')) || message.attachments.first();
@@ -793,6 +799,7 @@ module.exports = {
     WITHDRAW_CHANNEL,
     THRESHOLD,
     MANUAL_USER,
+    canManage,
     settleLtcPayouts,
     startLtcPayoutSweep,
     buildHistoryView,

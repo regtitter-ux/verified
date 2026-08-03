@@ -8,6 +8,7 @@ const {
 } = require('discord.js');
 const auditlog = require('./auditlog.js');
 const lotmon = require('./lotmon.js');
+const adminAuth = require('./admin-auth.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
@@ -145,6 +146,14 @@ const config = {
     prefix: process.env.PREFIX || '!'
 };
 
+// Bot-side owner check: the bot's primary owner (OWNER_ID) OR any site owner /
+// co-owner added in the admin panel (owners.json, via adminAuth.isOwnerId). Read
+// live, so a co-owner added in settings gets the same bot rights immediately —
+// no restart — matching their web owner rights.
+function isOwnerUser(id) {
+    return Boolean(id) && (id === config.ownerId || adminAuth.isOwnerId(id));
+}
+
 // Bots listed here get the privileged GuildMembers gateway intent so we can
 // react to `guildMemberRemove` in real time and immediately claw back the
 // payout + strip the granted role when a sponsor-server member leaves.
@@ -246,7 +255,7 @@ const startBot = (token) => {
         const balance = Number(s.balance) || 0;
         const requisites = (s.requisites || '').trim();
         const isSelf = userId === viewerId;
-        const isOwnerView = viewerId === config.ownerId;
+        const isOwnerView = isOwnerUser(viewerId);
 
         const embed = new EmbedBuilder()
             .setTitle(isSelf ? 'Your balance' : 'User balance')
@@ -647,7 +656,7 @@ const startBot = (token) => {
             const idParam = (interaction.options.getString('id') || '').trim();
             let targetId = interaction.user.id;
             if (idParam) {
-                if (interaction.user.id !== config.ownerId) {
+                if (!isOwnerUser(interaction.user.id)) {
                     return interaction.reply({ content: '❌ Only the bot owner can view other users\' balances.', flags: [64] }).catch(() => null);
                 }
                 if (!/^\d{17,20}$/.test(idParam)) {
@@ -660,7 +669,7 @@ const startBot = (token) => {
 
         // /stat — global verification stats, bot owner only (usable anywhere)
         if (interaction.isChatInputCommand() && interaction.commandName === 'stat') {
-            if (interaction.user.id !== config.ownerId) {
+            if (!isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
             }
             return interaction.reply({ ...buildStatView(0), flags: [64] }).catch(() => null);
@@ -675,7 +684,7 @@ const startBot = (token) => {
         // /advertising-text — set the default ad-text template (global, or per server)
         if (interaction.isChatInputCommand() && interaction.commandName === 'advertising-text') {
             const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
-            if (!isAdmin && interaction.user.id !== config.ownerId) {
+            if (!isAdmin && !isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ You need administrator permissions to use this.', flags: [64] }).catch(() => null);
             }
             const gid = (interaction.options.getString('id') || '').trim();
@@ -699,7 +708,7 @@ const startBot = (token) => {
         // /advertising-text modal submit — save the template
         if (interaction.isModalSubmit() && (interaction.customId === 'adtext_modal' || interaction.customId.startsWith('adtext_modal:'))) {
             const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
-            if (!isAdmin && interaction.user.id !== config.ownerId) return;
+            if (!isAdmin && !isOwnerUser(interaction.user.id)) return;
             const gid = interaction.customId.includes(':') ? interaction.customId.split(':')[1] : null;
             const text = interaction.fields.getTextInputValue('adtext_input');
             setTemplate(gid, text);
@@ -713,7 +722,7 @@ const startBot = (token) => {
         // /partner — add/remove a partner (slash version of !part). Admin or owner.
         if (interaction.isChatInputCommand() && interaction.commandName === 'partner') {
             const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
-            if (!isAdmin && interaction.user.id !== config.ownerId) {
+            if (!isAdmin && !isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ You need administrator permissions to use this.', flags: [64] }).catch(() => null);
             }
             const target = interaction.options.getUser('user');
@@ -733,7 +742,7 @@ const startBot = (token) => {
 
         // /ad — set your ad (slash version of !adv3). Owner-only.
         if (interaction.isChatInputCommand() && interaction.commandName === 'ad') {
-            if (interaction.user.id !== config.ownerId) {
+            if (!isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ Only the bot owner can set ads.', flags: [64] }).catch(() => null);
             }
             const gid = (interaction.options.getString('server') || interaction.guildId || '').trim();
@@ -767,7 +776,7 @@ const startBot = (token) => {
 
         // /apikey new|list|revoke — slash version of !apikey. Owner-only.
         if (interaction.isChatInputCommand() && interaction.commandName === 'apikey') {
-            if (interaction.user.id !== config.ownerId) {
+            if (!isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ Only the bot owner can manage API keys.', flags: [64] }).catch(() => null);
             }
             const sub = interaction.options.getSubcommand();
@@ -801,7 +810,7 @@ const startBot = (token) => {
 
         // /cryptobalance — slash version. Owner-only.
         if (interaction.isChatInputCommand() && interaction.commandName === 'cryptobalance') {
-            if (interaction.user.id !== config.ownerId) {
+            if (!isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
             }
             if (!cryptopay.enabled()) {
@@ -826,7 +835,7 @@ const startBot = (token) => {
 
         // /cryptofund — slash version. Owner-only.
         if (interaction.isChatInputCommand() && interaction.commandName === 'cryptofund') {
-            if (interaction.user.id !== config.ownerId) {
+            if (!isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
             }
             if (!cryptopay.enabled()) {
@@ -850,7 +859,7 @@ const startBot = (token) => {
         // /verification — create a verification card bound to a specific role
         if (interaction.isChatInputCommand() && interaction.commandName === 'verify') {
             const isAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
-            if (!isAdmin && interaction.user.id !== config.ownerId) {
+            if (!isAdmin && !isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ You need administrator permissions to use this.', flags: [64] }).catch(() => null);
             }
 
@@ -1024,7 +1033,7 @@ const startBot = (token) => {
 
         // Owner: "Change the balance" button — open modal (amount with +/- prefix)
         if (interaction.isButton() && interaction.customId.startsWith('owner_change_bal:')) {
-            if (interaction.user.id !== config.ownerId) {
+            if (!isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
             }
             const targetId = interaction.customId.split(':')[1];
@@ -1044,7 +1053,7 @@ const startBot = (token) => {
 
         // Owner: "Bid" button — open modal (rate in $ per 100 clicks)
         if (interaction.isButton() && interaction.customId.startsWith('owner_set_bid:')) {
-            if (interaction.user.id !== config.ownerId) {
+            if (!isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
             }
             const targetId = interaction.customId.split(':')[1];
@@ -1066,7 +1075,7 @@ const startBot = (token) => {
 
         // Owner: "Bid extra" button — join-check rate ($ per 100 confirmed joins)
         if (interaction.isButton() && interaction.customId.startsWith('owner_set_joinbid:')) {
-            if (interaction.user.id !== config.ownerId) {
+            if (!isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
             }
             const targetId = interaction.customId.split(':')[1];
@@ -1088,7 +1097,7 @@ const startBot = (token) => {
 
         // Owner: "Referrals" button — edit this user's referral list (one ID per line)
         if (interaction.isButton() && interaction.customId.startsWith('owner_referrals:')) {
-            if (interaction.user.id !== config.ownerId) {
+            if (!isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
             }
             const targetId = interaction.customId.split(':')[1];
@@ -1111,7 +1120,7 @@ const startBot = (token) => {
 
         // Owner: toggle fully-automatic USDT-check payouts for this user
         if (interaction.isButton() && interaction.customId.startsWith('owner_toggle_autopay:')) {
-            if (interaction.user.id !== config.ownerId) {
+            if (!isOwnerUser(interaction.user.id)) {
                 return interaction.reply({ content: '❌ Only the bot owner can use this.', flags: [64] }).catch(() => null);
             }
             const targetId = interaction.customId.split(':')[1];
@@ -1124,7 +1133,7 @@ const startBot = (token) => {
 
         // Owner: apply balance change from modal
         if (interaction.isModalSubmit() && interaction.customId.startsWith('change_bal_modal:')) {
-            if (interaction.user.id !== config.ownerId) return;
+            if (!isOwnerUser(interaction.user.id)) return;
             const targetId = interaction.customId.split(':')[1];
             const raw = interaction.fields.getTextInputValue('change_bal_input').trim();
             const m = raw.match(/^([+-])\s*(\d+(?:[.,]\d+)?)$/);
@@ -1144,7 +1153,7 @@ const startBot = (token) => {
 
         // Owner: set this user's bid from modal
         if (interaction.isModalSubmit() && interaction.customId.startsWith('set_bid_modal:')) {
-            if (interaction.user.id !== config.ownerId) return;
+            if (!isOwnerUser(interaction.user.id)) return;
             const targetId = interaction.customId.split(':')[1];
             const raw = interaction.fields.getTextInputValue('bid_input').trim().replace(',', '.');
             const bid = Number(raw);
@@ -1160,7 +1169,7 @@ const startBot = (token) => {
 
         // Owner: set this user's join-check rate from modal
         if (interaction.isModalSubmit() && interaction.customId.startsWith('joinbid_modal:')) {
-            if (interaction.user.id !== config.ownerId) return;
+            if (!isOwnerUser(interaction.user.id)) return;
             const targetId = interaction.customId.split(':')[1];
             const raw = interaction.fields.getTextInputValue('joinbid_input').trim().replace(',', '.');
             const bid = Number(raw);
@@ -1176,7 +1185,7 @@ const startBot = (token) => {
 
         // Owner: save this user's referral list from modal
         if (interaction.isModalSubmit() && interaction.customId.startsWith('referrals_modal:')) {
-            if (interaction.user.id !== config.ownerId) return;
+            if (!isOwnerUser(interaction.user.id)) return;
             const targetId = interaction.customId.split(':')[1];
             const raw = interaction.fields.getTextInputValue('referrals_input') || '';
             // Accept IDs separated by newlines, spaces or commas; keep valid, unique, not self.
