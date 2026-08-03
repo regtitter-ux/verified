@@ -44,14 +44,38 @@ function loadAdmins() {
     return arr.filter((x) => /^\d{17,20}$/.test(String(x)));
 }
 function saveAdmins(list) {
-    const clean = [...new Set((list || []).map((x) => String(x)).filter((x) => /^\d{17,20}$/.test(x) && x !== OWNER_ID))];
+    const owners = new Set([OWNER_ID, ...loadOwners()]);
+    const clean = [...new Set((list || []).map((x) => String(x)).filter((x) => /^\d{17,20}$/.test(x) && !owners.has(x)))];
     saveJSON('admins.json', clean);
     return clean;
 }
+
+// ---------- Co-owners ----------
+// Extra Discord ids that also get FULL owner rights, managed live from the admin
+// panel (owners.json) so several of the operator's own accounts can all be owners
+// without a redeploy. The env ADMIN_OWNER_ID stays the PRIMARY, unremovable anchor
+// (it's what the 2FA gate authenticates as). Read live — a change applies at once.
+function loadOwners() {
+    const raw = loadJSON('owners.json', null);
+    const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.owners) ? raw.owners : null);
+    if (!arr) return [];
+    return [...new Set(arr.map((x) => String(x)).filter((x) => /^\d{17,20}$/.test(x) && x !== OWNER_ID))];
+}
+function saveOwners(list) {
+    const clean = [...new Set((list || []).map((x) => String(x)).filter((x) => /^\d{17,20}$/.test(x) && x !== OWNER_ID))];
+    saveJSON('owners.json', clean);
+    return clean;
+}
+// Is this id an owner — the primary env owner OR a co-owner added in the panel?
+function isOwnerId(userId) {
+    const id = String(userId || '');
+    return Boolean(id) && (id === OWNER_ID || loadOwners().includes(id));
+}
+
 // 'owner' | 'admin' | null
 function roleOf(userId) {
     const id = String(userId || '');
-    if (id && id === OWNER_ID) return 'owner';
+    if (isOwnerId(id)) return 'owner';
     if (loadAdmins().includes(id)) return 'admin';
     return null;
 }
@@ -322,6 +346,6 @@ module.exports = {
     issueSession, verifySession, readSessionCookie, sessionCookieHeader,
     issueBuyerSession, verifyBuyerSession, readBuyerCookie, buyerCookieHeader,
     issueGate, verifyGate, readGateCookie, gateCookieHeader,
-    roleOf, loadAdmins, saveAdmins,
+    roleOf, loadAdmins, saveAdmins, isOwnerId, loadOwners, saveOwners,
     getUserGuilds
 };

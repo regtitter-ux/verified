@@ -1718,10 +1718,10 @@ async function handleAdmin(req, res, path, clients, config) {
         }, cors);
     }
 
-    // Admin management (owner only): list / add / remove assigned admins.
+    // Admin management (owner only): list / add / remove assigned admins + co-owners.
     if (path === '/admin/admins' && req.method === 'GET') {
         if (!isOwner) return ownerOnly();
-        return send(res, 200, { owner: adminAuth.OWNER_ID, admins: adminAuth.loadAdmins() }, cors);
+        return send(res, 200, { owner: adminAuth.OWNER_ID, owners: adminAuth.loadOwners(), admins: adminAuth.loadAdmins() }, cors);
     }
     if (path === '/admin/admins' && req.method === 'PUT') {
         if (!isOwner) return ownerOnly();
@@ -1734,6 +1734,24 @@ async function handleAdmin(req, res, path, clients, config) {
         const saved = adminAuth.saveAdmins(next);
         auditDo(body?.remove ? 'admin.remove' : 'admin.add', id);
         return send(res, 200, { ok: true, admins: saved }, cors);
+    }
+
+    // Co-owner management (owner only): add / remove Discord ids that get FULL owner
+    // rights across the whole site. Stored live in owners.json — applies on the next
+    // request, no restart. The primary env owner is the unremovable anchor.
+    if (path === '/admin/owners' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const id = String(body?.userId || '');
+        if (!/^\d{17,20}$/.test(id)) return send(res, 400, { error: 'bad user id' }, cors);
+        if (id === adminAuth.OWNER_ID) return send(res, 400, { error: 'this is the primary owner' }, cors);
+        const list = adminAuth.loadOwners();
+        const next = body?.remove ? list.filter((x) => x !== id) : [...list, id];
+        const saved = adminAuth.saveOwners(next);
+        adminAuth.saveAdmins(adminAuth.loadAdmins()); // a promoted owner shouldn't linger in the admins list
+        auditDo(body?.remove ? 'owner.remove' : 'owner.add', id);
+        return send(res, 200, { ok: true, owners: saved }, cors);
     }
 
     if (path === '/admin/template' && req.method === 'PUT') {
@@ -2574,7 +2592,7 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         return send(res, 200, sess
-            ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isOwner: sess.userId === adminAuth.OWNER_ID, isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), dmall: dmaccess.isDmall(sess.userId) }
+            ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isOwner: adminAuth.isOwnerId(sess.userId), isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), dmall: dmaccess.isDmall(sess.userId) }
             : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
@@ -2583,7 +2601,7 @@ async function handleBuyer(req, res, path, clients, config) {
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
     const buyerId = sess.userId;
     // Owner or an assigned admin may view and manage ANY buyer's campaigns.
-    const isAdminBuyer = buyerId === adminAuth.OWNER_ID || Boolean(adminAuth.roleOf(buyerId));
+    const isAdminBuyer = adminAuth.isOwnerId(buyerId) || Boolean(adminAuth.roleOf(buyerId));
 
     if (path === '/order/config' && req.method === 'GET') {
         const isMgr = managers.isManager(buyerId);
@@ -2593,7 +2611,7 @@ async function handleBuyer(req, res, path, clients, config) {
             publicPricePer100: campaigns.PRICE_PER_100,
             minJoins: campaigns.MIN_JOINS,
             cryptoEnabled: cryptopay.enabled(),
-            isOwner: buyerId === adminAuth.OWNER_ID,
+            isOwner: adminAuth.isOwnerId(buyerId),
             isAdmin: Boolean(adminAuth.roleOf(buyerId)),
             isManager: isMgr,
             botInviteUrl: process.env.BOT_INVITE_URL || 'https://discord.com/oauth2/authorize?client_id=1522609323090509905&permissions=268435456&scope=bot'
@@ -2618,7 +2636,7 @@ async function handleBuyer(req, res, path, clients, config) {
 
     // Owner-only: list / add / remove sales managers.
     if (path === '/order/managers' && req.method === 'GET') {
-        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        if (!adminAuth.isOwnerId(buyerId)) return send(res, 403, { error: 'owner only' }, cors);
         return send(res, 200, {
             managers: managers.loadManagers(),
             pricePer100: managers.PRICE_PER_100,
@@ -2626,7 +2644,7 @@ async function handleBuyer(req, res, path, clients, config) {
         }, cors);
     }
     if (path === '/order/managers' && req.method === 'PUT') {
-        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        if (!adminAuth.isOwnerId(buyerId)) return send(res, 403, { error: 'owner only' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const uid = String(body?.userId || '');
@@ -2701,11 +2719,11 @@ async function handleBuyer(req, res, path, clients, config) {
 
     // Owner-only: list / add / remove users granted access to the DMALL console.
     if (path === '/order/dmall-access' && req.method === 'GET') {
-        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        if (!adminAuth.isOwnerId(buyerId)) return send(res, 403, { error: 'owner only' }, cors);
         return send(res, 200, { users: dmaccess.loadAccess() }, cors);
     }
     if (path === '/order/dmall-access' && req.method === 'PUT') {
-        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        if (!adminAuth.isOwnerId(buyerId)) return send(res, 403, { error: 'owner only' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const uid = String(body?.userId || '');
@@ -2721,7 +2739,7 @@ async function handleBuyer(req, res, path, clients, config) {
     // DMALL console (owner/admin or an allow-listed user). Body: the configurator
     // payload { fields, embeds } + { target: { guildId } } (or a bare { config }).
     if (path === '/order/dmall/launch' && req.method === 'POST') {
-        const allowed = buyerId === adminAuth.OWNER_ID || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
+        const allowed = adminAuth.isOwnerId(buyerId) || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
         if (!allowed) return send(res, 403, { error: 'no dmall access' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
@@ -2741,20 +2759,20 @@ async function handleBuyer(req, res, path, clients, config) {
     // DMALL: the external-API bearer key, shown to the OWNER in the API docs panel
     // so they can hand it to the broadcast service. Owner-only.
     if (path === '/order/dmall/apikey' && req.method === 'GET') {
-        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        if (!adminAuth.isOwnerId(buyerId)) return send(res, 403, { error: 'owner only' }, cors);
         return send(res, 200, { configured: dmalljobs.apiEnabled(), key: dmalljobs.currentKey() || null, base: (process.env.PUBLIC_API_BASE || `https://${req.headers.host}`).replace(/\/+$/, '') }, cors);
     }
     // Owner-only: (re)generate the external DMALL API key from the panel — no redeploy.
     // The old key stops working immediately.
     if (path === '/order/dmall/apikey/generate' && req.method === 'POST') {
-        if (buyerId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        if (!adminAuth.isOwnerId(buyerId)) return send(res, 403, { error: 'owner only' }, cors);
         const key = dmalljobs.generateKey();
         audit.logAction(buyerId, 'dmall.apikey.generate', 'rotated');
         return send(res, 200, { ok: true, key }, cors);
     }
     // DMALL: the buyer's own broadcast jobs + live status (pulled from the service).
     if (path === '/order/dmall/jobs' && req.method === 'GET') {
-        const allowed = buyerId === adminAuth.OWNER_ID || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
+        const allowed = adminAuth.isOwnerId(buyerId) || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
         if (!allowed) return send(res, 403, { error: 'no dmall access' }, cors);
         return send(res, 200, { jobs: dmalljobs.forBuyer(buyerId, 50) }, cors);
     }
@@ -3220,7 +3238,7 @@ async function handlePartner(req, res, path, clients, config) {
     if (path === '/partner/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         if (!sess) return send(res, 200, { authed: false }, cors);
-        return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), isOwner: sess.userId === adminAuth.OWNER_ID }, cors);
+        return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), isOwner: adminAuth.isOwnerId(sess.userId) }, cors);
     }
     // Owner-only universal search (header search box). Given one Discord id, find
     // whatever it matches: a partner (→ open their cabinet via acting-as), a
@@ -3229,7 +3247,7 @@ async function handlePartner(req, res, path, clients, config) {
     if (path === '/partner/owner-search' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
-        if (sess.userId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        if (!adminAuth.isOwnerId(sess.userId)) return send(res, 403, { error: 'owner only' }, cors);
         const q = String((new URL(req.url, 'http://x')).searchParams.get('q') || '').trim();
         if (!/^\d{16,20}$/.test(q)) return send(res, 200, { q, results: [] }, cors);
         const results = [];
@@ -3285,7 +3303,7 @@ async function handlePartner(req, res, path, clients, config) {
     const sess = buyerSessionOf(req);
     if (!sess) return send(res, 401, { error: 'unauthorized' }, cors);
     const actorId = sess.userId;
-    const actorIsAdmin = actorId === adminAuth.OWNER_ID || Boolean(adminAuth.roleOf(actorId));
+    const actorIsAdmin = adminAuth.isOwnerId(actorId) || Boolean(adminAuth.roleOf(actorId));
     // Admin "view / edit as another partner": ?as=<userId> makes EVERY partner
     // endpoint below operate on that user (their data AND their edits), exactly as
     // if the admin were signed in as them. Only a real admin may use it; a normal
@@ -3343,7 +3361,7 @@ async function handlePartner(req, res, path, clients, config) {
     // order is random. The first bot whose DM goes through wins — a bot with no
     // mutual guild or closed DMs simply fails and we move on. ok=false = nobody could.
     if (path === '/partner/x-dm' && req.method === 'POST') {
-        if (actorId !== adminAuth.OWNER_ID) return send(res, 403, { error: 'owner only' }, cors);
+        if (!adminAuth.isOwnerId(actorId)) return send(res, 403, { error: 'owner only' }, cors);
         const body = await readBody(req);
         if (!body) return send(res, 400, { error: 'bad json' }, cors);
         const text = String(body.text || '').trim();
