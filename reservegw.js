@@ -89,8 +89,9 @@ function resume(st) {
 }
 
 function identify(st) {
-    // A brand-new session — any stale session id no longer applies.
-    st.sessionId = null; st.wantResume = false;
+    // A brand-new session — any stale session id / sequence no longer applies
+    // (a fresh connection must heartbeat with d:null until its READY sets a seq).
+    st.sessionId = null; st.wantResume = false; st.seq = null;
     send(st, {
         op: 2,
         d: {
@@ -120,7 +121,7 @@ function connect(st) {
         : GATEWAY_URL;
     // Tunnel the gateway WebSocket through the residential proxy too — a user-account
     // gateway login from a datacenter IP is the strongest self-bot signal.
-    try { const agent = reserveproxy.wsAgent(); ws = new WebSocket(url, agent ? { agent } : undefined); } catch { scheduleReconnect(st); return; }
+    try { const agent = reserveproxy.wsAgent(st.token); ws = new WebSocket(url, agent ? { agent } : undefined); } catch { scheduleReconnect(st); return; }
     st.ws = ws;
     st.ready = false;
     ws.on('message', (data) => onMessage(st, data));
@@ -184,6 +185,9 @@ function onMessage(st, data) {
                 st.wantResume = true;
                 setTimeout(() => resume(st), 1500 + Math.floor(Math.random() * 2500));
             } else {
+                // Session is dead — drop it NOW so a concurrent close can't try to
+                // resume it; identify a fresh one after Discord's required 1-5s wait.
+                st.sessionId = null; st.wantResume = false;
                 setTimeout(() => identify(st), 1500 + Math.floor(Math.random() * 2500));
             }
             break;
