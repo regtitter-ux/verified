@@ -1940,6 +1940,9 @@ async function handleAdmin(req, res, path, clients, config) {
 
         const baseJoinD = Number.isFinite(Number(s.joinBid)) ? Number(s.joinBid) : 5;
         const boostedD = boostActive(s);
+        // Time left in the raw 7-day window regardless of the manual off-switch — so
+        // the owner can still RESTORE a manually-ended boost while the window lasts.
+        const boostWindowLeftD = Math.max(0, BOOST_MS - (Date.now() - Number(s.referrerAt || 0)));
         return send(res, 200, {
             userId,
             username: userNameOf(clients, userId),
@@ -1949,7 +1952,9 @@ async function handleAdmin(req, res, path, clients, config) {
             joinBid: baseJoinD,
             joinRate: boostedD ? Math.max(baseJoinD, BOOST_RATE) : baseJoinD,
             boosted: boostedD,
-            boostLeftMs: boostedD ? Math.max(0, BOOST_MS - (Date.now() - Number(s.referrerAt || 0))) : 0,
+            boostOff: Boolean(s.boostOff),
+            boostWindowLeftMs: boostWindowLeftD,
+            boostLeftMs: boostedD ? boostWindowLeftD : 0,
             refBonusAccrued: money(s.refBonusAccrued),
             autoPayout: Boolean(s.autoPayout),
             autoTransfer: Boolean(s.autoTransfer),
@@ -2059,6 +2064,15 @@ async function handleAdmin(req, res, path, clients, config) {
             saveJSON('settings.json', settings);
             auditDo('rate.joinbid', `${userId}: $${s.joinBid}/100 joins`);
             return send(res, 200, { ok: true, joinBid: s.joinBid }, cors);
+        }
+        // Owner: end a partner's referral boost early (off:true) or restore it while
+        // the 7-day window still lasts (off:false). Only flips the boostOff flag —
+        // the referrer link and its 10% cut are untouched.
+        if (field === 'boost') {
+            s.boostOff = Boolean(body.off);
+            saveJSON('settings.json', settings);
+            auditDo('rate.boost', `${userId}: boost ${s.boostOff ? 'disabled early' : 'restored'}`);
+            return send(res, 200, { ok: true, boostOff: s.boostOff, boosted: boostActive(s) }, cors);
         }
         if (field === 'autopayout') {
             s.autoPayout = Boolean(body.autoPayout);

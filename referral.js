@@ -12,7 +12,10 @@ const BOOST_DAYS = 7;
 const BOOST_MS = BOOST_DAYS * 24 * 60 * 60 * 1000;
 
 // Is the referral boost still active for this user's settings record?
+// `boostOff` lets the site owner end it early (manually) without disturbing the
+// referrer relationship / the 10% cut — see the admin balances 'boost' field.
 const boostActive = (s) => {
+    if (s?.boostOff) return false;
     const at = Number(s?.referrerAt);
     return Number.isFinite(at) && at > 0 && (Date.now() - at) < BOOST_MS;
 };
