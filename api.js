@@ -1970,7 +1970,11 @@ async function handleAdmin(req, res, path, clients, config) {
                     completedAt: w.completedAt || null,
                     requisites: w.requisites || '',
                     reviewReason: w.reviewReason || null,
-                    retryable: w.status === 'review' || w.status === 'failed'
+                    // review / failed, or a MANUAL 'processing' request (no provider
+                    // payoutId) — e.g. filed before crypto auto-payout was enabled.
+                    // An in-flight provider batch ('processing' WITH a payoutId) is
+                    // not retryable (the sweep settles it; retrying would double-pay).
+                    retryable: w.status === 'review' || w.status === 'failed' || (w.status === 'processing' && !w.payoutId)
                 }))
                 .sort((x, y) => (y.createdAt || 0) - (x.createdAt || 0)),
             withdrawnTotal

@@ -622,16 +622,21 @@ async function alertOwnerTransferConfig(clients, userId, amount, why) {
     console.error(`[CRYPTOPAY] transfer config issue for ${userId}: ${why}`);
 }
 
-// Owner escape-hatch (admin panel): re-attempt a stuck ('review') or dead
-// ('failed') withdrawal. A 'review' record had its balance consumed but never
-// refunded (an ambiguous send that couldn't be auto-resolved), so restore the
-// balance before re-running. A 'failed' record was already refunded by the
-// settle sweep, so its money is back on the balance — don't credit it twice.
-// Either way the old record is marked 'retried' so it can't be actioned again,
-// then a fresh auto-withdraw is kicked. CAUTION: retrying a 'review' assumes the
-// original never actually sent — the owner is expected to confirm that in
-// NOWPayments first (a genuine double-send would pay twice). Returns
-// { ok, restored } or { ok:false, error }.
+// Owner escape-hatch (admin panel): re-attempt a stuck withdrawal. Retryable:
+//   • 'review'  — an ambiguous send that couldn't be auto-resolved.
+//   • 'failed'  — a payout the settle sweep already refunded.
+//   • 'processing' with NO provider payoutId — a MANUAL request waiting on staff
+//     (e.g. it was filed before crypto auto-payout was turned on); re-running now
+//     sends it via the configured auto-payout. A 'processing' WITH a payoutId is an
+//     in-flight provider batch the sweep is settling — retrying it would double-pay,
+//     so it is refused.
+// For 'review' and manual 'processing' the balance was zeroed when the request was
+// filed and never returned, so it is restored before re-running; 'failed' was
+// already refunded by the sweep, so it is NOT credited again. The old record is
+// marked 'retried' so it can't be actioned twice, then a fresh auto-withdraw is
+// kicked. CAUTION: this assumes the original payout never actually went out — the
+// owner is expected to confirm that first (a genuine double-send would pay twice).
+// Returns { ok, restored } or { ok:false, error }.
 async function retryWithdrawal(clients, userId, withdrawalId) {
     const settings = loadJSON('settings.json');
     const s = settings[userId];
@@ -639,20 +644,25 @@ async function retryWithdrawal(clients, userId, withdrawalId) {
     if (!list) return { ok: false, error: 'no withdrawals for this user' };
     const w = list.find((x) => x && x.id === withdrawalId);
     if (!w) return { ok: false, error: 'withdrawal not found' };
-    if (w.status !== 'review' && w.status !== 'failed') {
+    const manualProcessing = w.status === 'processing' && !w.payoutId;
+    if (w.status === 'processing' && w.payoutId) {
+        return { ok: false, error: 'this payout is in flight at the provider — wait for it to settle' };
+    }
+    if (w.status !== 'review' && w.status !== 'failed' && !manualProcessing) {
         return { ok: false, error: `cannot retry a '${w.status}' withdrawal` };
     }
     const amount = round2(w.amount);
-    const wasReview = w.status === 'review';
+    // Money was consumed but never refunded for 'review' and manual 'processing'
+    // (balance was zeroed when filed) → restore it. 'failed' is already back.
+    const restore = w.status !== 'failed';
     w.status = 'retried';
     w.retriedAt = Date.now();
-    // Only the 'review' path stranded the money — restore it. 'failed' is already back.
-    if (wasReview) s.balance = round2((Number(s.balance) || 0) + amount);
+    if (restore) s.balance = round2((Number(s.balance) || 0) + amount);
     saveJSON('settings.json', settings);
-    if (wasReview) logPartnerMoney(userId, { type: 'credit', reason: 'payout_retry_refund', amount, srcId: `retry:${withdrawalId}` });
+    if (restore) logPartnerMoney(userId, { type: 'credit', reason: 'payout_retry_refund', amount, srcId: `retry:${withdrawalId}` });
     // Kick a fresh payout attempt (best-effort; the balance is on the account now).
     await maybeAutoWithdraw(clients, userId).catch((e) => console.error('[RETRY] re-run failed:', e && e.message));
-    return { ok: true, restored: wasReview ? amount : 0 };
+    return { ok: true, restored: restore ? amount : 0 };
 }
 
 // Mark a withdrawal as completed. Returns the withdrawal object or null.
