@@ -19,7 +19,33 @@ const http = require('http');
 const tls = require('tls');
 const { URL } = require('url');
 
-const rawUrl = (process.env.RESERVE_PROXY || process.env.DISCORD_PROXY || '').trim();
+// A user account must appear to live on ONE stable residential IP. IPRoyal's base
+// endpoint (geo.iproyal.com) ROTATES the exit IP on every new connection unless a
+// sticky SESSION is requested inside the username — so a base-cred proxy makes the
+// user token authenticate from a fresh IP on each REST call (and again on the
+// gateway), which trips Discord's account-takeover protection: forced logout + a
+// rotated token. That is the "юзер-бота выкидывает и сбрасывает токен" symptom.
+//
+// So we pin a sticky session automatically for IPRoyal when none is present. Both
+// the REST dispatcher and the gateway tunnel use the SAME resulting URL, so all
+// reserve traffic shares one IP. The invite proxy (proxy.js, DISCORD_PROXY) is a
+// SEPARATE module and stays rotating on purpose — this only touches reserve.
+//   RESERVE_PROXY_STICKY=off      → disable (revert to rotating) with no redeploy
+//   RESERVE_PROXY_STICKY=30m      → custom IP lifetime (default 10m)
+// Putting your own `_session-…` in the proxy username also bypasses this.
+function makeSticky(raw) {
+    if (!raw) return raw;
+    const cfg = (process.env.RESERVE_PROXY_STICKY || '').trim();
+    if (/^(0|off|false|no)$/i.test(cfg)) return raw;
+    let u; try { u = new URL(raw); } catch { return raw; }
+    if (!/(^|\.)iproyal\.com$/i.test(u.hostname)) return raw;   // only IPRoyal uses this scheme
+    if (/session-/i.test(u.username)) return raw;               // operator already pinned one
+    const lifetime = /^\d+[smhd]$/i.test(cfg) ? cfg : '10m';
+    u.username = `${u.username}_session-vmnreserve_lifetime-${lifetime}`;
+    return u.toString();
+}
+
+const rawUrl = makeSticky((process.env.RESERVE_PROXY || process.env.DISCORD_PROXY || '').trim());
 
 // ---- realistic client fingerprint (shared by the gateway identify + REST) ----
 const BUILD = Number(process.env.DISCORD_CLIENT_BUILD) || 355631;
@@ -54,7 +80,7 @@ function restHeaders(token) {
 // ---- REST through the residential proxy (undici) ----
 let dispatcher = null;
 if (rawUrl) {
-    try { dispatcher = new (require('undici').ProxyAgent)(rawUrl); console.log('[RESERVE_PROXY] reserve REST via proxy', rawUrl.replace(/\/\/[^@/]*@/, '//***@')); }
+    try { dispatcher = new (require('undici').ProxyAgent)(rawUrl); console.log('[RESERVE_PROXY] reserve REST via proxy', rawUrl.replace(/\/\/[^@/]*@/, '//***@'), /session-/i.test(rawUrl) ? '(sticky IP)' : '(ROTATING — set RESERVE_PROXY_STICKY or a sticky proxy)'); }
     catch (e) { console.error('[RESERVE_PROXY] REST proxy init failed — reserve REST DIRECT:', e && e.message); }
 }
 function usingProxy() { return Boolean(dispatcher); }
@@ -102,4 +128,4 @@ function wsAgent() {
     return agent;
 }
 
-module.exports = { usingProxy, restFetch, wsAgent, identifyProperties, superProps, restHeaders, BUILD, UA, LOCALE };
+module.exports = { usingProxy, restFetch, wsAgent, identifyProperties, superProps, restHeaders, makeSticky, BUILD, UA, LOCALE };

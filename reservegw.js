@@ -23,6 +23,10 @@ function enabled() {
     const f = (config.get('RESERVE_GATEWAY') || '').trim();
     return !/^(0|false|no|off)$/i.test(f); // default ON when a token is present
 }
+// IDENTIFY capabilities bitfield. The real web client bumps this with new builds,
+// so keep it env-tunable (paste the current value from your browser's identify to
+// stay consistent with the build number — a mismatched pair is a fingerprint).
+function capabilities() { const v = Number(config.get('RESERVE_CAPABILITIES')); return Number.isFinite(v) && v > 0 ? v : 16381; }
 
 const conns = new Map(); // token -> connection state
 // guildId -> { id, name, icon } for the guilds the account(s) are in. These servers
@@ -71,14 +75,27 @@ async function backfillNames(st) {
 function send(st, obj) {
     try { if (st.ws && st.ws.readyState === WebSocket.OPEN) st.ws.send(JSON.stringify(obj)); } catch { /* ignore */ }
 }
-function clearHb(st) { if (st.hbTimer) { clearInterval(st.hbTimer); st.hbTimer = null; } }
+function clearHb(st) {
+    if (st.hbTimer) { clearInterval(st.hbTimer); st.hbTimer = null; }
+    if (st.hbInit) { clearTimeout(st.hbInit); st.hbInit = null; }
+}
+
+// RESUME (op 6) an existing session instead of a fresh IDENTIFY. A real client
+// always resumes after a transient drop; RESUME is NOT IDENTIFY-rate-limited, so
+// this both looks human and avoids burning the shared IP's IDENTIFY budget (which
+// was causing 4008s → the whole reserve getting disabled).
+function resume(st) {
+    send(st, { op: 6, d: { token: st.token, session_id: st.sessionId, seq: st.seq } });
+}
 
 function identify(st) {
+    // A brand-new session — any stale session id no longer applies.
+    st.sessionId = null; st.wantResume = false;
     send(st, {
         op: 2,
         d: {
             token: st.token,
-            capabilities: 16381,
+            capabilities: capabilities(),
             // Shared with the REST fingerprint (reserveproxy.js) so the account looks
             // consistent across the gateway identify AND its REST calls.
             properties: reserveproxy.identifyProperties(),
@@ -96,9 +113,14 @@ function identify(st) {
 function connect(st) {
     if (st.closed) return;
     let ws;
+    // Resume against the session's dedicated resume_gateway_url when we have a live
+    // session to restore; otherwise the main gateway for a fresh login.
+    const url = (st.wantResume && st.resumeUrl)
+        ? (st.resumeUrl.replace(/\/+$/, '') + '/?v=9&encoding=json')
+        : GATEWAY_URL;
     // Tunnel the gateway WebSocket through the residential proxy too — a user-account
     // gateway login from a datacenter IP is the strongest self-bot signal.
-    try { const agent = reserveproxy.wsAgent(); ws = new WebSocket(GATEWAY_URL, agent ? { agent } : undefined); } catch { scheduleReconnect(st); return; }
+    try { const agent = reserveproxy.wsAgent(); ws = new WebSocket(url, agent ? { agent } : undefined); } catch { scheduleReconnect(st); return; }
     st.ws = ws;
     st.ready = false;
     ws.on('message', (data) => onMessage(st, data));
@@ -106,6 +128,13 @@ function connect(st) {
     ws.on('close', (code) => {
         clearHb(st); st.ready = false;
         if (code === 4004) { console.error('[RESERVE_GW] auth failed (bad USER_TOKEN) — connection disabled'); st.closed = true; return; }
+        // Decide resume vs fresh identify for the NEXT connect. Most drops (1006,
+        // 1000, 4000, and even 4008 rate-limits) keep the session resumable — RESUME
+        // is cheaper and less bot-like than re-IDENTIFYing. Only these codes mean the
+        // session is truly gone, so drop it and identify fresh next time.
+        const NO_RESUME = new Set([4007, 4009, 4010, 4011, 4012, 4013, 4014]);
+        if (NO_RESUME.has(code)) { st.sessionId = null; st.wantResume = false; }
+        else if (st.sessionId) { st.wantResume = true; }
         // A session that stayed READY a while ended cleanly → reset the backoff. One
         // that dies within seconds of READY is flapping — keep escalating instead of
         // resetting (resetting on every brief READY made it reconnect every ~5s,
@@ -136,15 +165,29 @@ function onMessage(st, data) {
     try { msg = JSON.parse(data.toString()); } catch { return; }
     if (msg.s != null) st.seq = msg.s;
     switch (msg.op) {
-        case 10: // Hello
+        case 10: { // Hello — heartbeat (jittered first beat), then RESUME or IDENTIFY
             clearHb(st);
-            st.hbTimer = setInterval(() => send(st, { op: 1, d: st.seq }), msg.d.heartbeat_interval);
-            identify(st);
+            const interval = msg.d.heartbeat_interval;
+            // The gateway spec asks for a random jitter on the FIRST heartbeat; a
+            // perfectly periodic beat from t=0 is a small but real bot tell.
+            st.hbInit = setTimeout(() => {
+                send(st, { op: 1, d: st.seq });
+                st.hbTimer = setInterval(() => send(st, { op: 1, d: st.seq }), interval);
+            }, Math.floor(interval * Math.random()));
+            if (st.wantResume && st.sessionId && st.seq != null) resume(st); else identify(st);
             break;
+        }
         case 1: send(st, { op: 1, d: st.seq }); break;   // heartbeat request
         case 11: break;                                   // heartbeat ack
-        case 9: setTimeout(() => identify(st), 2500); break; // invalid session → re-identify
-        case 7: try { st.ws.close(); } catch { /* ignore */ } break; // reconnect
+        case 9: // Invalid Session — d:true = resumable, d:false = must re-identify fresh
+            if (msg.d === true && st.sessionId && st.seq != null) {
+                st.wantResume = true;
+                setTimeout(() => resume(st), 1500 + Math.floor(Math.random() * 2500));
+            } else {
+                setTimeout(() => identify(st), 1500 + Math.floor(Math.random() * 2500));
+            }
+            break;
+        case 7: try { st.ws.close(); } catch { /* ignore */ } break; // reconnect (session kept → resume)
         case 0: onDispatch(st, msg.t, msg.d); break;      // dispatch
     }
 }
@@ -153,10 +196,21 @@ function onDispatch(st, t, d) {
     if (t === 'READY') {
         st.ready = true;
         st.readyAt = Date.now();   // backoff is reset only if THIS session proves stable (see the close handler)
+        // Capture the session so future drops RESUME instead of re-IDENTIFYing.
+        st.sessionId = d.session_id || null;
+        if (d.resume_gateway_url) st.resumeUrl = d.resume_gateway_url;
+        st.wantResume = Boolean(st.sessionId);
         st.guilds = new Set();
         for (const g of (d.guilds || [])) if (g && g.id) { st.guilds.add(String(g.id)); setInfo(g); }
         console.log(`[RESERVE_GW] ready — ${st.guilds.size} guild(s)`);
         backfillNames(st).catch((e) => console.error('[RESERVE_GW] name backfill failed:', e.message));
+    } else if (t === 'RESUMED') {
+        // Session restored on a reconnect — missed events were just replayed, so the
+        // guild set is already current. No fresh IDENTIFY was spent.
+        st.ready = true;
+        st.readyAt = Date.now();
+        st.wantResume = Boolean(st.sessionId);
+        console.log('[RESERVE_GW] resumed session');
     } else if (t === 'GUILD_CREATE') {
         if (d && d.id) { st.guilds.add(String(d.id)); setInfo(d); }
     } else if (t === 'GUILD_UPDATE') {
@@ -195,7 +249,7 @@ function sync() {
     let added = 0;
     for (const tk of want) {
         if (conns.has(tk)) continue;
-        const st = { token: tk, ws: null, seq: null, hbTimer: null, ready: false, guilds: new Set(), pending: new Map(), reconnectDelay: 5000, closed: false };
+        const st = { token: tk, ws: null, seq: null, sessionId: null, resumeUrl: null, wantResume: false, hbTimer: null, hbInit: null, ready: false, guilds: new Set(), pending: new Map(), reconnectDelay: 5000, closed: false };
         conns.set(tk, st);
         connect(st);
         added++;
