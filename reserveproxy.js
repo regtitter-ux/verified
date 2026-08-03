@@ -95,43 +95,64 @@ function restHeaders(token) {
 // resolved proxy URL (i.e. per account, so each token keeps its own IP). ----
 const { ProxyAgent } = require('undici');
 const _dispatchers = new Map();   // proxy URL -> ProxyAgent
-let _loggedProxy = false;
-function dispatcherFor(token) {
-    const url = proxyUrlFor(token);
+let _stickyWarned = false;
+let _stickyFails = 0;             // consecutive sticky failures; give up after a few
+const STICKY_GIVEUP = 3;
+function dispatcherForUrl(url) {
     if (!url) return null;
     let d = _dispatchers.get(url);
     if (d) return d;
-    try {
-        d = new ProxyAgent(url);
-        _dispatchers.set(url, d);
-        if (!_loggedProxy) { _loggedProxy = true; console.log('[RESERVE_PROXY] reserve traffic via proxy', url.replace(/\/\/[^@/]*@/, '//***@'), /session-/i.test(url) ? '(per-account sticky IP)' : '(ROTATING — set RESERVE_PROXY_STICKY or a sticky proxy)'); }
-        return d;
-    } catch (e) { console.error('[RESERVE_PROXY] dispatcher init failed:', e && e.message); return null; }
+    try { d = new ProxyAgent(url); _dispatchers.set(url, d); return d; }
+    catch (e) { console.error('[RESERVE_PROXY] dispatcher init failed:', e && e.message); return null; }
 }
 function usingProxy() { return Boolean(proxyBase()); }
 
 // GET/POST discord.com/api/v10 + path with the client fingerprint. Returns
-// { status, json }. When a proxy IS configured we NEVER fall back to a direct
-// request — the user token must not touch the datacenter IP; if the per-account
-// dispatcher can't be built the call returns status 0 and the caller degrades
-// gracefully (fleet bots cover). No proxy configured → a direct request is fine.
+// { status, json }. When a proxy IS configured the token NEVER touches the
+// datacenter IP directly. We PREFER the per-account sticky IP, but if that proxy
+// call can't reach Discord (status 0 — e.g. the provider rejects the sticky
+// session syntax) we fall back to the BASE creds so reserve REST keeps working
+// (token validation, coverage). Base is still a proxy — never a direct request.
 async function restFetch(path, { token, method = 'GET', body, timeoutMs = 12000 } = {}) {
     const { fetch } = require('undici');
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), timeoutMs);
-    const opts = { method, signal: ac.signal, headers: restHeaders(token) };
-    if (body != null) opts.body = typeof body === 'string' ? body : JSON.stringify(body);
-    if (proxyBase()) {
-        const d = dispatcherFor(token);
-        if (!d) { clearTimeout(t); return { status: 0, json: null }; } // proxy set but unbuildable → don't go direct
-        opts.dispatcher = d;
+    const headers = restHeaders(token);
+    const payload = body != null ? (typeof body === 'string' ? body : JSON.stringify(body)) : undefined;
+    const attempt = async (dispatcher) => {
+        const ac = new AbortController();
+        const t = setTimeout(() => ac.abort(), timeoutMs);
+        const opts = { method, signal: ac.signal, headers };
+        if (payload !== undefined) opts.body = payload;
+        if (dispatcher) opts.dispatcher = dispatcher;
+        try {
+            const r = await fetch('https://discord.com/api/v10' + path, opts);
+            let json = null; try { json = await r.json(); } catch { /* non-json body */ }
+            return { status: r.status || 0, json };
+        } catch (e) { return { status: 0, json: null, err: e && e.message }; }
+        finally { clearTimeout(t); }
+    };
+
+    const base = proxyBase();
+    if (!base) return attempt(null);                          // no proxy → direct is fine
+
+    const stickyUrl = proxyUrlFor(token);
+    // Try the per-account sticky IP first — unless it's the same as base (sticky
+    // disabled) or it has already failed repeatedly (provider rejects the syntax),
+    // in which case skip straight to base and don't waste a round-trip.
+    if (stickyUrl !== base && _stickyFails < STICKY_GIVEUP) {
+        const sticky = dispatcherForUrl(stickyUrl);
+        if (sticky) {
+            const r = await attempt(sticky);
+            if (r.status !== 0) { _stickyFails = 0; return r; } // reached Discord → sticky works
+            _stickyFails++;
+            if (_stickyFails >= STICKY_GIVEUP && !_stickyWarned) {
+                _stickyWarned = true;
+                console.error(`[RESERVE_PROXY] sticky proxy failed ${_stickyFails}× (${r.err || 'no response'}) — using base creds. The provider likely rejects the sticky session syntax; set RESERVE_PROXY_STICKY=off or fix the format.`);
+            }
+        }
     }
-    try {
-        const r = await fetch('https://discord.com/api/v10' + path, opts);
-        let json = null; try { json = await r.json(); } catch { /* non-json body */ }
-        return { status: r.status || 0, json };
-    } catch { return { status: 0, json: null }; }
-    finally { clearTimeout(t); }
+    const baseD = dispatcherForUrl(base);                     // safety net: base creds (still a proxy, never direct)
+    if (baseD) return attempt(baseD);
+    return { status: 0, json: null };
 }
 
 // ---- Gateway WebSocket agent: CONNECT-tunnel the wss through the http proxy, no
