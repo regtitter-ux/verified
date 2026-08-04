@@ -3313,6 +3313,11 @@ async function handleBuyer(req, res, path, clients, config) {
         const c = camps[id];
         if (!c) return send(res, 404, { error: 'not found' }, cors);
         c.noCheck = Boolean(body?.on);
+        // Turning no-check ON: lift any coverage auto-pause immediately so it starts
+        // showing at once (a no-check order needs no sponsor bot). The 3-min sweep
+        // would do this too, but the owner expects an instant effect from the toggle.
+        if (c.noCheck && c.autoPaused) { c.autoPaused = false; c.autoPauseReason = ''; c.autoResumedAt = Date.now(); }
+        if (c.noCheck) { c.uncoveredSince = 0; c.noBotNotifiedAt = 0; }
         campaigns.saveCampaigns(camps);
         audit.logAction(buyerId, 'order.nocheck', `${id} ${c.noCheck ? 'on' : 'off'} (owner ${c.buyerId})`);
         return send(res, 200, { ok: true, noCheck: c.noCheck }, cors);

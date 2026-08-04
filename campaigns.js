@@ -351,7 +351,15 @@ async function autoPauseUncovered(clients, covered, graceMs) {
         if (!c || c.status !== 'active') continue;
         // No-check (CPC) campaigns deliver statistically and DON'T need sponsor
         // coverage — never auto-pause them for "no verifier", never ping for a bot.
-        if (c.noCheck) continue;
+        // AND lift any auto-pause / no-bot state left over from before it became
+        // no-check (else a previously auto-paused order would stay stuck forever).
+        if (c.noCheck) {
+            if (c.autoPaused) { c.autoPaused = false; c.autoPauseReason = ''; c.autoResumedAt = now; changed = true; resumed.push(c); }
+            if (c.uncoveredSince) { c.uncoveredSince = 0; changed = true; }
+            if (c.noBotNotifMsgId) clearBotNotify.push({ channelId: c.noBotNotifChannelId || '', msgId: c.noBotNotifMsgId });
+            if (c.noBotNotifiedAt || c.noBotNotifMsgId) { c.noBotNotifiedAt = 0; c.noBotNotifMsgId = ''; c.noBotNotifChannelId = ''; changed = true; }
+            continue;
+        }
         if (covered.has(String(c.sponsorGuildId))) {
             if (c.uncoveredSince) { c.uncoveredSince = 0; changed = true; }
             // Coverage returned (a fleet bot or reserve is on the server now) → pull the
@@ -438,6 +446,13 @@ async function reconcile(clients) {
         // unpaid campaign is a dead checkout from the old system: purge it.
         if (c.status === 'pending_payment') { delete camps[c.id]; changed = true; continue; }
         if (c.status === 'active') {
+            // No-check (CPC) campaigns deliver without sponsor coverage → lift any
+            // coverage auto-pause right here, so a dashboard refresh un-sticks it
+            // instantly (not only on the 3-min coverage sweep).
+            if (c.noCheck && (c.autoPaused || c.uncoveredSince)) {
+                if (c.autoPaused) { c.autoPaused = false; c.autoPauseReason = ''; c.autoResumedAt = now; }
+                c.uncoveredSince = 0; changed = true;
+            }
             // Stop the campaign if its invite went invalid (deleted/expired).
             // Checked at most every 10 min to keep API calls light.
             if (now - (c.inviteCheckedAt || 0) > 10 * 60 * 1000) {

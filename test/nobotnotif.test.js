@@ -30,6 +30,17 @@ test('after the repeat window a fresh ping replaces the old one (old msg id retu
     assert.equal(r.needBotNotify[0].oldChannelId, 'CH1');
 });
 
+test('a no-check campaign is AUTO-RESUMED when uncovered, never auto-paused/pinged', async () => {
+    // It was auto-paused earlier (e.g. before it became no-check) and is still uncovered.
+    seed({ 'campaigns.json': { c1: camp({ noCheck: true, autoPaused: true, autoPauseReason: 'verifier-offline', uncoveredSince: Date.now() - 30 * 60 * 1000, noBotNotifMsgId: 'OLD', noBotNotifChannelId: 'CH1' }) } });
+    const r = await campaigns.autoPauseUncovered([], new Set(), GRACE);   // still uncovered
+    assert.equal(r.resumed, 1, 'the stuck no-check order is resumed');
+    assert.equal(r.needBotNotify.length, 0, 'no bot ping for a no-check order');
+    assert.deepEqual(r.clearBotNotify[0], { channelId: 'CH1', msgId: 'OLD' }, 'its old ping is cleared');
+    const c = read('campaigns.json').c1;
+    assert.ok(!c.autoPaused && !c.uncoveredSince, 'auto-pause + grace timer lifted');
+});
+
 test('coverage returning clears the standing ping (returns its msg id) and resets state', async () => {
     seed({ 'campaigns.json': { c1: camp({ noBotNotifiedAt: Date.now(), noBotNotifMsgId: 'MSG1', noBotNotifChannelId: 'CH1' }) } });
     const r = await campaigns.autoPauseUncovered([], new Set([GID]), GRACE);   // sponsor now covered
