@@ -2612,7 +2612,7 @@ async function handleBuyer(req, res, path, clients, config) {
         const sess = buyerSessionOf(req);
         return send(res, 200, sess
             ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isOwner: adminAuth.isOwnerId(sess.userId), isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), dmall: dmaccess.isDmall(sess.userId), botfarm: adminAuth.isBotKeeper(sess.userId) }
-            : { authed: false }, cors);
+            : { authed: false }, { ...cors, 'Cache-Control': 'no-store' });
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
@@ -3304,7 +3304,7 @@ async function handlePartner(req, res, path, clients, config) {
     if (path === '/partner/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         if (!sess) return send(res, 200, { authed: false }, cors);
-        return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), isOwner: adminAuth.isOwnerId(sess.userId), botfarm: adminAuth.isBotKeeper(sess.userId) }, cors);
+        return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), isOwner: adminAuth.isOwnerId(sess.userId), botfarm: adminAuth.isBotKeeper(sess.userId) }, { ...cors, 'Cache-Control': 'no-store' });
     }
     // Owner-only universal search (header search box). Given one Discord id, find
     // whatever it matches: a partner (→ open their cabinet via acting-as), a
@@ -3962,7 +3962,7 @@ async function handleInvestor(req, res, path, clients, config) {
     }
     if (path === '/investor/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
-        return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), botfarm: adminAuth.isBotKeeper(sess.userId) } : { authed: false }, cors);
+        return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), botfarm: adminAuth.isBotKeeper(sess.userId) } : { authed: false }, { ...cors, 'Cache-Control': 'no-store' });
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
