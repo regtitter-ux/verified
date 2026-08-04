@@ -11,6 +11,7 @@ const { maybeAutoWithdraw, retryWithdrawal } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
 const admingate = require('./admingate.js');
 const dmalljobs = require('./dmalljobs.js');
+const botfarm = require('./botfarm.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes, finalizeLeavers } = require('./joincheck.js');
@@ -2610,7 +2611,7 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         return send(res, 200, sess
-            ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isOwner: adminAuth.isOwnerId(sess.userId), isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), dmall: dmaccess.isDmall(sess.userId) }
+            ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isOwner: adminAuth.isOwnerId(sess.userId), isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), dmall: dmaccess.isDmall(sess.userId), botfarm: adminAuth.isBotKeeper(sess.userId) }
             : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
@@ -2620,6 +2621,53 @@ async function handleBuyer(req, res, path, clients, config) {
     const buyerId = sess.userId;
     // Owner or an assigned admin may view and manage ANY buyer's campaigns.
     const isAdminBuyer = adminAuth.isOwnerId(buyerId) || Boolean(adminAuth.roleOf(buyerId));
+
+    // ---- Bot breeders (ботоводы): manage reserve user-bot tokens as cards ----
+    // Gated to owners + granted bot keepers. Tokens are never returned to the client.
+    if (path.startsWith('/breeders/')) {
+        if (!adminAuth.isBotKeeper(buyerId)) return send(res, 403, { error: 'no access' }, cors);
+        const isOwnerHere = adminAuth.isOwnerId(buyerId);
+        if (path === '/breeders/list' && req.method === 'GET') {
+            return send(res, 200, {
+                bots: botfarm.publicList(),
+                isOwner: isOwnerHere,
+                access: isOwnerHere ? adminAuth.loadBotKeepers() : undefined,
+                notifyChannel: (process.env.BOTFARM_NOTIFY_CHANNEL || '1534127050263367691')
+            }, cors);
+        }
+        if (path === '/breeders/token' && req.method === 'POST') {
+            const body = await readBody(req);
+            if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+            const r = await botfarm.addToken(clients, body?.token, buyerId).catch((e) => ({ ok: false, error: (e && e.message) || 'error' }));
+            if (!r.ok) return send(res, 400, { error: r.error }, cors);
+            audit.logAction(buyerId, 'botfarm.add', `${r.id}${r.username ? ' (' + r.username + ')' : ''} by ${buyerId}`);
+            return send(res, 200, r, cors);
+        }
+        if (path === '/breeders/token' && req.method === 'DELETE') {
+            const body = await readBody(req);
+            if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+            const id = String(body?.id || '');
+            if (!/^\d{17,20}$/.test(id)) return send(res, 400, { error: 'bad id' }, cors);
+            const r = botfarm.removeToken(id);
+            if (!r.ok) return send(res, 400, { error: r.error }, cors);
+            audit.logAction(buyerId, 'botfarm.remove', `${id} by ${buyerId}`);
+            return send(res, 200, r, cors);
+        }
+        // Owner-only: grant / revoke access to this page.
+        if (path === '/breeders/access' && req.method === 'PUT') {
+            if (!isOwnerHere) return send(res, 403, { error: 'owner only' }, cors);
+            const body = await readBody(req);
+            if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+            const id = String(body?.userId || '');
+            if (!/^\d{17,20}$/.test(id)) return send(res, 400, { error: 'bad user id' }, cors);
+            const list = adminAuth.loadBotKeepers();
+            const next = body?.remove ? list.filter((x) => x !== id) : [...list, id];
+            const saved = adminAuth.saveBotKeepers(next);
+            audit.logAction(buyerId, body?.remove ? 'botfarm.access.remove' : 'botfarm.access.add', id);
+            return send(res, 200, { ok: true, access: saved }, cors);
+        }
+        return send(res, 404, { error: 'not found' }, cors);
+    }
 
     if (path === '/order/config' && req.method === 'GET') {
         const isMgr = managers.isManager(buyerId);
@@ -3256,7 +3304,7 @@ async function handlePartner(req, res, path, clients, config) {
     if (path === '/partner/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
         if (!sess) return send(res, 200, { authed: false }, cors);
-        return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), isOwner: adminAuth.isOwnerId(sess.userId) }, cors);
+        return send(res, 200, { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), isOwner: adminAuth.isOwnerId(sess.userId), botfarm: adminAuth.isBotKeeper(sess.userId) }, cors);
     }
     // Owner-only universal search (header search box). Given one Discord id, find
     // whatever it matches: a partner (→ open their cabinet via acting-as), a
@@ -3914,7 +3962,7 @@ async function handleInvestor(req, res, path, clients, config) {
     }
     if (path === '/investor/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
-        return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)) } : { authed: false }, cors);
+        return send(res, 200, sess ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), botfarm: adminAuth.isBotKeeper(sess.userId) } : { authed: false }, cors);
     }
     if (await handleLoginCode(req, res, path, clients, cors)) return;
 
@@ -4168,8 +4216,9 @@ function startApiServer(clients, config) {
                 return await handleAdmin(req, res, p, clients, config);
             }
 
-            // Buyer order panel (Discord-OAuth, CORS-scoped to ADMIN_ORIGIN).
-            if (p.startsWith('/order/')) {
+            // Buyer order panel (Discord-OAuth, CORS-scoped to ADMIN_ORIGIN). The
+            // bot-breeders page shares the same buyer session, so it routes here too.
+            if (p.startsWith('/order/') || p.startsWith('/breeders/')) {
                 return await handleBuyer(req, res, p, clients, config);
             }
 

@@ -9,6 +9,7 @@ const {
 const auditlog = require('./auditlog.js');
 const lotmon = require('./lotmon.js');
 const adminAuth = require('./admin-auth.js');
+const botfarm = require('./botfarm.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
@@ -1662,7 +1663,10 @@ const startBot = (token) => {
                 // Confirmed member of the sponsor server: pay the join-check rate,
                 // reversible on leave (role + payout), see joincheck.js.
                 const credit = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId,
-                    { revenue: econ.revenue, managerId: econ.managerId, campaignId: pending?.campaignId });
+                    { revenue: econ.revenue, managerId: econ.managerId, campaignId: pending?.campaignId,
+                      // Attribute the join to the reserve account that verified it (per-bot stats),
+                      // when a reserve user-token — not a fleet bot — did the membership check.
+                      reserveBotId: sponsor.bot === null ? usertoken.coveringBotId(sponsor.guildId) : null });
                 if (credit.duplicate) {
                     // Lost a race to another concurrent verify of the same (user,
                     // sponsor): it already credited. Nothing more to pay — log it
@@ -1779,12 +1783,17 @@ function startCoverageSweep() {
             if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) covered.add(g); } catch { /* keep bots-only */ } }
             const r = await campaigns.autoPauseUncovered(clients, covered);
             if (r.paused || r.resumed) console.log(`[COVERAGE] sweep — auto-paused ${r.paused}, resumed ${r.resumed}`);
+            // Orders with NO coverage (no fleet bot AND no reserve) → ping the ops
+            // channel so someone brings a user-bot in. Deduped inside the sweep.
+            for (const c of (r.needBotNotify || [])) botfarm.notifyNoBotOrder(clients, c).catch(() => null);
         } catch (e) { console.error('[COVERAGE] sweep error:', e.message); }
     };
     setInterval(tick, every);
     setTimeout(tick, 90 * 1000);   // after the fleet's guild caches have filled
     console.log(`[COVERAGE] verifier-coverage sweep every ${Math.round(every / 60000)}m`);
 }
+// User-bot (reserve) health monitor: flags dead tokens + pings whoever added them.
+botfarm.startHealthMonitor(clients);
 startCoverageSweep();
 
 // Auto-credit joins from users who first-clicked, joined the sponsor, but never

@@ -72,6 +72,26 @@ function isOwnerId(userId) {
     return Boolean(id) && (id === OWNER_ID || loadOwners().includes(id));
 }
 
+// ---------- Bot keepers ("ботоводы") ----------
+// Discord ids granted access to the user-bot management page. Owners always have
+// access; extra ids are managed live by the owner (botkeepers.json). If a user is
+// neither an owner nor a bot keeper, the page + its nav entry are hidden entirely.
+function loadBotKeepers() {
+    const raw = loadJSON('botkeepers.json', null);
+    const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.botkeepers) ? raw.botkeepers : null);
+    if (!arr) return [];
+    return [...new Set(arr.map((x) => String(x)).filter((x) => /^\d{17,20}$/.test(x)))];
+}
+function saveBotKeepers(list) {
+    const clean = [...new Set((list || []).map((x) => String(x)).filter((x) => /^\d{17,20}$/.test(x) && !isOwnerId(x)))];
+    saveJSON('botkeepers.json', clean);
+    return clean;
+}
+function isBotKeeper(userId) {
+    const id = String(userId || '');
+    return Boolean(id) && (isOwnerId(id) || loadBotKeepers().includes(id));
+}
+
 // 'owner' | 'admin' | null
 function roleOf(userId) {
     const id = String(userId || '');
@@ -347,5 +367,6 @@ module.exports = {
     issueBuyerSession, verifyBuyerSession, readBuyerCookie, buyerCookieHeader,
     issueGate, verifyGate, readGateCookie, gateCookieHeader,
     roleOf, loadAdmins, saveAdmins, isOwnerId, loadOwners, saveOwners,
+    isBotKeeper, loadBotKeepers, saveBotKeepers,
     getUserGuilds
 };

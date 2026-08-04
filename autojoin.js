@@ -14,6 +14,7 @@
 // later manual click.
 const { loadJSON, saveJSON } = require('./database.js');
 const { isMember, creditJoin } = require('./joincheck.js');
+const usertoken = require('./usertoken.js');
 const { isDuplicateJoin } = require('./verifyrules.js');
 const { touchCreative, maybeNotifyAdComplete } = require('./adcreative.js');
 const { syncHubMember } = require('./hubrole.js');
@@ -107,7 +108,7 @@ async function complete(clients, e) {
     try { investorOwned = investors.serverOutstanding(e.cardGuildId, loadJSON('verified.json', [])) > 0; } catch { /* never block */ }
     const camp = e.campaignId ? campaigns.loadCampaigns()[e.campaignId] : null;
     const econ = managers.joinEconomics(camp, sharesMod.REVENUE_PER_JOIN);
-    const credit = creditJoin(e.creatorId, e.sponsorGuildId, e.userId, e.cardGuildId, e.roleId, e.channelId, { revenue: econ.revenue, managerId: econ.managerId, extraPlacement: e.viaExtra ? (e.placement || 'pre') : undefined, noPay: e.viaExtra, campaignId: e.campaignId });
+    const credit = creditJoin(e.creatorId, e.sponsorGuildId, e.userId, e.cardGuildId, e.roleId, e.channelId, { revenue: econ.revenue, managerId: econ.managerId, extraPlacement: e.viaExtra ? (e.placement || 'pre') : undefined, noPay: e.viaExtra, campaignId: e.campaignId, reserveBotId: e.reserveBotId || null });
     if (credit.duplicate) {
         try { partnerlog.logEvent(e.creatorId, { type: 'grant', reason: 'dup_join', userId: e.userId, guildId: e.cardGuildId, roleId: e.roleId, sponsorGuildId: e.sponsorGuildId, srcId: `dup:${e.userId}:${e.sponsorGuildId}` }); } catch { /* never block */ }
         return;
@@ -143,6 +144,9 @@ async function sweepOnce(clients) {
         const bot = (Array.isArray(clients) ? clients : []).find((c) => c.guilds?.cache?.has(e.sponsorGuildId));
         const present = await isMember(bot || null, e.sponsorGuildId, e.userId).catch(() => null);
         if (present === true) {
+            // No fleet bot on the sponsor → the reserve account verified it; stamp
+            // which one for its per-bot stats.
+            if (!bot) { try { e.reserveBotId = usertoken.coveringBotId(e.sponsorGuildId); } catch { /* stats only */ } }
             try { await complete(clients, e); }                                       // success → drop
             catch (err) { console.error('[AUTOJOIN] complete:', err.message); keep.push(e); }
         } else {

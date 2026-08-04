@@ -116,4 +116,21 @@ async function validateTokens(raw) {
 // coverage shows up immediately instead of after the TTL.
 function invalidate() { _cache = { at: 0, map: new Map() }; }
 
-module.exports = { enabled, coveredGuildIds, coversGuild, isMember, validateTokens, invalidate };
+// Liveness probe for ONE token (health monitor): true=alive (200), false=dead
+// (401 — logged out / banned account), null=couldn't tell (transient). Never flips
+// status on null.
+async function pingToken(token) {
+    const { status } = await apiGet(token, '/users/@me');
+    if (status === 200) return true;
+    if (status === 401) return false;
+    return null;
+}
+
+// The reserve account id currently covering `guildId` (from the cached map, no
+// network) — used to attribute a verified join to the bot that checked it.
+function coveringBotId(guildId) {
+    const tk = _cache.map.get(String(guildId));
+    return tk ? idFromToken(tk) : null;
+}
+
+module.exports = { enabled, coveredGuildIds, coversGuild, isMember, validateTokens, invalidate, idFromToken, pingToken, coveringBotId };

@@ -291,11 +291,13 @@ async function autoPauseUncovered(clients, covered, graceMs) {
     const camps = loadCampaigns();
     const now = Date.now();
     let changed = false;
-    const paused = [], resumed = [];
+    const paused = [], resumed = [], needBotNotify = [];
+    const NOTIFY_CAP = 5;   // don't flood the ops channel on a big backlog — trickle over sweeps
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active') continue;
         if (covered.has(String(c.sponsorGuildId))) {
             if (c.uncoveredSince) { c.uncoveredSince = 0; changed = true; }
+            if (c.noBotNotifiedAt) { c.noBotNotifiedAt = 0; changed = true; }           // coverage back → allow a future ping
             if (c.autoPaused) { c.autoPaused = false; c.autoPauseReason = ''; c.autoResumedAt = now; changed = true; resumed.push(c); }
         } else {
             if (!c.uncoveredSince) { c.uncoveredSince = now; changed = true; }          // start the grace timer
@@ -303,12 +305,16 @@ async function autoPauseUncovered(clients, covered, graceMs) {
                 c.autoPaused = true; c.autoPauseReason = 'verifier-offline'; c.autoPausedAt = now; changed = true; paused.push(c);
                 console.error(`[COVERAGE] auto-paused ${c.id} — no verifier on sponsor ${c.sponsorGuildId} for ${Math.round((now - c.uncoveredSince) / 60000)}m`);
             }
+            // No coverage at all (no fleet bot, no reserve) → ping the ops channel to
+            // bring a user-bot in. Once per uncovered episode; fires right away (don't
+            // wait for the grace/pause) so the order isn't left dark.
+            if (!c.noBotNotifiedAt && needBotNotify.length < NOTIFY_CAP) { c.noBotNotifiedAt = now; changed = true; needBotNotify.push(c); }
         }
     }
     if (changed) saveCampaigns(camps);
     for (const c of paused) notifyBuyer(clients, c, 'autopaused').catch(() => null);
     for (const c of resumed) notifyBuyer(clients, c, 'autoresumed').catch(() => null);
-    return { paused: paused.length, resumed: resumed.length };
+    return { paused: paused.length, resumed: resumed.length, needBotNotify };
 }
 
 const inviteCodeOf = (invite) => { const m = String(invite || '').match(/([a-z0-9-]{2,32})\/?$/i); return m ? m[1] : ''; };

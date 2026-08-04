@@ -291,6 +291,7 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
         if (Number.isFinite(Number(extra.revenue))) rec.revenue = round4(Number(extra.revenue));
         if (extra.managerId) rec.managerId = String(extra.managerId);
         if (extra.botId) rec.botId = String(extra.botId); // developer API: which bot delivered the join
+        if (extra.reserveBotId) rec.reserveBotId = String(extra.reserveBotId); // reserve user-account that verified this join (per-bot stats)
         if (extra.extraPlacement) rec.extraPlacement = String(extra.extraPlacement); // 'pre' | 'post' — extra-ad button
         // Authoritative campaign attribution stamped at credit time (the winning
         // campaign id is always known here). Lets the leave-clawback gate look up
