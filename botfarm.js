@@ -136,20 +136,35 @@ async function notifyBotLost(clients, id, m) {
 
 // A live order whose sponsor server has NO coverage (no fleet bot AND no reserve
 // account) — someone must bring a user-bot in. Includes the order's invite link.
+// Returns { channelId, msgId } of the posted ping (so it can be deleted later when
+// coverage returns or the ping is refreshed), or null if it couldn't be sent.
 async function notifyNoBotOrder(clients, campaign) {
-    const ch = await poster.posterChannel(clients, NOTIFY_CHANNEL()).catch(() => null);
-    if (!ch || typeof ch.send !== 'function') return;
+    const chId = NOTIFY_CHANNEL();
+    const ch = await poster.posterChannel(clients, chId).catch(() => null);
+    if (!ch || typeof ch.send !== 'function') return null;
     const role = NO_BOT_ROLE();
     const ping = role ? `<@&${role}> ` : '';
     const link = (campaign && campaign.invite) ? `\n${campaign.invite}` : '';
-    await ch.send({
+    const msg = await ch.send({
         content: `${ping}An order has appeared for which there are no bots on the server!\nHurry and access the server from any user bot to launch the ad${link}`,
         allowedMentions: { roles: role ? [role] : [] }
-    }).catch((e) => console.error('[BOTFARM] notifyNoBotOrder send failed:', e && e.message));
-    console.log(`[BOTFARM] no-bot order notified — sponsor ${campaign && campaign.sponsorGuildId}`);
+    }).catch((e) => { console.error('[BOTFARM] notifyNoBotOrder send failed:', e && e.message); return null; });
+    if (!msg) return null;
+    console.log(`[BOTFARM] no-bot order notified — sponsor ${campaign && campaign.sponsorGuildId} (msg ${msg.id})`);
+    return { channelId: chId, msgId: msg.id };
+}
+
+// Delete a previously-posted "no bots" ping (coverage returned, or we're replacing
+// it with a fresh one). Best-effort — a missing/already-deleted message is fine.
+async function deleteNoBotNotif(clients, channelId, msgId) {
+    if (!msgId) return;
+    const ch = await poster.posterChannel(clients, channelId || NOTIFY_CHANNEL()).catch(() => null);
+    if (!ch || !ch.messages || typeof ch.messages.fetch !== 'function') return;
+    const m = await ch.messages.fetch(String(msgId)).catch(() => null);
+    if (m) await m.delete().catch(() => null);
 }
 
 module.exports = {
     publicList, addToken, removeToken, statsFor,
-    startHealthMonitor, checkHealth, notifyBotLost, notifyNoBotOrder,
+    startHealthMonitor, checkHealth, notifyBotLost, notifyNoBotOrder, deleteNoBotNotif,
 };

@@ -287,17 +287,21 @@ async function notifyBuyer(clients, campaign, kind) {
 // momentary cache/REST miss) so a short hiccup can't flap campaigns on and off.
 async function autoPauseUncovered(clients, covered, graceMs) {
     const grace = Number.isFinite(graceMs) ? graceMs : (Number(process.env.COVERAGE_GRACE_MS) || 10 * 60 * 1000);
-    if (!covered || typeof covered.has !== 'function') return { paused: 0, resumed: 0 };
+    if (!covered || typeof covered.has !== 'function') return { paused: 0, resumed: 0, needBotNotify: [], clearBotNotify: [] };
+    const repeat = Number(process.env.BOTFARM_NO_BOT_REPEAT_MS) || 10 * 60 * 1000;   // re-ping cadence while uncovered
     const camps = loadCampaigns();
     const now = Date.now();
     let changed = false;
-    const paused = [], resumed = [], needBotNotify = [];
+    const paused = [], resumed = [], needBotNotify = [], clearBotNotify = [];
     const NOTIFY_CAP = 5;   // don't flood the ops channel on a big backlog — trickle over sweeps
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active') continue;
         if (covered.has(String(c.sponsorGuildId))) {
             if (c.uncoveredSince) { c.uncoveredSince = 0; changed = true; }
-            if (c.noBotNotifiedAt) { c.noBotNotifiedAt = 0; changed = true; }           // coverage back → allow a future ping
+            // Coverage returned (a fleet bot or reserve is on the server now) → pull the
+            // standing "no bots" ping from the ops channel.
+            if (c.noBotNotifMsgId) clearBotNotify.push({ channelId: c.noBotNotifChannelId || '', msgId: c.noBotNotifMsgId });
+            if (c.noBotNotifiedAt || c.noBotNotifMsgId) { c.noBotNotifiedAt = 0; c.noBotNotifMsgId = ''; c.noBotNotifChannelId = ''; changed = true; }
             if (c.autoPaused) { c.autoPaused = false; c.autoPauseReason = ''; c.autoResumedAt = now; changed = true; resumed.push(c); }
         } else {
             if (!c.uncoveredSince) { c.uncoveredSince = now; changed = true; }          // start the grace timer
@@ -305,16 +309,33 @@ async function autoPauseUncovered(clients, covered, graceMs) {
                 c.autoPaused = true; c.autoPauseReason = 'verifier-offline'; c.autoPausedAt = now; changed = true; paused.push(c);
                 console.error(`[COVERAGE] auto-paused ${c.id} — no verifier on sponsor ${c.sponsorGuildId} for ${Math.round((now - c.uncoveredSince) / 60000)}m`);
             }
-            // No coverage at all (no fleet bot, no reserve) → ping the ops channel to
-            // bring a user-bot in. Once per uncovered episode; fires right away (don't
-            // wait for the grace/pause) so the order isn't left dark.
-            if (!c.noBotNotifiedAt && needBotNotify.length < NOTIFY_CAP) { c.noBotNotifiedAt = now; changed = true; needBotNotify.push(c); }
+            // No coverage (no fleet bot, no reserve) → ping the ops channel to bring a
+            // user-bot in. Fires right away, then REPEATS every `repeat` ms while still
+            // uncovered — the caller deletes the previous message and posts a fresh one,
+            // so only the latest ping stands.
+            const due = !c.noBotNotifiedAt || (now - c.noBotNotifiedAt >= repeat);
+            if (due && needBotNotify.length < NOTIFY_CAP) {
+                needBotNotify.push({ campaign: c, oldMsgId: c.noBotNotifMsgId || '', oldChannelId: c.noBotNotifChannelId || '' });
+                c.noBotNotifiedAt = now; changed = true;   // msgId is written back by the caller after sending
+            }
         }
     }
     if (changed) saveCampaigns(camps);
     for (const c of paused) notifyBuyer(clients, c, 'autopaused').catch(() => null);
     for (const c of resumed) notifyBuyer(clients, c, 'autoresumed').catch(() => null);
-    return { paused: paused.length, resumed: resumed.length, needBotNotify };
+    return { paused: paused.length, resumed: resumed.length, needBotNotify, clearBotNotify };
+}
+
+// Record the ops-channel message id of the current "no bots" ping for a campaign
+// (so the next sweep can delete it when replacing or clearing). Load-mutate-save,
+// synchronous — safe against the shared-ref cache.
+function setNoBotNotifMsg(campaignId, msgId, channelId) {
+    const camps = loadCampaigns();
+    const c = camps[String(campaignId)];
+    if (!c) return;
+    c.noBotNotifMsgId = msgId || '';
+    c.noBotNotifChannelId = channelId || '';
+    saveCampaigns(camps);
 }
 
 const inviteCodeOf = (invite) => { const m = String(invite || '').match(/([a-z0-9-]{2,32})\/?$/i); return m ? m[1] : ''; };
@@ -458,6 +479,6 @@ function retention(campaign, verifiedList, joinlinks, now = Date.now()) {
 
 module.exports = {
     get PRICE_PER_100() { return pricePer100(); }, get MIN_JOINS() { return minJoins(); }, priceFor, round2, newId,
-    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, linkProgress, publicView, pickForGuild, eligibleForGuild, weightedOrder, botPresent, fleetGuildIds, autoPauseUncovered,
+    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, linkProgress, publicView, pickForGuild, eligibleForGuild, weightedOrder, botPresent, fleetGuildIds, autoPauseUncovered, setNoBotNotifMsg,
     isInvoicePaid, reconcile, startCampaignSweep, retention
 };

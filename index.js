@@ -1783,9 +1783,19 @@ function startCoverageSweep() {
             if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) covered.add(g); } catch { /* keep bots-only */ } }
             const r = await campaigns.autoPauseUncovered(clients, covered);
             if (r.paused || r.resumed) console.log(`[COVERAGE] sweep — auto-paused ${r.paused}, resumed ${r.resumed}`);
-            // Orders with NO coverage (no fleet bot AND no reserve) → ping the ops
-            // channel so someone brings a user-bot in. Deduped inside the sweep.
-            for (const c of (r.needBotNotify || [])) botfarm.notifyNoBotOrder(clients, c).catch(() => null);
+            // Coverage returned (an active bot/reserve is on the server) → delete the
+            // standing "no bots" ping from the ops channel.
+            for (const x of (r.clearBotNotify || [])) botfarm.deleteNoBotNotif(clients, x.channelId, x.msgId).catch(() => null);
+            // Still no coverage → post the "bring a user-bot in" ping, and every ~10min
+            // while it stays uncovered replace it (delete the old, post a fresh one),
+            // remembering the message id so the next sweep can find it.
+            for (const n of (r.needBotNotify || [])) {
+                try {
+                    if (n.oldMsgId) await botfarm.deleteNoBotNotif(clients, n.oldChannelId, n.oldMsgId);
+                    const sent = await botfarm.notifyNoBotOrder(clients, n.campaign);
+                    if (sent) campaigns.setNoBotNotifMsg(n.campaign.id, sent.msgId, sent.channelId);
+                } catch (e) { console.error('[COVERAGE] no-bot ping failed:', e && e.message); }
+            }
         } catch (e) { console.error('[COVERAGE] sweep error:', e.message); }
     };
     setInterval(tick, every);
