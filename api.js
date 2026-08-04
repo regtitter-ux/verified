@@ -2610,6 +2610,7 @@ async function handleBuyer(req, res, path, clients, config) {
     }
     if (path === '/order/whoami' && req.method === 'GET') {
         const sess = buyerSessionOf(req);
+        if (sess) console.log(`[WHOAMI-DEBUG] userId=${sess.userId} role=${adminAuth.roleOf(sess.userId)} isOwner=${adminAuth.isOwnerId(sess.userId)} botfarm=${adminAuth.isBotKeeper(sess.userId)} owners=${JSON.stringify(adminAuth.loadOwners())}`);
         return send(res, 200, sess
             ? { authed: true, ...(await userMiniLive(clients, sess.userId)), banner: await userBannerOf(clients, sess.userId), isOwner: adminAuth.isOwnerId(sess.userId), isManager: managers.isManager(sess.userId), isAdmin: Boolean(adminAuth.roleOf(sess.userId)), dmall: dmaccess.isDmall(sess.userId), botfarm: adminAuth.isBotKeeper(sess.userId) }
             : { authed: false }, { ...cors, 'Cache-Control': 'no-store' });
