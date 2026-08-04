@@ -506,12 +506,14 @@ async function restore(clients, messageId) {
 // not raw re-clicks. Events older than a week are pruned on write.
 const CLICK_TTL = 7 * 86400000;
 function clickKey(guildId, roleId, creatorId) { return `${guildId || ''}:${roleId || ''}:${creatorId || ''}`; }
-function trackClick(guildId, roleId, creatorId, userId) {
+function trackClick(guildId, roleId, creatorId, userId, noCheck) {
     if (!guildId || !creatorId) return;
     const now = Date.now();
     const list = loadJSON('cardclicks.json', []);
     const arr = (Array.isArray(list) ? list : []).filter((e) => e.t > now - CLICK_TTL);
-    arr.push({ k: clickKey(guildId, roleId, creatorId), u: String(userId || ''), t: now });
+    const rec = { k: clickKey(guildId, roleId, creatorId), u: String(userId || ''), t: now };
+    if (noCheck) rec.nc = 1;   // no-check click — excluded from the CPC conversion denominator
+    arr.push(rec);
     saveJSON('cardclicks.json', arr);
 }
 // Raw first-click events [{ u, t }] for a card — used to measure the delay
@@ -542,7 +544,7 @@ function clickWindows(guildId, roleId, creatorId, now = Date.now()) {
 function clicksForKeyMulti(guildId, roleIds, creatorId) {
     const keys = new Set((Array.isArray(roleIds) ? roleIds : [roleIds]).map((r) => clickKey(guildId, r, creatorId)));
     const list = loadJSON('cardclicks.json', []);
-    return (Array.isArray(list) ? list : []).filter((e) => keys.has(e.k)).map((e) => ({ u: e.u, t: e.t }));
+    return (Array.isArray(list) ? list : []).filter((e) => keys.has(e.k)).map((e) => ({ u: e.u, t: e.t, nc: e.nc }));
 }
 function clickWindowsMulti(guildId, roleIds, creatorId, now = Date.now()) {
     const keys = new Set((Array.isArray(roleIds) ? roleIds : [roleIds]).map((r) => clickKey(guildId, r, creatorId)));

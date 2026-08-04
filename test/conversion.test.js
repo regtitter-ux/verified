@@ -35,6 +35,19 @@ test('null conversion until there is both a join and a clicker', () => {
     assert.equal(conv.fromSamples([NOW], [], NOW).conv, null);
 });
 
+test('no-check (nc) clicks are excluded from the conversion denominator', () => {
+    const joins = Array.from({ length: 10 }, (_, i) => NOW - i * 1000);           // 10 join-check joins
+    const calib = Array.from({ length: 20 }, (_, i) => ({ u: 'c' + i, t: NOW - i * 100 }));            // 20 calibration clickers
+    const nocheck = Array.from({ length: 80 }, (_, i) => ({ u: 'n' + i, t: NOW - i * 100, nc: 1 }));   // 80 no-check clickers (ignored)
+    const r = conv.fromSamples(joins, calib.concat(nocheck), NOW);
+    assert.equal(r.clickers, 20, 'only calibration clickers count');
+    assert.ok(near(r.conv, 0.5), `10/20 = 0.50 (no-check clicks must not dilute it), got ${r.conv}`);
+});
+
+test('CALIB_RATE is a fraction in (0, 1]', () => {
+    assert.ok(conv.CALIB_RATE > 0 && conv.CALIB_RATE <= 1, `got ${conv.CALIB_RATE}`);
+});
+
 test('ratePer100Clicks = joinRate × conversion (matches per-join earnings)', () => {
     assert.ok(near(conv.ratePer100Clicks(0.18, 5), 0.90), '$5/100 joins × 0.18 = $0.90/100 clicks');
     assert.equal(conv.ratePer100Clicks(null, 5), 0, 'no rate without a conversion');

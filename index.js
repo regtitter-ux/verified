@@ -10,6 +10,7 @@ const auditlog = require('./auditlog.js');
 const lotmon = require('./lotmon.js');
 const adminAuth = require('./admin-auth.js');
 const botfarm = require('./botfarm.js');
+const conversion = require('./conversion.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
@@ -1491,7 +1492,18 @@ const startBot = (token) => {
             // Keep the resolved sponsor guild so the second click doesn't re-resolve.
             // noAdReason rides along so the completion click can log the specific
             // cause in the partner activity log.
-            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason });
+            // CPC-calibrated server: a fraction of shows stay join-check (calibration,
+            // keeps the conversion fresh); the rest run NO-CHECK — the user is verified
+            // per click and the partner is paid statistically via a virtual join
+            // (probability = the card's live conversion) through the normal creditJoin
+            // money path. Only when an ad is shown AND a conversion is measured to
+            // price it; otherwise the show stays join-check.
+            let noCheck = false, cpcConv = null;
+            if (latest && roleId && conversion.enabledFor(guild.id)) {
+                cpcConv = conversion.forCard(guild.id, roleId, creatorId).conv;
+                noCheck = cpcConv != null && Math.random() >= conversion.CALIB_RATE;
+            }
+            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv });
             // 30-min window: a user who reads the ad and takes a while to join the
             // sponsor still completes on the SAME pending entry (with adShown), so
             // the join isn't re-selected into an ad-free verification.
@@ -1506,7 +1518,7 @@ const startBot = (token) => {
             // autojoin record) off the response path so they don't add to the
             // "thinking" time.
             const firstReply = interaction.editReply({ content: responseText, components: firstComponents }).catch(() => null);
-            try { cards.trackClick(guild.id, roleId, creatorId, user.id); } catch (e) { /* stats must never break verification */ }
+            try { cards.trackClick(guild.id, roleId, creatorId, user.id, noCheck); } catch (e) { /* stats must never break verification */ }
             if (latest && latest.sponsorGuildId && roleId) {
                 try {
                     autojoin.record({
@@ -1529,15 +1541,26 @@ const startBot = (token) => {
         // failure here would drop the payout and mislabel the join as ad-free.
         // Fall back to a fresh resolve only if the stored guild is unavailable.
         let sponsor = null;
-        if (roleId && pending?.adShown) {
+        let memberConfirmed = false;
+        // NO-CHECK (CPC) branch: verify per click without requiring a join. Credit a
+        // VIRTUAL join with probability = the card's measured conversion, so the
+        // partner's per-click earnings and the buyer's delivery match per-join
+        // checking — routed through the SAME creditJoin/settle money path. When on,
+        // the join-check sponsor-resolution + isMember blocks below are skipped.
+        const noCheckMode = Boolean(pending?.noCheck && pending?.adShown && pending?.sponsorGuildId && roleId);
+        if (noCheckMode) {
+            sponsor = { guildId: pending.sponsorGuildId, bot: null };
+            const cv = Number(pending.cpcConv) || 0;
+            memberConfirmed = cv > 0 && Math.random() < cv;   // a hit = one statistical confirmed join → pays
+        }
+        if (!noCheckMode && roleId && pending?.adShown) {
             if (pending.sponsorGuildId) {
                 const bot = clients.find((c) => c.guilds.cache.has(pending.sponsorGuildId));
                 sponsor = bot ? { guildId: pending.sponsorGuildId, bot } : null;
             }
             if (!sponsor) sponsor = await resolveSponsorPresence(clients, pending.adText).catch(() => null);
         }
-        let memberConfirmed = false;
-        if (sponsor) {
+        if (!noCheckMode && sponsor) {
             const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
             if (joined === true) {
                 memberConfirmed = true;
@@ -1608,6 +1631,10 @@ const startBot = (token) => {
             // tagged noAd instead, so it never counts as a paid ad verification.
             const adKey = counts ? touchCreative(pending.adRaw) : '';
             const rec = { id: user.id, guildId: guild.id, roleId, creatorId, timestamp: Date.now() };
+            // Mark no-check (CPC) grants: a no-check HIT is a VIRTUAL join, so it must
+            // be excluded from the conversion measurement (conversion.forCard filters
+            // !noCheck) — otherwise the pay-rate would feed back on itself.
+            if (noCheckMode) rec.noCheck = true;
             if (adKey) {
                 rec.adKey = adKey;
                 if (pending?.campaignId) rec.campaignId = pending.campaignId;   // authoritative delivery attribution (see joincheck.creditJoin)
@@ -1666,7 +1693,8 @@ const startBot = (token) => {
                     { revenue: econ.revenue, managerId: econ.managerId, campaignId: pending?.campaignId,
                       // Attribute the join to the reserve account that verified it (per-bot stats),
                       // when a reserve user-token — not a fleet bot — did the membership check.
-                      reserveBotId: sponsor.bot === null ? usertoken.coveringBotId(sponsor.guildId) : null });
+                      // A no-check virtual join had NO reserve check, so it earns no reserve attribution.
+                      reserveBotId: (!noCheckMode && sponsor.bot === null) ? usertoken.coveringBotId(sponsor.guildId) : null });
                 if (credit.duplicate) {
                     // Lost a race to another concurrent verify of the same (user,
                     // sponsor): it already credited. Nothing more to pay — log it

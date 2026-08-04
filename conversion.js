@@ -16,6 +16,9 @@ const { loadJSON } = require('./database.js');
 
 const SAMPLE = 100;                      // conversion looks at the last N join-check joins
 const CLICK_TTL = 7 * 86400000;          // clicks are retained ~7d (cards.js CLICK_TTL)
+// On a calibrated server this fraction of shows STAYS join-check (to keep measuring
+// the real conversion); the rest run no-check and pay per click. 0.15 = 15% calibration.
+const CALIB_RATE = (() => { const v = Number(process.env.CPC_CALIBRATION_RATE); return (Number.isFinite(v) && v > 0 && v <= 1) ? v : 0.15; })();
 
 // Owner toggle: is the CPC-calibrated mode on for this partner server (guild)?
 function enabledFor(guildId) {
@@ -44,7 +47,10 @@ function fromSamples(joinTs, clickEvents, nowMs) {
     const joinsInWin = lastN.filter((t) => t >= windowStart).length;
     const clickers = new Set();
     for (const c of (Array.isArray(clickEvents) ? clickEvents : [])) {
-        if (c && (Number(c.t) || 0) >= windowStart && c.u) clickers.add(String(c.u));
+        // Skip no-check (nc) clicks: conversion must be measured ONLY on calibration
+        // (join-check) shows, or including no-check clicks — which produce no join-
+        // check joins — would drag it toward zero (a self-referential feedback loop).
+        if (c && !c.nc && (Number(c.t) || 0) >= windowStart && c.u) clickers.add(String(c.u));
     }
     const cWin = clickers.size;
     if (!joinsInWin || !cWin) return { conv: null, joins: joinsInWin, clickers: cWin };
@@ -64,4 +70,22 @@ function ratePer100Clicks(conv, joinRatePer100) {
 }
 const ratePerClick = (conv, joinRatePer100) => +((ratePer100Clicks(conv, joinRatePer100)) / 100).toFixed(6);
 
-module.exports = { SAMPLE, enabledFor, fromSamples, ratePer100Clicks, ratePerClick };
+// Live conversion for one card, computed from the stored stats. join-check joins =
+// counted (adKey) real joins, excluding the bonus extra-ad AND no-check virtual
+// joins (marked noCheck). clicks skip no-check (nc) events inside fromSamples.
+function forCard(guildId, roleId, creatorId, nowMs) {
+    const v = loadJSON('verified.json', []);
+    const cl = loadJSON('cardclicks.json', []);
+    const ck = `${guildId || ''}:${roleId || ''}:${creatorId || ''}`;
+    const joinTs = [];
+    for (const u of (Array.isArray(v) ? v : [])) {
+        if (!u || u.creatorId !== creatorId || String(u.guildId) !== String(guildId)) continue;
+        if ((u.roleId || null) !== (roleId || null)) continue;
+        if (!u.adKey || u.viaExtra || u.noCheck) continue;
+        joinTs.push(Number(u.timestamp) || 0);
+    }
+    const clicks = (Array.isArray(cl) ? cl : []).filter((e) => e && e.k === ck).map((e) => ({ u: e.u, t: e.t, nc: e.nc }));
+    return fromSamples(joinTs, clicks, nowMs);
+}
+
+module.exports = { SAMPLE, CALIB_RATE, enabledFor, fromSamples, forCard, ratePer100Clicks, ratePerClick };
