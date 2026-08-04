@@ -1501,7 +1501,7 @@ const startBot = (token) => {
             let noCheck = false, cpcConv = null;
             if (latest && roleId && conversion.enabledFor(guild.id)) {
                 cpcConv = conversion.forCard(guild.id, roleId, creatorId).conv;
-                noCheck = cpcConv != null && Math.random() >= conversion.CALIB_RATE;
+                noCheck = cpcConv != null && Math.random() >= conversion.calibRate();
             }
             pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv });
             // 30-min window: a user who reads the ad and takes a while to join the

@@ -19,6 +19,14 @@ const CLICK_TTL = 7 * 86400000;          // clicks are retained ~7d (cards.js CL
 // On a calibrated server this fraction of shows STAYS join-check (to keep measuring
 // the real conversion); the rest run no-check and pay per click. 0.15 = 15% calibration.
 const CALIB_RATE = (() => { const v = Number(process.env.CPC_CALIBRATION_RATE); return (Number.isFinite(v) && v > 0 && v <= 1) ? v : 0.15; })();
+// Live calibration share: owner can tune it from the admin panel (siteconfig.cpcCalibRate),
+// falling back to the env default. Bounded to (0,1] — never let it hit 0 (would stop
+// measuring conversion entirely) or exceed 1.
+function calibRate() {
+    const cfg = loadJSON('siteconfig.json', {});
+    const v = Number(cfg && cfg.cpcCalibRate);
+    return (Number.isFinite(v) && v > 0 && v <= 1) ? v : CALIB_RATE;
+}
 
 // Owner toggle: is the CPC-calibrated mode on for this partner server (guild)?
 function enabledFor(guildId) {
@@ -88,4 +96,4 @@ function forCard(guildId, roleId, creatorId, nowMs) {
     return fromSamples(joinTs, clicks, nowMs);
 }
 
-module.exports = { SAMPLE, CALIB_RATE, enabledFor, fromSamples, forCard, ratePer100Clicks, ratePerClick };
+module.exports = { SAMPLE, CALIB_RATE, calibRate, enabledFor, fromSamples, forCard, ratePer100Clicks, ratePerClick };

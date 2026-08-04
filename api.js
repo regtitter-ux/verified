@@ -2314,6 +2314,106 @@ async function handleAdmin(req, res, path, clients, config) {
         return send(res, 200, { ok: true, gid, on }, cors);
     }
 
+    // Owner-only: calibration control-center. Every CPC-calibrated server with its
+    // live conversion, click volume, join-check vs no-check split and the effective
+    // pay-per-click rate, plus a network summary. Feeds the admin "Калибровка" tab.
+    if (path === '/admin/calibration' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const cfg = loadJSON('siteconfig.json', {});
+        const calib = (cfg.cpcCalibrated && typeof cfg.cpcCalibrated === 'object') ? cfg.cpcCalibrated : {};
+        const gids = Object.keys(calib).filter((g) => calib[g]);
+        const now = Date.now();
+        const WEEK = 604800000;
+        const allCards = cards.loadCards();
+        const calCards = (Array.isArray(allCards) ? allCards : []).filter((c) => gids.includes(String(c.guildId)) && !c.deletedAt);
+        const enriched = enrichCards(clients, calCards).list;
+        const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
+        const clArr = (() => { const c = loadJSON('cardclicks.json', []); return Array.isArray(c) ? c : []; })();
+        const settingsAll = loadJSON('settings.json', {});
+
+        // no-check virtual joins credited (all-time + last week), per guild.
+        const ncJoinByGuild = new Map();
+        for (const u of vArr) {
+            if (!u || !u.noCheck || !u.adKey) continue;
+            const g = String(u.guildId || '');
+            if (!gids.includes(g)) continue;
+            const e = ncJoinByGuild.get(g) || { all: 0, week: 0 };
+            e.all++; if ((Number(u.timestamp) || 0) > now - WEEK) e.week++;
+            ncJoinByGuild.set(g, e);
+        }
+        // no-check (nc) clicks in the last week, per guild (click key = `gid:roleId:creator`).
+        const ncClickByGuild = new Map();
+        for (const ev of clArr) {
+            if (!ev || !ev.nc || !((Number(ev.t) || 0) > now - WEEK)) continue;
+            const g = String(ev.k || '').split(':')[0];
+            if (!gids.includes(g)) continue;
+            ncClickByGuild.set(g, (ncClickByGuild.get(g) || 0) + 1);
+        }
+        // Group enriched cards by guild; conversion + rate already computed per card.
+        const byGuild = new Map();
+        for (const c of enriched) {
+            const g = String(c.guildId);
+            let e = byGuild.get(g);
+            if (!e) byGuild.set(g, e = { guildName: c.guildName, guildIcon: c.guildIcon, memberCount: c.memberCount, cards: [] });
+            const cv = c.conversion || {};
+            const joinRate = Number.isFinite(Number((settingsAll[c.creatorId] || {}).joinBid)) ? Number(settingsAll[c.creatorId].joinBid) : 5;
+            e.cards.push({
+                roleName: c.roleName, creatorName: c.creatorName, creatorId: c.creatorId,
+                conv: cv.conv, joins: cv.joins || 0, clickers: cv.clickers || 0,
+                joinRate, ratePer100Clicks: cv.ratePer100Clicks || 0,
+                ratePerClick: conversion.ratePerClick(cv.conv, joinRate), link: c.link
+            });
+        }
+        let sConvN = 0, sConvD = 0, totNcAll = 0, totNcWk = 0, totJc = 0, totPaidCents = 0;
+        const servers = gids.map((g) => {
+            const e = byGuild.get(g) || { guildName: guildNameOf(clients, g), guildIcon: guildIconOf(clients, g), memberCount: guildMembersOf(clients, g), cards: [] };
+            let cn = 0, cd = 0, jc = 0, rateNum = 0, rateDen = 0;
+            for (const cc of e.cards) {
+                if (cc.conv != null && cc.clickers > 0) { cn += cc.conv * cc.clickers; cd += cc.clickers; }
+                jc += cc.joins || 0;
+                rateNum += (cc.ratePer100Clicks || 0) * (cc.clickers || 0); rateDen += (cc.clickers || 0);
+            }
+            const conv = cd > 0 ? +(cn / cd).toFixed(4) : null;
+            const nj = ncJoinByGuild.get(g) || { all: 0, week: 0 };
+            const ncClicksWk = ncClickByGuild.get(g) || 0;
+            const avgJoinRate = e.cards.length ? e.cards.reduce((a, b) => a + (b.joinRate || 0), 0) / e.cards.length : 5;
+            const paidUsd = +(nj.all * avgJoinRate / 100).toFixed(2);   // ≈ partner $ for no-check virtual joins
+            const ratePer100 = rateDen > 0 ? +(rateNum / rateDen).toFixed(4) : conversion.ratePer100Clicks(conv, avgJoinRate);
+            sConvN += cn; sConvD += cd; totNcAll += nj.all; totNcWk += ncClicksWk; totJc += jc; totPaidCents += Math.round(paidUsd * 100);
+            return {
+                guildId: g, guildName: e.guildName, guildIcon: e.guildIcon, memberCount: e.memberCount,
+                conv, joinCheckJoins: jc, noCheckJoinsAll: nj.all, noCheckJoinsWeek: nj.week,
+                noCheckClicksWeek: ncClicksWk, ratePer100Clicks: ratePer100,
+                ratePerClick: +((ratePer100 || 0) / 100).toFixed(6), estPaidUsd: paidUsd, cards: e.cards
+            };
+        });
+        servers.sort((a, b) => (b.noCheckJoinsAll - a.noCheckJoinsAll) || ((b.conv || 0) - (a.conv || 0)));
+        const summary = {
+            servers: servers.length,
+            avgConv: sConvD > 0 ? +(sConvN / sConvD).toFixed(4) : null,
+            totalNoCheckJoins: totNcAll, totalNoCheckClicksWeek: totNcWk,
+            totalJoinCheckJoins: totJc, estPaidUsd: +(totPaidCents / 100).toFixed(2),
+            calibRate: conversion.calibRate(), sample: conversion.SAMPLE
+        };
+        return send(res, 200, { ok: true, summary, servers }, cors);
+    }
+
+    // Owner-only: tune the global calibration share — the fraction of shows kept
+    // join-check to keep measuring conversion (the rest run no-check). Stored in
+    // siteconfig.cpcCalibRate, read live by conversion.calibRate().
+    if (path === '/admin/cpc-rate' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const rate = Number(body?.rate);
+        if (!Number.isFinite(rate) || rate <= 0 || rate > 1) return send(res, 400, { error: 'rate must be in (0,1]' }, cors);
+        const cfg = loadJSON('siteconfig.json', {});
+        cfg.cpcCalibRate = +rate.toFixed(4);
+        saveJSON('siteconfig.json', cfg);
+        auditDo('cpc.rate', String(cfg.cpcCalibRate));
+        return send(res, 200, { ok: true, rate: cfg.cpcCalibRate }, cors);
+    }
+
     // Owner-only: assign the recipient of a server's net join profit ("доля сервера").
     // 100% of this server's per-join service profit is routed to userId, bypassing
     // the global shareholder pct split (see shares.payShares). An empty userId clears

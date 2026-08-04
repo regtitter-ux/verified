@@ -212,6 +212,9 @@ async function notifyBotLost(clients, id, m) {
 // Returns { channelId, msgId } of the posted ping (so it can be deleted later when
 // coverage returns or the ping is refreshed), or null if it couldn't be sent.
 async function notifyNoBotOrder(clients, campaign) {
+    // Disabled by request: the repeating "no bots on this order" ping was too noisy.
+    // Re-enable by setting BOTFARM_NO_BOT_NOTIFY=on. (The bot-lost alert stays on.)
+    if ((process.env.BOTFARM_NO_BOT_NOTIFY || 'off').toLowerCase() !== 'on') return null;
     const chId = NOTIFY_CHANNEL();
     const ch = await poster.posterChannel(clients, chId).catch(() => null);
     if (!ch || typeof ch.send !== 'function') return null;
