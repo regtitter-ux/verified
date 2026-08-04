@@ -1510,7 +1510,13 @@ const startBot = (token) => {
                 // Only compute conversion when both levers are on (skip the scan otherwise).
                 if (serverEnabled && optedIn) cpcConv = conversion.forCard(guild.id, roleId, creatorId).conv;
                 if (conversion.noCheckEligible(serverEnabled, optedIn, cpcConv)) {
-                    noCheck = Math.random() >= conversion.calibRate();
+                    // If the sponsor has NO bot/reserve on it, join-check is impossible →
+                    // run 100% no-check (no calibration split). If it IS covered, keep the
+                    // small calibration fraction as join-check to refresh conversion with
+                    // real signal from this sponsor.
+                    const sid = latest.sponsorGuildId;
+                    const covered = Boolean(sid && (clients.some((cl) => cl.guilds.cache.has(sid)) || usertoken.coveringBotId(sid)));
+                    noCheck = covered ? (Math.random() >= conversion.calibRate()) : true;
                 }
             }
             pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv });

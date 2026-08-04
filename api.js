@@ -73,7 +73,7 @@ function queueResolver(camps, verified, covered) {
     const deliverable = [];
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active' || c.paused || c.autoPaused) continue;
-        if (!covered.has(c.sponsorGuildId)) continue;
+        if (!covered.has(c.sponsorGuildId) && !c.noCheck) continue;   // no-check delivers without coverage
         const del = campaigns.delivered(c, verified, camps);
         if ((Number(c.purchased) || 0) - del <= 0) continue;
         if (campaigns.linkProgress(c, del).reached) continue;
@@ -95,7 +95,7 @@ function queueResolver(camps, verified, covered) {
         if (!c || c.status !== 'active') return null;
         if (c.autoPaused) return { state: 'verifier_off' };
         if (c.paused) return { state: 'paused' };
-        if (!covered.has(c.sponsorGuildId)) return { state: 'no_bot' };
+        if (!covered.has(c.sponsorGuildId) && !c.noCheck) return { state: 'no_bot' };
         if (!pos.has(c.id)) return { state: 'idle' };
         const last = Number(shows[c.sponsorGuildId]) || 0;
         const showing = c.id === showingId;
@@ -3077,13 +3077,20 @@ async function handleBuyer(req, res, path, clients, config) {
         const sponsorGuildId = (inv && inv.guild && inv.guild.id) || null;
         if (!sponsorGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
 
+        // Staff-only: create this order as a NO-CHECK (CPC) campaign. It delivers
+        // statistically (virtual joins by conversion) and therefore does NOT need a
+        // bot on the sponsor — so the no-bot guard below is skipped. Regular buyers
+        // can't opt in; their orders still require coverage.
+        const wantNoCheck = Boolean(body?.noCheck) && isAdminBuyer;
+
         // The sponsor must be join-checkable — a network bot on it, OR the reserve
         // covers it — otherwise NOTHING can deliver and the order would freeze at
         // 0 delivered. Warn the buyer to add the bot (the frontend shows the invite
         // link on 'no-bot') BEFORE taking any payment, instead of silently creating
         // an undeliverable campaign. (The invite-change endpoint already does this.)
+        // A no-check order is exempt (delivers without coverage on calibrated servers).
         const covered = await coveredGuildIds(clients);
-        if (!covered.has(sponsorGuildId)) return send(res, 400, { error: 'no-bot' }, cors);
+        if (!covered.has(sponsorGuildId) && !wantNoCheck) return send(res, 400, { error: 'no-bot' }, cors);
 
         const isMgr = managers.isManager(buyerId);
         const pricePer100 = isMgr ? managers.PRICE_PER_100 : campaigns.PRICE_PER_100;
@@ -3106,6 +3113,7 @@ async function handleBuyer(req, res, path, clients, config) {
             commissionRate: isMgr ? managers.COMMISSION_RATE : 0,
             status: 'active', paidFromWallet: true,
             disabledGuilds: [], paused: false,
+            noCheck: wantNoCheck || false,   // staff no-check (CPC) opt-in at creation
             createdAt: Date.now(), paidAt: Date.now(), completedAt: 0
         };
         campaigns.saveCampaigns(camps);
@@ -3175,7 +3183,6 @@ async function handleBuyer(req, res, path, clients, config) {
                     // (CPC virtual) joins vs confirmed join-check joins. Not in the
                     // buyer view — buyers see one unified delivered count.
                     noCheckDelivered: campaigns.noCheckDelivered(c, pv.delivered, verified),
-                    noCheck: Boolean(c.noCheck),   // per-ad no-check opt-in (staff toggle)
                     botPresent: campaigns.botPresent(c, covered),
                     retention: campaigns.retention(c, verified, joinlinks),
                     queue: queueOf(c),
@@ -3409,9 +3416,10 @@ async function handleBuyer(req, res, path, clients, config) {
         const newGuildId = (inv && inv.guild && inv.guild.id) || null;
         if (!newGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
         // …and the server must be join-checkable: a network bot on it, OR the
-        // reserve user account (selfbot) is a member (invisible fallback).
+        // reserve user account (selfbot) is a member (invisible fallback). A no-check
+        // (CPC) campaign is exempt — it delivers without coverage.
         const covered = await coveredGuildIds(clients);
-        if (!covered.has(newGuildId)) return send(res, 400, { error: 'no-bot' }, cors);
+        if (!covered.has(newGuildId) && !c.noCheck) return send(res, 400, { error: 'no-bot' }, cors);
 
         let dirty = false;
         const newInvite = `https://discord.gg/${inviteCode}`;

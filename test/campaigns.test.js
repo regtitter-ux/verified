@@ -16,6 +16,20 @@ function joins(n, base = T2 + 1000) {
 
 beforeEach(() => reset());
 
+test('a no-check campaign is eligible WITHOUT sponsor coverage, but only on a calibrated display server', () => {
+    const NC = { id: 'NC', invite: 'https://discord.gg/nc', sponsorGuildId: 'SPON_NOBOT', status: 'active', purchased: 100, paidAt: T1, noCheck: true };
+    const REG = { id: 'REG', invite: 'https://discord.gg/reg', sponsorGuildId: 'SPON_NOBOT2', status: 'active', purchased: 100, paidAt: T1 };
+    seed({ 'campaigns.json': { NC, REG }, 'verified.json': [], 'siteconfig.json': { cpcCalibrated: { CALIB: true } } });
+    const covered = new Set();   // nobody is covered
+
+    const onCalib = campaigns.eligibleForGuild('CALIB', [], covered).map((e) => e.id);
+    assert.ok(onCalib.includes('NC'), 'no-check delivers on a calibrated server despite no sponsor bot');
+    assert.ok(!onCalib.includes('REG'), 'a normal uncovered campaign is never eligible');
+
+    const onPlain = campaigns.eligibleForGuild('PLAIN', [], covered).map((e) => e.id);
+    assert.ok(!onPlain.includes('NC'), 'no-check needs a calibrated display server (elsewhere it can\'t deliver)');
+});
+
 test('two active campaigns sharing an invite never double-count a join (FIFO allocation)', () => {
     const camps = {
         A: { id: 'A', invite: INVITE, sponsorGuildId: 'S', purchased: 2, status: 'active', paidAt: T1, adKeys: [] },

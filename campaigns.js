@@ -214,6 +214,7 @@ function publicView(campaign, verifiedList) {
         disabledGuilds: Array.isArray(campaign.disabledGuilds) ? campaign.disabledGuilds : [],
         disabledBots: Array.isArray(campaign.disabledBots) ? campaign.disabledBots : [],
         onlySfw: Boolean(campaign.onlySfw),
+        noCheck: Boolean(campaign.noCheck),
         invoiceUrl: campaign.invoiceUrl || null,
         createdAt: campaign.createdAt || 0,
         paidAt: campaign.paidAt || 0,
@@ -250,6 +251,8 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds, botId) {
     // servers the owner flagged NSFW live in siteconfig.nsfwServers (keyed by guild).
     const sc = loadJSON('siteconfig.json', {});
     const displayIsNsfw = Boolean(sc && sc.nsfwServers && sc.nsfwServers[displayGuildId]);
+    const cpcCal = (sc && sc.cpcCalibrated && typeof sc.cpcCalibrated === 'object') ? sc.cpcCalibrated : {};
+    const displayCalibrated = Boolean(cpcCal[displayGuildId]);
     const eligible = [];
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active' || c.paused || c.autoPaused) continue;
@@ -259,7 +262,12 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds, botId) {
         // Developer API: the buyer can turn a campaign off for a specific bot,
         // exactly like the per-server opt-out (only applies when a botId is given).
         if (bid && Array.isArray(c.disabledBots) && c.disabledBots.includes(bid)) continue;
-        if (botGuildIds && !botGuildIds.has(c.sponsorGuildId)) continue;   // no bot on buyer's server
+        // Coverage: the sponsor normally needs a bot/reserve on it so joins can be
+        // verified. A no-check (CPC) campaign delivers statistically and can run
+        // WITHOUT sponsor coverage — but only on a CALIBRATED display server, where
+        // no-check actually fires (on a non-calibrated server it couldn't deliver, so
+        // don't waste the show there).
+        if (botGuildIds && !botGuildIds.has(c.sponsorGuildId) && !(c.noCheck && displayCalibrated)) continue;
         const del = delivered(c, list, camps);
         const remaining = c.purchased - del;
         if (remaining <= 0) continue;                                      // already done
@@ -341,6 +349,9 @@ async function autoPauseUncovered(clients, covered, graceMs) {
     const NOTIFY_CAP = 5;   // don't flood the ops channel on a big backlog — trickle over sweeps
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active') continue;
+        // No-check (CPC) campaigns deliver statistically and DON'T need sponsor
+        // coverage — never auto-pause them for "no verifier", never ping for a bot.
+        if (c.noCheck) continue;
         if (covered.has(String(c.sponsorGuildId))) {
             if (c.uncoveredSince) { c.uncoveredSince = 0; changed = true; }
             // Coverage returned (a fleet bot or reserve is on the server now) → pull the
