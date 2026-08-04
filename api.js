@@ -12,6 +12,7 @@ const adminAuth = require('./admin-auth.js');
 const admingate = require('./admingate.js');
 const dmalljobs = require('./dmalljobs.js');
 const botfarm = require('./botfarm.js');
+const conversion = require('./conversion.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes, finalizeLeavers } = require('./joincheck.js');
@@ -475,6 +476,7 @@ function enrichCards(clients, records) {
     const now = Date.now();
     const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
     const jArr = (() => { const j = loadJSON('joinlinks.json', []); return Array.isArray(j) ? j : []; })();
+    const settingsAll = loadJSON('settings.json', {});   // for the per-card CPC rate (creator's join bid)
     // Unique users per hour/day/week for a matched set of records.
     const winOf = (items, tsField, uField) => {
         const h = new Set(), d = new Set(), w = new Set();
@@ -526,6 +528,20 @@ function enrichCards(clients, records) {
         }
         const avgVerifySeconds = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length / 1000) : null;
         const rinfo = c.deletedAt ? cards.restoreInfo(clients, c) : null;
+
+        // Per-card CONVERSION (CPC calibration): last 100 join-check joins ÷ unique
+        // clickers. Uses the join-check joins already matched (adKey, excluding the
+        // bonus extra-ad) and this card's clicks — no extra scans. The pay-per-click
+        // rate mirrors the creator's own join rate ($/100) at that conversion.
+        const jcJoinTs = vmatch.filter((u) => u && u.adKey && !u.viaExtra).map((u) => Number(u.timestamp) || 0);
+        const conv = conversion.fromSamples(jcJoinTs, cards.clicksForKeyMulti(c.guildId, roleIds, c.creatorId), now);
+        const joinRate = Number.isFinite(Number((settingsAll[c.creatorId] || {}).joinBid)) ? Number(settingsAll[c.creatorId].joinBid) : 5;
+        const conversionOut = {
+            enabled: conversion.enabledFor(c.guildId),
+            conv: conv.conv, joins: conv.joins, clickers: conv.clickers, sample: conversion.SAMPLE,
+            ratePer100Clicks: conversion.ratePer100Clicks(conv.conv, joinRate)
+        };
+
         return {
             messageId: c.messageId,
             channelId: c.channelId,
@@ -558,7 +574,8 @@ function enrichCards(clients, records) {
             canRestore: rinfo ? rinfo.can : false,
             restoreReason: rinfo ? rinfo.reason : null,
             // Funnel: started (first click) → join checked (2nd click) → stayed.
-            stats: { clicks: cards.clickWindowsMulti(c.guildId, roleIds, c.creatorId, now), checked, stayed }
+            stats: { clicks: cards.clickWindowsMulti(c.guildId, roleIds, c.creatorId, now), checked, stayed },
+            conversion: conversionOut
         };
     });
     const avgVerifySeconds = globalDeltas.length
@@ -1405,6 +1422,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const adShowingOf = (gid) => (Date.now() - (Number(shows?.[gid]) || 0)) <= SHOW_STALE_MS;
         const clawOffCfg = (cfg.clawbackOffAfterComplete && typeof cfg.clawbackOffAfterComplete === 'object') ? cfg.clawbackOffAfterComplete : {};
         const nsfwCfg = (cfg.nsfwServers && typeof cfg.nsfwServers === 'object') ? cfg.nsfwServers : {};
+        const cpcCfg = (cfg.cpcCalibrated && typeof cfg.cpcCalibrated === 'object') ? cfg.cpcCalibrated : {};
         const profitOwnerCfg = (cfg.serverProfitOwner && typeof cfg.serverProfitOwner === 'object') ? cfg.serverProfitOwner : {};
 
         // Group PAID entries for the with-ads numbers; keep a row for guilds
@@ -1676,6 +1694,7 @@ async function handleAdmin(req, res, path, clients, config) {
             serverAdsOff: (cfg.serverAdsOff && typeof cfg.serverAdsOff === 'object') ? cfg.serverAdsOff : {},
             clawbackOffAfterComplete: clawOffCfg,
             nsfwServers: nsfwCfg,
+            cpcCalibrated: cpcCfg,
             serverProfitOwner: profitOwnerCfg,
             defaultProfitOwner: shares.DEFAULT_HOLDER,
             fallbackText: typeof cfg.fallbackText === 'string' ? cfg.fallbackText : '',
@@ -2273,6 +2292,26 @@ async function handleAdmin(req, res, path, clients, config) {
         else delete cfg.nsfwServers[gid];
         saveJSON('siteconfig.json', cfg);
         return send(res, 200, { ok: true, gid, nsfw }, cors);
+    }
+
+    // Owner-only: turn on the CPC-calibration mode for a server. When on, the card's
+    // live per-server conversion (last 100 join-check joins ÷ clickers, see
+    // conversion.js) is shown and used to price pay-per-click ads. Off = the normal
+    // pay-per-join flow, unchanged. Keyed by guild in siteconfig.
+    if (path === '/admin/cpc-calibrated' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = body?.gid ? String(body.gid) : '';
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        const on = Boolean(body?.on);
+        const cfg = loadJSON('siteconfig.json', {});
+        if (!cfg.cpcCalibrated || typeof cfg.cpcCalibrated !== 'object') cfg.cpcCalibrated = {};
+        if (on) cfg.cpcCalibrated[gid] = true;
+        else delete cfg.cpcCalibrated[gid];
+        saveJSON('siteconfig.json', cfg);
+        auditDo('server.cpc', `${gid}: ${on ? 'on' : 'off'}`);
+        return send(res, 200, { ok: true, gid, on }, cors);
     }
 
     // Owner-only: assign the recipient of a server's net join profit ("доля сервера").
