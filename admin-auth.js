@@ -87,9 +87,12 @@ function saveBotKeepers(list) {
     saveJSON('botkeepers.json', clean);
     return clean;
 }
+// Access to the user-bot page: anyone with a panel role (owner OR assigned admin)
+// gets it by default, plus any id explicitly granted below. Owners additionally
+// manage the grant list.
 function isBotKeeper(userId) {
     const id = String(userId || '');
-    return Boolean(id) && (isOwnerId(id) || loadBotKeepers().includes(id));
+    return Boolean(id) && (Boolean(roleOf(id)) || loadBotKeepers().includes(id));
 }
 
 // 'owner' | 'admin' | null
