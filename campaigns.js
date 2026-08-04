@@ -157,6 +157,35 @@ function linkProgress(campaign, del) {
     return { limit, delivered: Math.min(d, limit), reached: d >= limit };
 }
 
+// Owner/admin-only: of a campaign's delivered joins, how many were NO-CHECK (CPC
+// virtual) joins rather than confirmed join-check joins. Virtual joins are stamped
+// with their delivering campaignId at credit time (index.js) and marked noCheck, so
+// we attribute by that authoritative stamp — capped at `del` so the split never
+// exceeds the displayed delivered count, and excluding users who left the sponsor
+// (same as delivered()). This is NOT put in publicView: buyers see one unified
+// "delivered"; only the staff order view breaks it into checked vs statistical.
+function noCheckDelivered(campaign, del, verifiedList) {
+    if (!campaign || !campaign.paidAt) return 0;
+    const list = Array.isArray(verifiedList) ? verifiedList : loadJSON('verified.json', []);
+    const sponsor = String(campaign.sponsorGuildId || '');
+    const left = new Set();
+    if (sponsor) {
+        const jl = loadJSON('joinlinks.json', []);
+        for (const r of (Array.isArray(jl) ? jl : [])) {
+            if (r && r.status === 'left' && String(r.guildId) === sponsor) left.add(String(r.userId));
+        }
+    }
+    const seen = new Set();
+    for (const u of list) {
+        if (!u || !u.noCheck || !u.adKey) continue;
+        if (String(u.campaignId || '') !== String(campaign.id)) continue;
+        if ((Number(u.timestamp) || 0) <= campaign.paidAt) continue;
+        if (left.has(String(u.id))) continue;
+        seen.add(u.id);
+    }
+    return Math.min(seen.size, Number(del) || 0);
+}
+
 // A public-safe view of a campaign for the buyer dashboard.
 function publicView(campaign, verifiedList) {
     // Cap the shown count at what was ordered: two campaigns for the same server
@@ -495,6 +524,6 @@ function retention(campaign, verifiedList, joinlinks, now = Date.now()) {
 
 module.exports = {
     get PRICE_PER_100() { return pricePer100(); }, get MIN_JOINS() { return minJoins(); }, priceFor, round2, newId,
-    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, linkProgress, publicView, pickForGuild, eligibleForGuild, weightedOrder, botPresent, fleetGuildIds, autoPauseUncovered, setNoBotNotifMsg,
+    loadCampaigns, saveCampaigns, campaignAdKey, campaignAdKeys, delivered, noCheckDelivered, linkProgress, publicView, pickForGuild, eligibleForGuild, weightedOrder, botPresent, fleetGuildIds, autoPauseUncovered, setNoBotNotifMsg,
     isInvoicePaid, reconcile, startCampaignSweep, retention
 };

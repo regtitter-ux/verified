@@ -3167,13 +3167,20 @@ async function handleBuyer(req, res, path, clients, config) {
                 }
                 return (Number(b.completedAt) || Number(b.createdAt) || 0) - (Number(a.completedAt) || Number(a.createdAt) || 0);
             })
-            .map((c) => ({
-                ...campaigns.publicView(c, verified),
-                botPresent: campaigns.botPresent(c, covered),
-                retention: campaigns.retention(c, verified, joinlinks),
-                queue: queueOf(c),
-                admin: true, pinned: c.id === pinId, buyerId: c.buyerId, buyerName: userNameOf(clients, c.buyerId) || null
-            }));
+            .map((c) => {
+                const pv = campaigns.publicView(c, verified);
+                return {
+                    ...pv,
+                    // Owner/staff-only split: of `delivered`, how many were no-check
+                    // (CPC virtual) joins vs confirmed join-check joins. Not in the
+                    // buyer view — buyers see one unified delivered count.
+                    noCheckDelivered: campaigns.noCheckDelivered(c, pv.delivered, verified),
+                    botPresent: campaigns.botPresent(c, covered),
+                    retention: campaigns.retention(c, verified, joinlinks),
+                    queue: queueOf(c),
+                    admin: true, pinned: c.id === pinId, buyerId: c.buyerId, buyerName: userNameOf(clients, c.buyerId) || null
+                };
+            });
         return send(res, 200, { campaigns: list, adminPriorityCampaignId: pinId }, cors);
     }
 

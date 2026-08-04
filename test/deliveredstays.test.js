@@ -32,6 +32,21 @@ test('with no leavers the count is unchanged (gross == net)', () => {
     assert.equal(campaigns.delivered(A, joins(12), { A }), 12);
 });
 
+test('noCheckDelivered counts only THIS campaign\'s no-check virtual joins, minus leavers, capped at delivered', () => {
+    const A = { id: 'A', invite: INVITE, sponsorGuildId: 'SPON', status: 'active', purchased: 100, paidAt: PAID };
+    const v = [
+        { id: 'C0', guildId: 'SPON', adKey: KEY, campaignId: 'A', timestamp: PAID + 100 },                 // join-check (not noCheck) → not counted
+        { id: 'N0', guildId: 'SPON', adKey: KEY, campaignId: 'A', timestamp: PAID + 300, noCheck: true },  // no-check hit → counts
+        { id: 'N1', guildId: 'SPON', adKey: KEY, campaignId: 'A', timestamp: PAID + 400, noCheck: true },  // no-check hit → counts
+        { id: 'N2', guildId: 'SPON', adKey: KEY, campaignId: 'A', timestamp: PAID + 500, noCheck: true },  // no-check but LEFT sponsor → drop
+        { id: 'NX', guildId: 'SPON', adKey: KEY, campaignId: 'B', timestamp: PAID + 600, noCheck: true },  // other campaign → drop
+        { id: 'NO', guildId: 'SPON', campaignId: 'A', timestamp: PAID + 700, noCheck: true }               // no adKey (a no-check MISS) → drop
+    ];
+    seed({ 'campaigns.json': { A }, 'verified.json': v, 'joinlinks.json': [{ userId: 'N2', guildId: 'SPON', status: 'left' }] });
+    assert.equal(campaigns.noCheckDelivered(A, 10, v), 2, 'only N0,N1 are this campaign\'s live no-check joins');
+    assert.equal(campaigns.noCheckDelivered(A, 1, v), 1, 'never exceeds the displayed delivered count');
+});
+
 test('leavers are dropped in the shared-invite cohort allocation too', () => {
     // Two campaigns share the invite (same sponsor); B paid later. 15 joins, 5 left.
     const A = { id: 'A', invite: INVITE, sponsorGuildId: 'SPON', status: 'active', purchased: 10, paidAt: PAID };
