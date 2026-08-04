@@ -3175,6 +3175,7 @@ async function handleBuyer(req, res, path, clients, config) {
                     // (CPC virtual) joins vs confirmed join-check joins. Not in the
                     // buyer view — buyers see one unified delivered count.
                     noCheckDelivered: campaigns.noCheckDelivered(c, pv.delivered, verified),
+                    noCheck: Boolean(c.noCheck),   // per-ad no-check opt-in (staff toggle)
                     botPresent: campaigns.botPresent(c, covered),
                     retention: campaigns.retention(c, verified, joinlinks),
                     queue: queueOf(c),
@@ -3291,6 +3292,23 @@ async function handleBuyer(req, res, path, clients, config) {
         campaigns.saveCampaigns(camps);
         if (c.buyerId !== buyerId) audit.logAction(buyerId, 'order.only-sfw', `${id} ${c.onlySfw ? 'only-sfw' : 'all-servers'} (owner ${c.buyerId})`);
         return send(res, 200, { ok: true, onlySfw: c.onlySfw }, cors);
+    }
+
+    // Owner/staff only: opt THIS ad/campaign into no-check (CPC) shows. Composes with
+    // the per-server calibration toggle (AND) — no-check runs only where BOTH are on.
+    // A manual per-ad lever to cautiously roll out no-check before making it default.
+    if (path.startsWith('/order/campaigns/') && path.endsWith('/nocheck') && req.method === 'PUT') {
+        if (!isAdminBuyer) return send(res, 403, { error: 'staff only' }, cors);
+        const id = path.slice('/order/campaigns/'.length, -('/nocheck'.length));
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const camps = campaigns.loadCampaigns();
+        const c = camps[id];
+        if (!c) return send(res, 404, { error: 'not found' }, cors);
+        c.noCheck = Boolean(body?.on);
+        campaigns.saveCampaigns(camps);
+        audit.logAction(buyerId, 'order.nocheck', `${id} ${c.noCheck ? 'on' : 'off'} (owner ${c.buyerId})`);
+        return send(res, 200, { ok: true, noCheck: c.noCheck }, cors);
     }
 
     // Toggle a server on/off for this campaign.

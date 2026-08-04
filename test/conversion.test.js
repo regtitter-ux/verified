@@ -48,6 +48,14 @@ test('CALIB_RATE is a fraction in (0, 1]', () => {
     assert.ok(conv.CALIB_RATE > 0 && conv.CALIB_RATE <= 1, `got ${conv.CALIB_RATE}`);
 });
 
+test('noCheckEligible needs BOTH levers on AND a conversion', () => {
+    assert.equal(conv.noCheckEligible(true, true, 0.2), true, 'server + ad + conv → eligible');
+    assert.equal(conv.noCheckEligible(false, true, 0.2), false, 'server off → no');
+    assert.equal(conv.noCheckEligible(true, false, 0.2), false, 'ad not opted in → no');
+    assert.equal(conv.noCheckEligible(true, true, null), false, 'no conversion yet → no');
+    assert.equal(conv.noCheckEligible(true, true, 0), true, 'a real 0% conversion is still a measured value');
+});
+
 test('ratePer100Clicks = joinRate × conversion (matches per-join earnings)', () => {
     assert.ok(near(conv.ratePer100Clicks(0.18, 5), 0.90), '$5/100 joins × 0.18 = $0.90/100 clicks');
     assert.equal(conv.ratePer100Clicks(null, 5), 0, 'no rate without a conversion');

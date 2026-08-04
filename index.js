@@ -1498,10 +1498,20 @@ const startBot = (token) => {
             // (probability = the card's live conversion) through the normal creditJoin
             // money path. Only when an ad is shown AND a conversion is measured to
             // price it; otherwise the show stays join-check.
+            // Two manual levers compose here (AND), for a cautious rollout:
+            //   1. the PARTNER server is CPC-calibrated (conversion.enabledFor), and
+            //   2. THIS specific ad/campaign is opted into no-check (camp.noCheck, the
+            //      per-order toggle) — so no-check runs only where both are on.
+            // Ads without a campaign (house/global) can't be opted in → stay join-check.
             let noCheck = false, cpcConv = null;
-            if (latest && roleId && conversion.enabledFor(guild.id)) {
-                cpcConv = conversion.forCard(guild.id, roleId, creatorId).conv;
-                noCheck = cpcConv != null && Math.random() >= conversion.calibRate();
+            if (latest && roleId && latest.campaignId) {
+                const serverEnabled = conversion.enabledFor(guild.id);
+                const optedIn = Boolean(campaigns.loadCampaigns()[latest.campaignId]?.noCheck);
+                // Only compute conversion when both levers are on (skip the scan otherwise).
+                if (serverEnabled && optedIn) cpcConv = conversion.forCard(guild.id, roleId, creatorId).conv;
+                if (conversion.noCheckEligible(serverEnabled, optedIn, cpcConv)) {
+                    noCheck = Math.random() >= conversion.calibRate();
+                }
             }
             pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv });
             // 30-min window: a user who reads the ad and takes a while to join the

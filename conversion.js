@@ -28,6 +28,15 @@ function calibRate() {
     return (Number.isFinite(v) && v > 0 && v <= 1) ? v : CALIB_RATE;
 }
 
+// Is a NO-CHECK show permitted for this (partner server, ad) pair? Both manual
+// levers must be on — the partner server is CPC-calibrated (serverEnabled) AND the
+// specific ad/campaign opted into no-check (campaignOptedIn) — AND a conversion
+// exists to price the click. The per-show coin-flip (calibRate) happens in the
+// handler; this is the yes/no gate that must pass before a virtual join can pay.
+function noCheckEligible(serverEnabled, campaignOptedIn, conv) {
+    return Boolean(serverEnabled) && Boolean(campaignOptedIn) && conv != null;
+}
+
 // Owner toggle: is the CPC-calibrated mode on for this partner server (guild)?
 function enabledFor(guildId) {
     const cfg = loadJSON('siteconfig.json', {});
@@ -96,4 +105,4 @@ function forCard(guildId, roleId, creatorId, nowMs) {
     return fromSamples(joinTs, clicks, nowMs);
 }
 
-module.exports = { SAMPLE, CALIB_RATE, calibRate, enabledFor, fromSamples, forCard, ratePer100Clicks, ratePerClick };
+module.exports = { SAMPLE, CALIB_RATE, calibRate, enabledFor, noCheckEligible, fromSamples, forCard, ratePer100Clicks, ratePerClick };
