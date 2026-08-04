@@ -11,6 +11,11 @@ test('shouldCountJoin requires role + ad shown + adRaw + resolved sponsor + not 
     assert.equal(shouldCountJoin({ ...ok, adShown: false }), false, 'no ad shown → not counted');
     assert.equal(shouldCountJoin({ ...ok, adRaw: '' }), false, 'no raw ad → not counted');
     assert.equal(shouldCountJoin({ ...ok, roleId: null }), false, 'legacy no-role card → never counts');
+    // Membership must be CONFIRMED to pay: an access-only grant on a reserve sponsor
+    // we couldn't verify (banned/down user-token) passes memberConfirmed:false → never
+    // charges the partner, even though a sponsor+ad were present.
+    assert.equal(shouldCountJoin({ ...ok, memberConfirmed: false }), false, 'unconfirmed membership → access-only, not paid');
+    assert.equal(shouldCountJoin({ ...ok, memberConfirmed: true }), true, 'confirmed membership → counts as before');
 });
 
 test('isDuplicateJoin flags a user already joined/settled for the sponsor', () => {

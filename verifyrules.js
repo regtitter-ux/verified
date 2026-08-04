@@ -7,10 +7,14 @@
 // and "is this a duplicate?" decisions through here, so the rule is defined once.
 
 // A confirmed join is COUNTED toward the buyer's order AND PAID to the partner
-// only when a real join-check ad was shown, a sponsor resolved, and it isn't a
-// duplicate. (Membership itself is confirmed separately, before this is asked.)
-function shouldCountJoin({ roleId, adShown, adRaw, sponsor, isDupJoin }) {
-    return Boolean(roleId && adShown && adRaw && sponsor && !isDupJoin);
+// only when a real join-check ad was shown, a sponsor resolved, it isn't a
+// duplicate, AND the user's membership was actually CONFIRMED. `memberConfirmed`
+// defaults true (callers that only reach this after a confirmed check keep their
+// behavior); the interactive verifier passes false when it grants access on a
+// reserve sponsor it couldn't verify (banned/down user-token) — access is given
+// but nothing is paid, since the join was never confirmed.
+function shouldCountJoin({ roleId, adShown, adRaw, sponsor, isDupJoin, memberConfirmed = true }) {
+    return Boolean(roleId && adShown && adRaw && sponsor && !isDupJoin && memberConfirmed);
 }
 
 // One real invite = one join. A user is a duplicate for a sponsor if they already

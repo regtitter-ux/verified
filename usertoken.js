@@ -71,8 +71,17 @@ async function isMember(guildId, userId) {
     if (!tk) return null;
     const { status } = await apiGet(tk, `/guilds/${guildId}/members/${userId}`);
     if (status === 200) return true;
-    if (status === 404) return false;   // Unknown Member
-    return null;                         // 401/403/429/5xx/network — don't act
+    if (status === 404) return false;   // Unknown Member (the account IS in the guild)
+    // 403 = the reserve account itself can't access this guild → it was kicked or
+    // BANNED. Drop the guild from coverage NOW so ad selection stops picking it and
+    // the campaign auto-pauses, instead of freezing verification on a banned sponsor
+    // for the whole cache TTL. Self-heals: the next /users/@me/guilds refresh re-adds
+    // it if the account is really still a member (a one-off 403).
+    if (status === 403 && _cache.map.has(String(guildId))) {
+        _cache.map.delete(String(guildId));
+        console.log(`[USERTOKEN] reserve lost access to guild ${guildId} (403) — dropped from coverage`);
+    }
+    return null;                         // 401/403/429/5xx/network — don't act on membership
 }
 
 // The account id is the base64 first segment of the token — enough to identify a

@@ -1535,21 +1535,33 @@ const startBot = (token) => {
             }
             if (!sponsor) sponsor = await resolveSponsorPresence(clients, pending.adText).catch(() => null);
         }
+        let memberConfirmed = false;
         if (sponsor) {
             const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
-            if (joined !== true) {
-                // Distinguish "not a member yet" (false) from "couldn't check right
-                // now" (null): the transient case must NOT read as "join first" (it
-                // misleads a user who already joined). We still don't grant access
-                // without a confirmed join, but the message tells them to retry.
-                const content = joined === null
-                    ? '⏳ Не удалось проверить, что ты на сервере — попробуй ещё раз через минуту.'
-                    : (pending.adText || 'Please join the server first, then click again.');
-                // Keep the bonus "EXTRA GWS" ad on repeat "please join" prompts too,
-                // excluding the sponsor they're being asked to join. Still 'pre'.
-                const retryExtraRow = await buildExtraRow(clients, guild, creatorId, user.id, sponsor.guildId, 'pre', interaction.channelId).catch(() => null);
-                const retryComponents = [retryExtraRow].filter(Boolean);
-                return interaction.editReply({ content, components: retryComponents }).catch(() => null);
+            if (joined === true) {
+                memberConfirmed = true;
+            } else {
+                // A RESERVE-only sponsor (bot:null) we can't check (null → the personal
+                // account is banned/removed/down) must NOT hold the user hostage: the
+                // reserve is best-effort and invisible to buyers, so a broken user-token
+                // used to freeze verification on "try again" indefinitely. Grant access
+                // ad-free instead — memberConfirmed stays false, so NO partner is charged
+                // for an unconfirmed join, and the autojoin sweep still credits it later
+                // iff it becomes verifiable. A BOT sponsor's null is transient (the bot
+                // should recover) → ask to retry; a definitive "not a member" (false) →
+                // ask them to join.
+                const reserveUncheckable = sponsor.bot === null && joined === null;
+                if (!reserveUncheckable) {
+                    const content = joined === null
+                        ? '⏳ Не удалось проверить, что ты на сервере — попробуй ещё раз через минуту.'
+                        : (pending.adText || 'Please join the server first, then click again.');
+                    // Keep the bonus "EXTRA GWS" ad on repeat "please join" prompts too,
+                    // excluding the sponsor they're being asked to join. Still 'pre'.
+                    const retryExtraRow = await buildExtraRow(clients, guild, creatorId, user.id, sponsor.guildId, 'pre', interaction.channelId).catch(() => null);
+                    const retryComponents = [retryExtraRow].filter(Boolean);
+                    return interaction.editReply({ content, components: retryComponents }).catch(() => null);
+                }
+                if (pending) pending.noAdReason = 'reserve_unverified'; // granted, but not payable — no confirmed join
             }
         }
 
@@ -1585,8 +1597,9 @@ const startBot = (token) => {
             // in the network), don't pay or count them again — just verify.
             const isDupJoin = sponsor ? isDuplicateJoin(loadJSON('joinlinks.json', []), user.id, sponsor.guildId) : false;
             // Single predicate for BOTH counting the order AND paying the partner —
-            // so the two can never diverge (see verifyrules.js).
-            const counts = shouldCountJoin({ roleId, adShown: pending?.adShown, adRaw: pending?.adRaw, sponsor, isDupJoin });
+            // so the two can never diverge (see verifyrules.js). memberConfirmed gates
+            // payment: a reserve-uncheckable grant (above) is access-only, never paid.
+            const counts = shouldCountJoin({ roleId, adShown: pending?.adShown, adRaw: pending?.adRaw, sponsor, isDupJoin, memberConfirmed });
 
             // adKey (the "paid" marker used by every stat) is set only for a
             // CONFIRMED join-check join — the only thing that pays now. A
