@@ -63,10 +63,25 @@ function delivered(campaign, verifiedList, allCampaigns) {
     const myKeys = campaignAdKeys(campaign);
     if (!myKeys.size) return 0;
 
+    // The order is sold PER STAY ("$X per 100 stays"), so a joiner who has since
+    // LEFT the sponsor server must NOT count toward delivery — otherwise the site's
+    // counter drifts above the real member count and the buyer is short-changed. A
+    // leave is recorded as a clawed-back joinlink (status 'left') on the sponsor
+    // (guildId === sponsorGuildId). Cohort members share an invite ⇒ the same
+    // sponsor, so one left-set covers the whole allocation.
+    const sponsor = String(campaign.sponsorGuildId || '');
+    const left = new Set();
+    if (sponsor) {
+        const jl = loadJSON('joinlinks.json', []);
+        for (const r of (Array.isArray(jl) ? jl : [])) {
+            if (r && r.status === 'left' && String(r.guildId) === sponsor) left.add(String(r.userId));
+        }
+    }
+
     // Simple own-count (used for the fast path and dead campaigns).
     const ownCount = () => {
         const seen = new Set();
-        for (const u of list) if (u && myKeys.has(u.adKey) && Number(u.timestamp) > campaign.paidAt) seen.add(u.id);
+        for (const u of list) if (u && myKeys.has(u.adKey) && Number(u.timestamp) > campaign.paidAt && !left.has(String(u.id))) seen.add(u.id);
         return seen.size;
     };
     // Only running/finished orders share allocation; a cancelled/invalid one
@@ -101,10 +116,11 @@ function delivered(campaign, verifiedList, allCampaigns) {
     const cohortKeys = new Set();
     for (const ks of keySets.values()) for (const k of ks) cohortKeys.add(k);
 
-    // Earliest verification per user (with the invite it came in on).
+    // Earliest verification per user (with the invite it came in on). Users who
+    // left the sponsor are dropped here so they never claim a delivery slot.
     const firstByUser = new Map();
     for (const u of list) {
-        if (!u || !cohortKeys.has(u.adKey)) continue;
+        if (!u || !cohortKeys.has(u.adKey) || left.has(String(u.id))) continue;
         const t = Number(u.timestamp) || 0;
         const cur = firstByUser.get(u.id);
         if (!cur || t < cur.t) firstByUser.set(u.id, { t, k: u.adKey });

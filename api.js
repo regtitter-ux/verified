@@ -3622,7 +3622,10 @@ async function handlePartner(req, res, path, clients, config) {
             autoTransfer: Boolean(s.autoTransfer),
             autoLtc: Boolean(s.autoLtc),
             ltcAddress: s.ltcAddress || null,
-            standingJoins: standing.length,
+            // "Заходов оплачено" must count only joins the partner was actually PAID
+            // for — extra/bonus (viaExtra) joins are noPay (amount 0), so including
+            // them made the count disagree with the credited sum (count × rate ≠ $).
+            standingJoins: standing.filter((r) => (Number(r.amount) || 0) > 0).length,
             standingPaid: sumAmt(standing),
             apiJoins: apiStanding.length,
             apiPaid: sumAmt(apiStanding),
