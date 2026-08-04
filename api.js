@@ -474,6 +474,7 @@ function userStats(userId) {
 // { list, avgVerifySeconds }, list mirroring the input order.
 function enrichCards(clients, records) {
     const now = Date.now();
+    const netAvg = conversion.networkAvg(now);   // computed once; fallback for cards without their own conversion
     const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
     const jArr = (() => { const j = loadJSON('joinlinks.json', []); return Array.isArray(j) ? j : []; })();
     const settingsAll = loadJSON('settings.json', {});   // for the per-card CPC rate (creator's join bid)
@@ -536,10 +537,16 @@ function enrichCards(clients, records) {
         const jcJoinTs = vmatch.filter((u) => u && u.adKey && !u.viaExtra && !u.noCheck).map((u) => Number(u.timestamp) || 0);
         const conv = conversion.fromSamples(jcJoinTs, cards.clicksForKeyMulti(c.guildId, roleIds, c.creatorId), now);
         const joinRate = Number.isFinite(Number((settingsAll[c.creatorId] || {}).joinBid)) ? Number(settingsAll[c.creatorId].joinBid) : 5;
+        // Effective conversion used to price no-check clicks: this card's OWN number
+        // once it exists, else the network average (so a fresh card still pays a sane
+        // rate, not nothing). `source` tells the UI which is in effect.
+        const effConv = conv.conv != null ? conv.conv : netAvg;
+        const convSource = conv.conv != null ? 'card' : (netAvg != null ? 'network' : null);
         const conversionOut = {
             enabled: conversion.enabledFor(c.guildId),
-            conv: conv.conv, joins: conv.joins, clickers: conv.clickers, sample: conversion.SAMPLE,
-            ratePer100Clicks: conversion.ratePer100Clicks(conv.conv, joinRate)
+            conv: effConv, source: convSource, cardConv: conv.conv,
+            joins: conv.joins, clickers: conv.clickers, sample: conversion.SAMPLE,
+            ratePer100Clicks: conversion.ratePer100Clicks(effConv, joinRate)
         };
 
         return {

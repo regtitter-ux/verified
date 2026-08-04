@@ -87,6 +87,35 @@ function ratePer100Clicks(conv, joinRatePer100) {
 }
 const ratePerClick = (conv, joinRatePer100) => +((ratePer100Clicks(conv, joinRatePer100)) / 100).toFixed(6);
 
+// Network-average conversion — the fallback used to PRICE a no-check click on a
+// card that hasn't gathered its own conversion yet, so a fresh card pays a sane,
+// service-wide rate instead of nothing (or an over-generous guess). Global ratio
+// over the last click-retention window: all join-check joins ÷ the summed unique
+// clickers per card. Callers should compute it ONCE per pass (it scans two files).
+// null only when the whole network has no data yet. Once a card's OWN conversion
+// exists, that individual number takes over (see the callers' fallback).
+function networkAvg(nowMs) {
+    const now = Number(nowMs) || Date.now();
+    const winStart = now - CLICK_TTL;
+    const v = loadJSON('verified.json', []);
+    const cl = loadJSON('cardclicks.json', []);
+    let joins = 0;
+    for (const u of (Array.isArray(v) ? v : [])) {
+        if (!u || !u.adKey || u.viaExtra || u.noCheck) continue;
+        if ((Number(u.timestamp) || 0) < winStart) continue;
+        joins++;
+    }
+    const perCard = new Map();   // clickers are per-card, so dedupe within a card then sum
+    for (const e of (Array.isArray(cl) ? cl : [])) {
+        if (!e || e.nc || !e.u || (Number(e.t) || 0) < winStart) continue;
+        let s = perCard.get(e.k); if (!s) perCard.set(e.k, s = new Set());
+        s.add(String(e.u));
+    }
+    let clickers = 0; for (const s of perCard.values()) clickers += s.size;
+    if (joins <= 0 || clickers <= 0) return null;
+    return +Math.min(1, joins / clickers).toFixed(4);
+}
+
 // Live conversion for one card, computed from the stored stats. join-check joins =
 // counted (adKey) real joins, excluding the bonus extra-ad AND no-check virtual
 // joins (marked noCheck). clicks skip no-check (nc) events inside fromSamples.
@@ -105,4 +134,4 @@ function forCard(guildId, roleId, creatorId, nowMs) {
     return fromSamples(joinTs, clicks, nowMs);
 }
 
-module.exports = { SAMPLE, CALIB_RATE, calibRate, enabledFor, noCheckEligible, fromSamples, forCard, ratePer100Clicks, ratePerClick };
+module.exports = { SAMPLE, CALIB_RATE, calibRate, enabledFor, noCheckEligible, fromSamples, forCard, networkAvg, ratePer100Clicks, ratePerClick };

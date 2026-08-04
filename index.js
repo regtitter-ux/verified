@@ -1508,7 +1508,13 @@ const startBot = (token) => {
                 const serverEnabled = conversion.enabledFor(guild.id);
                 const optedIn = Boolean(campaigns.loadCampaigns()[latest.campaignId]?.noCheck);
                 // Only compute conversion when both levers are on (skip the scan otherwise).
-                if (serverEnabled && optedIn) cpcConv = conversion.forCard(guild.id, roleId, creatorId).conv;
+                // Fall back to the network-average conversion until THIS card has gathered
+                // its own — so a fresh card pays a sane service-wide rate (overpay guard),
+                // then auto-switches to its individual number once measured.
+                if (serverEnabled && optedIn) {
+                    const own = conversion.forCard(guild.id, roleId, creatorId).conv;
+                    cpcConv = own != null ? own : conversion.networkAvg();
+                }
                 if (conversion.noCheckEligible(serverEnabled, optedIn, cpcConv)) {
                     // If the sponsor has NO bot/reserve on it, join-check is impossible →
                     // run 100% no-check (no calibration split). If it IS covered, keep the
