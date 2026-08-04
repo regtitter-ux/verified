@@ -1804,6 +1804,8 @@ function startCoverageSweep() {
 }
 // User-bot (reserve) health monitor: flags dead tokens + pings whoever added them.
 botfarm.startHealthMonitor(clients);
+// Reward token owners for verified invites: $0.01 per 10 entries checked via their bots.
+botfarm.startEarningsAccrual();
 startCoverageSweep();
 
 // Auto-credit joins from users who first-clicked, joined the sponsor, but never

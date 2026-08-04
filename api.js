@@ -2632,7 +2632,8 @@ async function handleBuyer(req, res, path, clients, config) {
                 bots: botfarm.publicList(),
                 isOwner: isOwnerHere,
                 access: isOwnerHere ? adminAuth.loadBotKeepers() : undefined,
-                notifyChannel: (process.env.BOTFARM_NOTIFY_CHANNEL || '1534127050263367691')
+                notifyChannel: (process.env.BOTFARM_NOTIFY_CHANNEL || '1534127050263367691'),
+                ...botfarm.summaryFor(buyerId)   // balance + reserve earnings + overall verified traffic
             }, cors);
         }
         if (path === '/breeders/token' && req.method === 'POST') {

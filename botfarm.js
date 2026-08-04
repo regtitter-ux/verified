@@ -8,6 +8,13 @@ const config = require('./config.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const usertoken = require('./usertoken.js');
 const poster = require('./poster.js');
+const ledger = require('./ledger.js');
+const { round2 } = require('./round.js');
+
+// Reward for the token OWNER (whoever added the reserve account): $0.01 for every
+// 10 invites VERIFIED THROUGH their bot(s). Entries only — a leave is checked but
+// pays nothing (not surfaced on the site). Credited to their normal payout balance.
+const PAY_PER_10 = () => { const v = Number(process.env.BOTFARM_PAY_PER_10); return Number.isFinite(v) && v >= 0 ? v : 0.01; };
 
 // Ops channel + role for the "need a self-bot / need to join a server" pings.
 const NOTIFY_CHANNEL = () => (process.env.BOTFARM_NOTIFY_CHANNEL || '1534127050263367691').trim();
@@ -30,6 +37,72 @@ function statsFor(id) {
         if (r.status === 'joined' || r.status === 'settled') stayed++;
     }
     return { joined, stayed };
+}
+
+// ---------- Owner earnings (reserve verification reward) ----------
+// Count VERIFIED ENTRIES per token owner: every credited join stamped with a
+// reserveBotId whose account maps (via usertokenmeta.addedBy) to an owner. Leaves
+// don't reduce it — the entry was still verified. joinlinks grow monotonically
+// (leaves flip status, never delete), so this count only rises.
+function ownerJoinCounts() {
+    const links = loadJSON('joinlinks.json', []);
+    const meta = loadMeta();
+    const counts = {};
+    for (const r of (Array.isArray(links) ? links : [])) {
+        if (!r || !r.reserveBotId) continue;
+        const owner = meta[String(r.reserveBotId)] && meta[String(r.reserveBotId)].addedBy;
+        if (!owner) continue;                 // token not owned by a known account → nobody to pay
+        counts[String(owner)] = (counts[String(owner)] || 0) + 1;
+    }
+    return counts;
+}
+
+// The owner's earned-to-date + how many entries they've verified.
+function earningsFor(ownerId) {
+    const led = loadJSON('reserveearnings.json', {});
+    const e = led[String(ownerId)] || {};
+    const paidCents = Number(e.paidCents) || 0;   // one cent = one paid group of 10
+    return { earnedTotal: round2(paidCents * PAY_PER_10()), verifiedJoins: Number(e.joins) || 0 };
+}
+
+// Idempotent accrual: recompute owed groups (floor(entries/10)) per owner and
+// credit only the NEW ones. `paidCents` is monotonic so pruning/edits never claw
+// back. Safe to run on a timer.
+function accrueReserveEarnings() {
+    const rate = PAY_PER_10();
+    const counts = ownerJoinCounts();
+    const led = loadJSON('reserveearnings.json', {});
+    let dirty = false;
+    for (const [owner, joins] of Object.entries(counts)) {
+        const owed = Math.floor(joins / 10);                 // completed groups of 10 → cents owed
+        const prev = led[owner] || { paidCents: 0, joins: 0 };
+        const paid = Number(prev.paidCents) || 0;
+        if (owed > paid && rate > 0) {
+            const amount = round2((owed - paid) * rate);
+            if (amount > 0) ledger.credit(owner, amount, { reason: 'reserve_verify', srcId: `reserve:${owner}:${owed}` });
+        }
+        const nextPaid = Math.max(paid, owed);
+        if (prev.joins !== joins || prev.paidCents !== nextPaid) { led[owner] = { joins, paidCents: nextPaid }; dirty = true; }
+    }
+    if (dirty) saveJSON('reserveearnings.json', led);
+    return led;
+}
+
+function startEarningsAccrual() {
+    const every = Number(process.env.BOTFARM_ACCRUE_MS) || 5 * 60 * 1000;
+    setInterval(() => { try { accrueReserveEarnings(); } catch (e) { console.error('[BOTFARM] accrue error:', e && e.message); } }, every);
+    setTimeout(() => { try { accrueReserveEarnings(); } catch { /* ignore */ } }, 45 * 1000);
+    console.log(`[BOTFARM] reserve-verify earnings accrual every ${Math.round(every / 60000)}m`);
+}
+
+// Page summary for a viewer: their payout balance + reserve earnings, plus the
+// OVERALL verified traffic across all configured bots.
+function summaryFor(ownerId) {
+    let totalJoined = 0, totalStayed = 0;
+    for (const b of publicList()) { totalJoined += b.joined || 0; totalStayed += b.stayed || 0; }
+    const bal = Number(loadJSON('settings.json', {})[String(ownerId)] && loadJSON('settings.json', {})[String(ownerId)].balance) || 0;
+    const e = earningsFor(ownerId);
+    return { balance: round2(bal), earnedTotal: e.earnedTotal, verifiedJoins: e.verifiedJoins, totalJoined, totalStayed, payPer10: PAY_PER_10() };
 }
 
 // Card view for the UI — one entry per configured token, NEVER exposing the token.
@@ -165,6 +238,7 @@ async function deleteNoBotNotif(clients, channelId, msgId) {
 }
 
 module.exports = {
-    publicList, addToken, removeToken, statsFor,
+    publicList, addToken, removeToken, statsFor, summaryFor, earningsFor,
+    accrueReserveEarnings, startEarningsAccrual,
     startHealthMonitor, checkHealth, notifyBotLost, notifyNoBotOrder, deleteNoBotNotif,
 };
