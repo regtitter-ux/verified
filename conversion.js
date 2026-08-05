@@ -37,6 +37,14 @@ function noCheckEligible(serverEnabled, campaignOptedIn, conv) {
     return Boolean(serverEnabled) && Boolean(campaignOptedIn) && conv != null;
 }
 
+// A hard reset cutoff (siteconfig.convResetAt): conversion ignores all join-check
+// joins and clicks recorded BEFORE this moment. Set from the calibration tab to wipe
+// stale/polluted stats and start measuring cleanly. 0 = never reset.
+function resetAt() {
+    const cfg = loadJSON('siteconfig.json', {});
+    return Number(cfg && cfg.convResetAt) || 0;
+}
+
 // Owner toggle: is the CPC-calibrated mode on for this partner server (guild)?
 function enabledFor(guildId) {
     const cfg = loadJSON('siteconfig.json', {});
@@ -55,12 +63,13 @@ function enabledFor(guildId) {
 //   clickEvents — [{ u, t }] click records for this card
 // Returns { conv, joins, clickers } — conv is null until there's at least one join
 // and one clicker (caller falls back to the normal per-join flow / network average).
-function fromSamples(joinTs, clickEvents, nowMs) {
+function fromSamples(joinTs, clickEvents, nowMs, cutAt) {
     const now = Number(nowMs) || Date.now();
-    const joins = (Array.isArray(joinTs) ? joinTs : []).map((t) => Number(t) || 0).filter((t) => t > 0).sort((a, b) => b - a);
+    const cut = Number(cutAt) || 0;   // ignore everything before the reset cutoff
+    const joins = (Array.isArray(joinTs) ? joinTs : []).map((t) => Number(t) || 0).filter((t) => t > 0 && t >= cut).sort((a, b) => b - a);
     if (!joins.length) return { conv: null, joins: 0, clickers: 0 };
     const lastN = joins.slice(0, SAMPLE);
-    const windowStart = Math.max(lastN[lastN.length - 1], now - CLICK_TTL);
+    const windowStart = Math.max(lastN[lastN.length - 1], now - CLICK_TTL, cut);
     const joinsInWin = lastN.filter((t) => t >= windowStart).length;
     const clickers = new Set();
     for (const c of (Array.isArray(clickEvents) ? clickEvents : [])) {
@@ -90,27 +99,33 @@ function ratePer100Clicks(conv, joinRatePer100) {
 }
 const ratePerClick = (conv, joinRatePer100) => +((ratePer100Clicks(conv, joinRatePer100)) / 100).toFixed(6);
 
-// Network-average conversion — the fallback used to PRICE a no-check click on a
-// card that hasn't gathered its own conversion yet, so a fresh card pays a sane,
-// service-wide rate instead of nothing (or an over-generous guess). Global ratio
-// over the last click-retention window: all join-check joins ÷ the summed unique
-// clickers per card. Callers should compute it ONCE per pass (it scans two files).
-// null only when the whole network has no data yet. Once a card's OWN conversion
-// exists, that individual number takes over (see the callers' fallback).
+// Network-average conversion — the fallback used to PRICE clicks on a card that
+// hasn't gathered its own conversion yet, so it still pays a sane, data-backed rate.
+// Averaged ONLY over CALIBRATION-ENABLED servers (the ones the owner trusts/measures)
+// — all their join-check joins ÷ the summed unique clickers per card, honoring the
+// reset cutoff. Callers compute it ONCE per pass (it scans two files). null when
+// those servers have no data yet. Once a card's OWN conversion exists, that takes over.
 function networkAvg(nowMs) {
     const now = Number(nowMs) || Date.now();
-    const winStart = now - CLICK_TTL;
+    const cfg = loadJSON('siteconfig.json', {});
+    const cal = (cfg && typeof cfg.cpcCalibrated === 'object' && !Array.isArray(cfg.cpcCalibrated)) ? cfg.cpcCalibrated : {};
+    const enabled = new Set(Object.keys(cal).filter((g) => cal[g]));
+    if (!enabled.size) return null;
+    const cut = Number(cfg.convResetAt) || 0;
+    const winStart = Math.max(now - CLICK_TTL, cut);
     const v = loadJSON('verified.json', []);
     const cl = loadJSON('cardclicks.json', []);
     let joins = 0;
     for (const u of (Array.isArray(v) ? v : [])) {
         if (!u || !u.adKey || u.viaExtra || u.noCheck) continue;
+        if (!enabled.has(String(u.guildId))) continue;
         if ((Number(u.timestamp) || 0) < winStart) continue;
         joins++;
     }
     const perCard = new Map();   // clickers are per-card, so dedupe within a card then sum
     for (const e of (Array.isArray(cl) ? cl : [])) {
         if (!e || e.nc || e.na || !e.u || (Number(e.t) || 0) < winStart) continue;
+        if (!enabled.has(String(e.k || '').split(':')[0])) continue;
         let s = perCard.get(e.k); if (!s) perCard.set(e.k, s = new Set());
         s.add(String(e.u));
     }
@@ -134,7 +149,7 @@ function forCard(guildId, roleId, creatorId, nowMs) {
         joinTs.push(Number(u.timestamp) || 0);
     }
     const clicks = (Array.isArray(cl) ? cl : []).filter((e) => e && e.k === ck).map((e) => ({ u: e.u, t: e.t, nc: e.nc, na: e.na }));
-    return fromSamples(joinTs, clicks, nowMs);
+    return fromSamples(joinTs, clicks, nowMs, resetAt());
 }
 
-module.exports = { SAMPLE, CALIB_RATE, calibRate, enabledFor, noCheckEligible, fromSamples, forCard, networkAvg, ratePer100Clicks, ratePerClick };
+module.exports = { SAMPLE, CALIB_RATE, calibRate, enabledFor, resetAt, noCheckEligible, fromSamples, forCard, networkAvg, ratePer100Clicks, ratePerClick };

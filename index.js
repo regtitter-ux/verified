@@ -1384,7 +1384,10 @@ const startBot = (token) => {
                     //    smart-distribution order stands unchanged.
                     const pctl = settings[creatorId] || {};
                     const hiddenHere = pctl.hiddenByGuild?.[guild.id];
-                    const isHidden = (id) => Array.isArray(hiddenHere) && hiddenHere.includes(id);
+                    // A calibration ad can't be hidden by the partner — it must run to
+                    // measure this server's conversion.
+                    const calibId = (ordered.find((c) => c.calibration) || {}).id || null;
+                    const isHidden = (id) => id !== calibId && Array.isArray(hiddenHere) && hiddenHere.includes(id);
                     if (Array.isArray(hiddenHere) && hiddenHere.length && ordered.length && ordered.every((c) => isHidden(c.id))) allHiddenHere = true; // partner hid every available ad here → no MAIN ad (extra may still show one)
                     // Priority pin: the partner's own per-server pin wins; where the
                     // partner set none, a service admin/manager's GLOBAL pin (set from
@@ -1395,6 +1398,12 @@ const startBot = (token) => {
                     if (prioId) {
                         const pi = ordered.findIndex((c) => c.id === prioId);
                         if (pi > 0) { const [pc] = ordered.splice(pi, 1); ordered.unshift(pc); }
+                    }
+                    // Calibration ad OUTRANKS every pin — it jumps to the absolute front
+                    // so the measurement runs before any other ad on this server.
+                    if (calibId) {
+                        const ci = ordered.findIndex((c) => c.id === calibId);
+                        if (ci > 0) { const [cc] = ordered.splice(ci, 1); ordered.unshift(cc); }
                     }
                     // One pass collects the showable candidates (sponsor resolved from
                     // the record, user not a known member) in queue order, so we pick
@@ -1715,10 +1724,16 @@ const startBot = (token) => {
                 // the $0.10 default.
                 const camp = pending?.campaignId ? campaigns.loadCampaigns()[pending.campaignId] : null;
                 const econ = managers.joinEconomics(camp, sharesMod.REVENUE_PER_JOIN);
+                // Calibration campaign: the PARTNER is paid normally (creditJoin below),
+                // but there's no buyer — so book ZERO revenue and SKIP the profit split
+                // (the service absorbs the cost). Prevents phantom revenue/profit from a
+                // service-run measurement ad.
+                const isCalib = Boolean(camp && camp.calibration);
+                const revenue = isCalib ? 0 : econ.revenue;
                 // Confirmed member of the sponsor server: pay the join-check rate,
                 // reversible on leave (role + payout), see joincheck.js.
                 const credit = creditJoin(creatorId, sponsor.guildId, user.id, guild.id, roleId, channelId,
-                    { revenue: econ.revenue, managerId: econ.managerId, campaignId: pending?.campaignId,
+                    { revenue, managerId: econ.managerId, campaignId: pending?.campaignId,
                       // Attribute the join to the reserve account that verified it (per-bot stats),
                       // when a reserve user-token — not a fleet bot — did the membership check.
                       // A no-check virtual join had NO reserve check, so it earns no reserve attribution.
@@ -1734,8 +1749,8 @@ const startBot = (token) => {
                     await settleCreditedJoin(clients, {
                         creatorId, joinerId: user.id, cardGuildId: guild.id, channelId, roleId,
                         sponsorGuildId: sponsor.guildId, amount: credit.amount, linkId: credit.linkId,
-                        referrerId: credit.referrerId, investorOwned: investorOwnedJoin,
-                        revenue: econ.revenue, reason: 'Join verified — member joined the sponsor server',
+                        referrerId: credit.referrerId, investorOwned: investorOwnedJoin || isCalib,
+                        revenue, reason: isCalib ? 'Calibration join — conversion measurement' : 'Join verified — member joined the sponsor server',
                     });
                 }
             }

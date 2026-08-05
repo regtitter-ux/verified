@@ -475,6 +475,7 @@ function userStats(userId) {
 function enrichCards(clients, records) {
     const now = Date.now();
     const netAvg = conversion.networkAvg(now);   // computed once; fallback for cards without their own conversion
+    const convCut = conversion.resetAt();        // ignore join-check stats before the reset cutoff
     const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
     const jArr = (() => { const j = loadJSON('joinlinks.json', []); return Array.isArray(j) ? j : []; })();
     const settingsAll = loadJSON('settings.json', {});   // for the per-card CPC rate (creator's join bid)
@@ -535,7 +536,7 @@ function enrichCards(clients, records) {
         // bonus extra-ad) and this card's clicks — no extra scans. The pay-per-click
         // rate mirrors the creator's own join rate ($/100) at that conversion.
         const jcJoinTs = vmatch.filter((u) => u && u.adKey && !u.viaExtra && !u.noCheck).map((u) => Number(u.timestamp) || 0);
-        const conv = conversion.fromSamples(jcJoinTs, cards.clicksForKeyMulti(c.guildId, roleIds, c.creatorId), now);
+        const conv = conversion.fromSamples(jcJoinTs, cards.clicksForKeyMulti(c.guildId, roleIds, c.creatorId), now, convCut);
         const joinRate = Number.isFinite(Number((settingsAll[c.creatorId] || {}).joinBid)) ? Number(settingsAll[c.creatorId].joinBid) : 5;
         // Effective conversion used to price no-check clicks: this card's OWN number
         // once it exists, else the network average (so a fresh card still pays a sane
@@ -2371,6 +2372,15 @@ async function handleAdmin(req, res, path, clients, config) {
                 ratePerClick: conversion.ratePerClick(cv.conv, joinRate), link: c.link
             });
         }
+        // Active calibration campaigns, keyed by the server they're calibrating.
+        const allCamps = campaigns.loadCampaigns();
+        const calibByGuild = new Map();
+        for (const cc of Object.values(allCamps)) {
+            if (!cc || !cc.calibration || cc.status !== 'active') continue;
+            const goal = Number(cc.purchased) || 100;
+            const del = Math.min(campaigns.delivered(cc, vArr, allCamps), goal);
+            calibByGuild.set(String(cc.calibrationGuild || ''), { id: cc.id, delivered: del, goal });
+        }
         let sConvN = 0, sConvD = 0, totNcAll = 0, totNcWk = 0, totJc = 0, totPaidCents = 0;
         const servers = gids.map((g) => {
             const e = byGuild.get(g) || { guildName: guildNameOf(clients, g), guildIcon: guildIconOf(clients, g), memberCount: guildMembersOf(clients, g), cards: [] };
@@ -2387,11 +2397,14 @@ async function handleAdmin(req, res, path, clients, config) {
             const paidUsd = +(nj.all * avgJoinRate / 100).toFixed(2);   // ≈ partner $ for no-check virtual joins
             const ratePer100 = rateDen > 0 ? +(rateNum / rateDen).toFixed(4) : conversion.ratePer100Clicks(conv, avgJoinRate);
             sConvN += cn; sConvD += cd; totNcAll += nj.all; totNcWk += ncClicksWk; totJc += jc; totPaidCents += Math.round(paidUsd * 100);
+            const cal = calibByGuild.get(g);
             return {
                 guildId: g, guildName: e.guildName, guildIcon: e.guildIcon, memberCount: e.memberCount,
                 conv, joinCheckJoins: jc, noCheckJoinsAll: nj.all, noCheckJoinsWeek: nj.week,
                 noCheckClicksWeek: ncClicksWk, ratePer100Clicks: ratePer100,
-                ratePerClick: +((ratePer100 || 0) / 100).toFixed(6), estPaidUsd: paidUsd, cards: e.cards
+                ratePerClick: +((ratePer100 || 0) / 100).toFixed(6), estPaidUsd: paidUsd,
+                calibrationActive: Boolean(cal), calibrationDelivered: cal ? cal.delivered : 0, calibrationGoal: cal ? cal.goal : 100,
+                cards: e.cards
             };
         });
         servers.sort((a, b) => (b.noCheckJoinsAll - a.noCheckJoinsAll) || ((b.conv || 0) - (a.conv || 0)));
@@ -2400,9 +2413,88 @@ async function handleAdmin(req, res, path, clients, config) {
             avgConv: sConvD > 0 ? +(sConvN / sConvD).toFixed(4) : null,
             totalNoCheckJoins: totNcAll, totalNoCheckClicksWeek: totNcWk,
             totalJoinCheckJoins: totJc, estPaidUsd: +(totPaidCents / 100).toFixed(2),
-            calibRate: conversion.calibRate(), sample: conversion.SAMPLE
+            calibRate: conversion.calibRate(), sample: conversion.SAMPLE,
+            calibrationInvite: cfg.calibrationInvite || '',
+            calibrationConfigured: Boolean(cfg.calibrationSponsorGuildId),
+            convResetAt: Number(cfg.convResetAt) || 0
         };
         return send(res, 200, { ok: true, summary, servers }, cors);
+    }
+
+    // Owner-only: RESET all conversion stats — set a cutoff so every conversion
+    // computation ignores join-check joins/clicks recorded before now. Non-destructive
+    // (money records stay); conversion just starts measuring cleanly from here.
+    if (path === '/admin/calibration/reset' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const cfg = loadJSON('siteconfig.json', {});
+        cfg.convResetAt = Date.now();
+        saveJSON('siteconfig.json', cfg);
+        auditDo('calibration.reset', String(cfg.convResetAt));
+        return send(res, 200, { ok: true, convResetAt: cfg.convResetAt }, cors);
+    }
+
+    // Owner-only: set the sponsor server used for calibration ads (its invite). The
+    // calibration "Калибровка" button drives real join-check joins to THIS server to
+    // measure a partner card's conversion. Empty invite clears it.
+    if (path === '/admin/calibration/invite' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const raw = String(body?.invite || '').trim();
+        const cfg = loadJSON('siteconfig.json', {});
+        if (!raw) { cfg.calibrationInvite = ''; cfg.calibrationSponsorGuildId = ''; saveJSON('siteconfig.json', cfg); return send(res, 200, { ok: true, invite: '' }, cors); }
+        const m = raw.match(/^(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/([a-z0-9-]{2,32})$/i) || raw.match(/^([a-z0-9-]{2,32})$/i);
+        if (!m) return send(res, 400, { error: 'bad-invite' }, cors);
+        const inv = await proxy.getInvite(m[1]);
+        const gid = (inv && inv.guild && inv.guild.id) || null;
+        if (!gid) return send(res, 400, { error: 'bad-invite' }, cors);
+        cfg.calibrationInvite = `https://discord.gg/${m[1]}`;
+        cfg.calibrationSponsorGuildId = String(gid);
+        saveJSON('siteconfig.json', cfg);
+        auditDo('calibration.invite', `${cfg.calibrationInvite} → ${gid}`);
+        return send(res, 200, { ok: true, invite: cfg.calibrationInvite, sponsorGuildId: gid, serverName: inv.guild?.name || null }, cors);
+    }
+
+    // Owner-only: START/STOP a calibration ad for one server (toggle). It runs a
+    // top-priority, un-hideable join-check ad (the configured calibration sponsor)
+    // ONLY on that server, capped at 100 joins, paying the partner like a normal
+    // join. Conversion updates live; stop early anytime. Clicking again stops it.
+    if (path === '/admin/calibration/run' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = body?.gid ? String(body.gid) : '';
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        const cfg = loadJSON('siteconfig.json', {});
+        const camps = campaigns.loadCampaigns();
+        // Already running for this server → STOP it (mark complete, terminal).
+        const existing = Object.values(camps).find((c) => c && c.calibration && c.status === 'active' && String(c.calibrationGuild) === gid);
+        if (existing) {
+            existing.status = 'complete'; existing.completedAt = Date.now(); existing.fulfilled = true; existing.calibrationStopped = true;
+            campaigns.saveCampaigns(camps);
+            auditDo('calibration.stop', `${gid} (${existing.id})`);
+            return send(res, 200, { ok: true, running: false, gid }, cors);
+        }
+        // START: requires a configured, join-checkable calibration sponsor.
+        const sponsor = String(cfg.calibrationSponsorGuildId || '');
+        if (!sponsor || !cfg.calibrationInvite) return send(res, 400, { error: 'no-calibration-invite' }, cors);
+        if (String(sponsor) === gid) return send(res, 400, { error: 'sponsor-is-target' }, cors);
+        const covered = await coveredGuildIds(clients);
+        if (!covered.has(sponsor)) return send(res, 400, { error: 'sponsor-no-bot' }, cors);
+        const id = campaigns.newId();
+        const now = Date.now();
+        camps[id] = {
+            id, buyerId: adminAuth.OWNER_ID || String(session.userId || ''),
+            invite: cfg.calibrationInvite, sponsorGuildId: sponsor, serverName: 'Calibration',
+            purchased: 100, price: 0, pricePer100: 0, managerId: null, commissionRate: 0,
+            status: 'active', paidFromWallet: false,
+            calibration: true, calibrationGuild: gid,
+            disabledGuilds: [], paused: false,
+            createdAt: now, paidAt: now, completedAt: 0
+        };
+        campaigns.saveCampaigns(camps);
+        auditDo('calibration.start', `${gid} (${id}) sponsor=${sponsor}`);
+        return send(res, 200, { ok: true, running: true, gid, campaignId: id }, cors);
     }
 
     // Owner-only: tune the global calibration share — the fraction of shows kept

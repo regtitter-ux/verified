@@ -30,6 +30,16 @@ test('a no-check campaign is eligible WITHOUT sponsor coverage, but only on a ca
     assert.ok(!onPlain.includes('NC'), 'no-check needs a calibrated display server (elsewhere it can\'t deliver)');
 });
 
+test('a calibration campaign is eligible ONLY on the server it calibrates, flagged calibration', () => {
+    const CAL = { id: 'CAL', invite: 'https://discord.gg/cal', sponsorGuildId: 'CALSPON', status: 'active', purchased: 100, paidAt: T1, calibration: true, calibrationGuild: 'TARGET' };
+    seed({ 'campaigns.json': { CAL }, 'verified.json': [] });
+    const covered = new Set(['CALSPON']);   // the calibration sponsor is join-checkable
+    const onTarget = campaigns.eligibleForGuild('TARGET', [], covered);
+    assert.ok(onTarget.some((e) => e.id === 'CAL' && e.calibration === true), 'shows on the target server, flagged');
+    const onOther = campaigns.eligibleForGuild('OTHER', [], covered).map((e) => e.id);
+    assert.ok(!onOther.includes('CAL'), 'never shows on any other server');
+});
+
 test('two active campaigns sharing an invite never double-count a join (FIFO allocation)', () => {
     const camps = {
         A: { id: 'A', invite: INVITE, sponsorGuildId: 'S', purchased: 2, status: 'active', paidAt: T1, adKeys: [] },

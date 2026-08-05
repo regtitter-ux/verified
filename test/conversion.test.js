@@ -65,31 +65,46 @@ test('noCheckEligible needs BOTH levers on AND a conversion', () => {
     assert.equal(conv.noCheckEligible(true, true, 0), true, 'a real 0% conversion is still a measured value');
 });
 
-test('networkAvg = all join-check joins ÷ summed per-card unique clickers (fresh-card fallback)', () => {
+test('networkAvg = join-check joins ÷ clickers, ONLY over calibration-enabled servers', () => {
     reset();
     seed({
+        'siteconfig.json': { cpcCalibrated: { g1: true, g2: true } },   // gX is NOT calibration-enabled
         'verified.json': [
-            { id: 'a', adKey: 'K', timestamp: NOW - 1000 },                  // join-check → counts
-            { id: 'b', adKey: 'K', timestamp: NOW - 2000 },                  // join-check → counts
-            { id: 'c', adKey: 'K', timestamp: NOW - 3000, noCheck: true },   // virtual → excluded
-            { id: 'd', adKey: 'K', timestamp: NOW - 4000, viaExtra: true }   // bonus ad → excluded
+            { id: 'a', guildId: 'g1', adKey: 'K', timestamp: NOW - 1000 },                 // counts
+            { id: 'b', guildId: 'g1', adKey: 'K', timestamp: NOW - 2000 },                 // counts
+            { id: 'c', guildId: 'g1', adKey: 'K', timestamp: NOW - 3000, noCheck: true },  // virtual → excluded
+            { id: 'd', guildId: 'g2', adKey: 'K', timestamp: NOW - 4000, viaExtra: true }, // bonus ad → excluded
+            { id: 'z', guildId: 'gX', adKey: 'K', timestamp: NOW - 500 }                   // server not calibrated → excluded
         ],
         'cardclicks.json': [
             { k: 'g1:r:cr', u: 'a', t: NOW - 100 },
             { k: 'g1:r:cr', u: 'b', t: NOW - 200 },
             { k: 'g1:r:cr', u: 'a', t: NOW - 300 },              // dup clicker same card → 1
-            { k: 'g2:r:cr', u: 'x', t: NOW - 400 },              // other card → +1
-            { k: 'g2:r:cr', u: 'y', t: NOW - 500, nc: 1 }        // no-check click → excluded
+            { k: 'g2:r:cr', u: 'x', t: NOW - 400 },              // other calibrated card → +1
+            { k: 'g2:r:cr', u: 'y', t: NOW - 500, nc: 1 },       // no-check click → excluded
+            { k: 'gX:r:cr', u: 'q', t: NOW - 100 }               // non-calibrated server → excluded
         ]
     });
-    // joins = 2 (a,b); clickers = g1{a,b}=2 + g2{x}=1 = 3 → 0.6667
+    // joins = a,b (g1) = 2; clickers = g1{a,b}=2 + g2{x}=1 = 3 → 0.6667
     assert.ok(near(conv.networkAvg(NOW), 2 / 3), `2/3, got ${conv.networkAvg(NOW)}`);
 });
 
-test('networkAvg is null when the network has no data yet', () => {
+test('networkAvg is null with no calibration servers, or when they have no data', () => {
     reset();
     seed({ 'verified.json': [], 'cardclicks.json': [] });
-    assert.equal(conv.networkAvg(NOW), null);
+    assert.equal(conv.networkAvg(NOW), null, 'no calibration-enabled servers → null');
+    reset();
+    seed({ 'siteconfig.json': { cpcCalibrated: { g1: true } }, 'verified.json': [], 'cardclicks.json': [] });
+    assert.equal(conv.networkAvg(NOW), null, 'enabled but empty → null');
+});
+
+test('conversion reset cutoff drops all join-check data before it', () => {
+    const joins = [NOW - 1000, NOW - 2000, NOW - 10 * 86400000];         // one join is 10 days old
+    const clicks = [{ u: 'a', t: NOW - 900 }, { u: 'b', t: NOW - 1900 }, { u: 'old', t: NOW - 10 * 86400000 }];
+    const cut = NOW - 86400000;                                          // reset 1 day ago
+    const r = conv.fromSamples(joins, clicks, NOW, cut);
+    assert.equal(r.joins, 2, 'only joins after the cutoff count');
+    assert.equal(r.clickers, 2, 'only clicks after the cutoff count (old dropped)');
 });
 
 test('ratePer100Clicks = joinRate × conversion (matches per-join earnings)', () => {

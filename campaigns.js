@@ -256,6 +256,9 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds, botId) {
     const eligible = [];
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active' || c.paused || c.autoPaused) continue;
+        // A calibration ad is a targeted measurement — it shows ONLY on the one server
+        // it's calibrating (never spills into the wider network).
+        if (c.calibration && String(c.calibrationGuild || '') !== String(displayGuildId)) continue;
         if (c.sponsorGuildId === displayGuildId) continue;                 // never on itself
         if (c.onlySfw && displayIsNsfw) continue;                          // Only-SFW campaign never surfaces on an NSFW server
         if (Array.isArray(c.disabledGuilds) && c.disabledGuilds.includes(displayGuildId)) continue;
@@ -272,7 +275,7 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds, botId) {
         const remaining = c.purchased - del;
         if (remaining <= 0) continue;                                      // already done
         if (linkProgress(c, del).reached) continue;                        // per-link cap hit → stopped until resumed
-        eligible.push({ id: c.id, invite: c.invite, sponsorGuildId: c.sponsorGuildId, remaining, paidAt: Number(c.paidAt) || Number(c.createdAt) || 0 });
+        eligible.push({ id: c.id, invite: c.invite, sponsorGuildId: c.sponsorGuildId, remaining, paidAt: Number(c.paidAt) || Number(c.createdAt) || 0, calibration: Boolean(c.calibration) });
     }
     return eligible;
 }
