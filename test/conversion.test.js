@@ -107,6 +107,30 @@ test('conversion reset cutoff drops all join-check data before it', () => {
     assert.equal(r.clickers, 2, 'only clicks after the cutoff count (old dropped)');
 });
 
+test('forCard measures NET STAYS — a user who left the sponsor is not counted', () => {
+    reset();
+    seed({
+        'verified.json': [
+            { id: 'u1', guildId: 'G', roleId: 'R', creatorId: 'C', adKey: 'K', timestamp: NOW - 1000 },
+            { id: 'u2', guildId: 'G', roleId: 'R', creatorId: 'C', adKey: 'K', timestamp: NOW - 2000 }, // left (settled → row kept)
+            { id: 'u3', guildId: 'G', roleId: 'R', creatorId: 'C', adKey: 'K', timestamp: NOW - 3000 }
+        ],
+        'cardclicks.json': [
+            { k: 'G:R:C', u: 'u1', t: NOW - 900 },
+            { k: 'G:R:C', u: 'u2', t: NOW - 1900 },
+            { k: 'G:R:C', u: 'u3', t: NOW - 2900 },
+            { k: 'G:R:C', u: 'u4', t: NOW - 500 }   // clicked, never joined
+        ],
+        'joinlinks.json': [
+            { userId: 'u2', cardGuildId: 'G', roleId: 'R', creatorId: 'C', guildId: 'SP', status: 'left' }
+        ]
+    });
+    const r = conv.forCard('G', 'R', 'C', NOW);
+    assert.equal(r.joins, 2, 'u2 left → only u1,u3 count as stays');
+    assert.equal(r.clickers, 4, 'all four clickers still count in the denominator');
+    assert.ok(near(r.conv, 0.5), `2 stays / 4 clickers = 0.50, got ${r.conv}`);
+});
+
 test('ratePer100Clicks = joinRate × conversion (matches per-join earnings)', () => {
     assert.ok(near(conv.ratePer100Clicks(0.18, 5), 0.90), '$5/100 joins × 0.18 = $0.90/100 clicks');
     assert.equal(conv.ratePer100Clicks(null, 5), 0, 'no rate without a conversion');

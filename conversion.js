@@ -115,11 +115,19 @@ function networkAvg(nowMs) {
     const winStart = Math.max(now - CLICK_TTL, cut);
     const v = loadJSON('verified.json', []);
     const cl = loadJSON('cardclicks.json', []);
+    const jl = loadJSON('joinlinks.json', []);
+    // Net stays only — drop users who left the sponsor (a 'left' joinlink), keyed by
+    // user + card + role, so a leave counts against the network average too.
+    const left = new Set();
+    for (const r of (Array.isArray(jl) ? jl : [])) {
+        if (r && r.status === 'left') left.add(`${r.userId}|${r.cardGuildId}|${r.roleId || ''}`);
+    }
     let joins = 0;
     for (const u of (Array.isArray(v) ? v : [])) {
         if (!u || !u.adKey || u.viaExtra || u.noCheck) continue;
         if (!enabled.has(String(u.guildId))) continue;
         if ((Number(u.timestamp) || 0) < winStart) continue;
+        if (left.has(`${u.id}|${u.guildId}|${u.roleId || ''}`)) continue;
         joins++;
     }
     const perCard = new Map();   // clickers are per-card, so dedupe within a card then sum
@@ -140,12 +148,22 @@ function networkAvg(nowMs) {
 function forCard(guildId, roleId, creatorId, nowMs) {
     const v = loadJSON('verified.json', []);
     const cl = loadJSON('cardclicks.json', []);
+    const jl = loadJSON('joinlinks.json', []);
+    // Conversion is NET STAYS, not gross joins (same as delivered()): a user who
+    // joined via this card and then LEFT the sponsor is not a conversion. A leave is
+    // a 'left' joinlink for this card — excluding them covers settled leavers and any
+    // case the verified-row removal hasn't caught, so leaves always count against it.
+    const left = new Set();
+    for (const r of (Array.isArray(jl) ? jl : [])) {
+        if (r && r.status === 'left' && String(r.cardGuildId) === String(guildId) && r.creatorId === creatorId && (r.roleId || null) === (roleId || null)) left.add(String(r.userId));
+    }
     const ck = `${guildId || ''}:${roleId || ''}:${creatorId || ''}`;
     const joinTs = [];
     for (const u of (Array.isArray(v) ? v : [])) {
         if (!u || u.creatorId !== creatorId || String(u.guildId) !== String(guildId)) continue;
         if ((u.roleId || null) !== (roleId || null)) continue;
         if (!u.adKey || u.viaExtra || u.noCheck) continue;
+        if (left.has(String(u.id))) continue;   // left the sponsor → not a stay
         joinTs.push(Number(u.timestamp) || 0);
     }
     const clicks = (Array.isArray(cl) ? cl : []).filter((e) => e && e.k === ck).map((e) => ({ u: e.u, t: e.t, nc: e.nc, na: e.na }));

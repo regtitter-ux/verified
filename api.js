@@ -535,7 +535,10 @@ function enrichCards(clients, records) {
         // clickers. Uses the join-check joins already matched (adKey, excluding the
         // bonus extra-ad) and this card's clicks — no extra scans. The pay-per-click
         // rate mirrors the creator's own join rate ($/100) at that conversion.
-        const jcJoinTs = vmatch.filter((u) => u && u.adKey && !u.viaExtra && !u.noCheck).map((u) => Number(u.timestamp) || 0);
+        // NET STAYS for conversion: drop users who left the sponsor (their 'left'
+        // joinlinks are in leftMatch) so leaves count against the conversion, not just joins.
+        const leftUsers = new Set(leftMatch.map((r) => String(r.userId)));
+        const jcJoinTs = vmatch.filter((u) => u && u.adKey && !u.viaExtra && !u.noCheck && !leftUsers.has(String(u.id))).map((u) => Number(u.timestamp) || 0);
         const conv = conversion.fromSamples(jcJoinTs, cards.clicksForKeyMulti(c.guildId, roleIds, c.creatorId), now, convCut);
         const joinRate = Number.isFinite(Number((settingsAll[c.creatorId] || {}).joinBid)) ? Number(settingsAll[c.creatorId].joinBid) : 5;
         // Effective conversion used to price no-check clicks: this card's OWN number
