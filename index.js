@@ -259,8 +259,9 @@ const startBot = (token) => {
     client.on(Events.GuildMemberAdd, (member) => {
         if (forcerole.matches(member.guild.id, member.id)) forcerole.ensure(clients, member).catch(() => {});
         // Calibration: a real member joined a tracked sponsor → attribute it to the
-        // calibration click that led to it, for the accurate no-check conversion.
-        try { calibtrack.onJoin(member.id, member.guild.id); } catch { /* never break */ }
+        // calibration click that led to it (accurate no-check conversion) AND pay the
+        // partner for this real join. The leave clawback happens via GuildMemberRemove.
+        handleCalibJoin(member.guild.id, member.id).catch((e) => console.error('[CALIB] join error:', e && e.message));
     });
 
     const pendingVerification = new Map();
@@ -1610,8 +1611,10 @@ const startBot = (token) => {
         // tracking who ACTUALLY joins the sponsor (calibtrack + gateway member events).
         const calibMode = Boolean(pending?.calibration && pending?.adShown && pending?.sponsorGuildId && roleId);
         if (calibMode) {
-            sponsor = { guildId: pending.sponsorGuildId, bot: null };   // memberConfirmed stays false → no payout
-            try { calibtrack.recordClick(user.id, guild.id, pending.sponsorGuildId); } catch { /* never block verification */ }
+            sponsor = { guildId: pending.sponsorGuildId, bot: null };   // no payout at click time
+            // Record the click WITH the pay meta — the partner is paid later, when our
+            // bot actually observes this user joining the sponsor (handleCalibJoin).
+            try { calibtrack.recordClick(user.id, guild.id, pending.sponsorGuildId, { creatorId, roleId, channelId: message.channelId, campaignId: pending.campaignId }); } catch { /* never block verification */ }
         }
         // NO-CHECK (CPC) branch: verify per click without requiring a join. Credit a
         // VIRTUAL join with probability = the card's measured conversion, so the
@@ -1833,6 +1836,49 @@ config.tokens.forEach(startBot);
 
 // Partner REST API (same balance/verify system). Shares the live `clients` array.
 startApiServer(clients, config);
+
+// Calibration: pay the partner for a REAL member-tracked join the moment our bot
+// sees the user join the test sponsor (attribution + conversion live in calibtrack).
+// Service-funded — revenue 0, no shareholder split. The leave clawback is automatic:
+// creditJoin writes a normal joinlink, so GuildMemberRemove → handleMemberLeave
+// reverses the payout exactly like any other join. creditJoin's own guard dedups.
+async function handleCalibJoin(sponsorGuildId, userId) {
+    const attr = calibtrack.onJoin(userId, sponsorGuildId);
+    if (!attr || !attr.cr || !attr.r) return;                 // no calibration click → not ours
+    const credit = creditJoin(attr.cr, sponsorGuildId, userId, attr.g, attr.r, attr.ch, { campaignId: attr.cid, revenue: 0, calib: true });
+    if (credit.duplicate) return;                              // already credited for this (user, sponsor)
+    await settleCreditedJoin(clients, {
+        creatorId: attr.cr, joinerId: userId, cardGuildId: attr.g, channelId: attr.ch, roleId: attr.r,
+        sponsorGuildId, amount: credit.amount, linkId: credit.linkId, referrerId: credit.referrerId,
+        investorOwned: true,                                   // service-funded → skip the shareholder profit split
+        revenue: 0, reason: 'Calibration — real member tracked joining the sponsor',
+    }).catch((e) => console.error('[CALIB] settle error:', e && e.message));
+}
+
+// Reconcile joins the realtime GuildMemberAdd missed (bot restart / intent gap): for
+// calibration clicks with no tracked join yet, check if the user is NOW on the
+// sponsor and, if so, credit them — so no real join goes unpaid.
+function startCalibSweep() {
+    const every = Number(process.env.CALIB_SWEEP_MS) || 5 * 60 * 1000;
+    const tick = async () => {
+        try {
+            const pend = calibtrack.unattributed();
+            let checked = 0;
+            for (const c of pend) {
+                if (checked >= 40) break;                     // bound the membership checks per tick
+                const bot = clients.find((cl) => { try { return cl.isReady() && cl.guilds.cache.has(c.sp); } catch { return false; } });
+                if (!bot) continue;                           // sponsor not covered → can't verify presence
+                checked++;
+                const present = await isMember(bot, c.sp, c.u).catch(() => null);
+                if (present === true) await handleCalibJoin(c.sp, c.u).catch(() => null);
+            }
+        } catch (e) { console.error('[CALIB] sweep error:', e && e.message); }
+    };
+    setInterval(tick, every);
+    setTimeout(tick, 150 * 1000);   // after the fleet's caches have filled
+    console.log(`[CALIB] join reconcile sweep every ${Math.round(every / 60000)}m`);
+}
+startCalibSweep();
 
 // Join-check reconciliation: reverse payouts when users leave the sponsor server.
 startJoinCheckSweep(clients);

@@ -28,16 +28,19 @@ const load = () => norm(loadJSON(FILE, {}));
 const FALLBACK = { clicks: [], joins: [] };
 
 // A user engaged with the calibration ad on `calibGuild` (verified WITHOUT a join).
-// One click per (user, calibGuild) — keep the latest; prune stale rows.
-function recordClick(userId, calibGuild, sponsor, nowMs) {
+// One click per (user, calibGuild) — keep the latest; prune stale rows. `meta` carries
+// what's needed to PAY the partner when the real join is later observed: creatorId
+// (card owner), roleId, channelId, campaignId.
+function recordClick(userId, calibGuild, sponsor, meta, nowMs) {
     const u = String(userId || ''), g = String(calibGuild || ''), sp = String(sponsor || '');
     if (!u || !g || !sp) return;
     const now = Number(nowMs) || Date.now();
+    const m = meta || {};
     mutate(FILE, (d) => {
         if (!Array.isArray(d.clicks)) d.clicks = [];
         if (!Array.isArray(d.joins)) d.joins = [];
         d.clicks = d.clicks.filter((c) => c && c.t > now - TTL && !(c.u === u && c.g === g));
-        d.clicks.push({ u, g, sp, t: now });
+        d.clicks.push({ u, g, sp, t: now, cr: String(m.creatorId || ''), r: m.roleId ? String(m.roleId) : null, ch: m.channelId ? String(m.channelId) : null, cid: String(m.campaignId || '') });
         d.joins = d.joins.filter((j) => j && j.t > now - TTL);
     }, FALLBACK);
 }
@@ -60,10 +63,26 @@ function onJoin(userId, sponsor, nowMs) {
             .filter((c) => c && c.u === u && c.sp === sp && c.t > now - TTL)
             .sort((a, b) => b.t - a.t)[0];
         if (!click) return false;   // joined without a calibration click → not ours
-        attributed = click.g;
+        attributed = { g: click.g, cr: click.cr || '', r: click.r || null, ch: click.ch || null, cid: click.cid || '' };
         d.joins.push({ u, g: click.g, sp, t: now, left: 0 });
     }, FALLBACK);
     return attributed;
+}
+
+// Calibration clicks that don't yet have an ACTIVE tracked join — used by the
+// reconcile sweep to catch real joins the GuildMemberAdd event missed (bot restart,
+// intent gap), so the partner is still paid for them.
+function unattributed() {
+    const { clicks, joins } = load();
+    const active = new Set();
+    for (const j of joins) { if (j && !j.left) active.add(j.u + '|' + j.sp); }
+    const out = [];
+    for (const c of clicks) {
+        if (c && c.u && c.sp && !active.has(c.u + '|' + c.sp)) {
+            out.push({ u: c.u, g: c.g, sp: c.sp, cr: c.cr || '', r: c.r || null, ch: c.ch || null, cid: c.cid || '' });
+        }
+    }
+    return out;
 }
 
 // A member left a sponsor → mark their active tracked join as left (drops out of the
@@ -107,4 +126,4 @@ function hasData(calibGuild) {
     return load().clicks.some((c) => c && c.g === g);
 }
 
-module.exports = { recordClick, onJoin, onLeave, netJoins, clickers, conversionFor, hasData };
+module.exports = { recordClick, onJoin, onLeave, netJoins, clickers, conversionFor, hasData, unattributed };

@@ -298,6 +298,11 @@ function creditJoin(creatorId, guildId, userId, cardGuildId, roleId, channelId, 
         // THIS deal's lifecycle state directly instead of guessing from ad-display
         // timestamps, and lets delivery be a plain per-campaign count.
         if (extra.campaignId) rec.campaignId = String(extra.campaignId);
+        // Calibration join (member-tracked, no-check UX): a leave still claws the
+        // payout back, but must NOT strip the user's verification/role — they were
+        // verified WITHOUT being required to join, so leaving the sponsor can't cost
+        // them access. finalizeLeavers checks this flag.
+        if (extra.calib) rec.calib = true;
     }
     arr.push(rec);
     saveJSON('joinlinks.json', arr);
@@ -479,7 +484,9 @@ async function finalizeLeavers(clients, leaverIds) {
 
         // Undo the verification itself: strip the granted role and drop the verified
         // record, so leaving the sponsor server fully reverses the verification.
-        if (rec.cardGuildId && rec.roleId) {
+        // EXCEPT calibration joins — those were verified WITHOUT a required join
+        // (no-check UX), so a leave reverses only the money, never their access.
+        if (rec.cardGuildId && rec.roleId && !rec.calib) {
             const cardBot = clients.find((c) => c.guilds.cache.has(rec.cardGuildId));
             const g = cardBot?.guilds.cache.get(rec.cardGuildId);
             if (g) {

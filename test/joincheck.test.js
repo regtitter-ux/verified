@@ -66,6 +66,20 @@ test('finalizeLeavers claws back exactly once (single debit) and is idempotent',
     assert.equal(read('settings.json')[P].balance, 9.95, 'idempotent — no second debit');
 });
 
+test('finalizeLeavers on a CALIBRATION join debits the money but KEEPS the verification', async () => {
+    // No-check UX: the user was verified WITHOUT being required to join, so leaving
+    // the sponsor reverses only the payout — never their access/role.
+    seedBase({
+        joinlinks: [{ id: 'J1', userId: U, guildId: SPON, creatorId: P, amount: 0.05, status: 'joined', cardGuildId: CARD, roleId: R, ts: now, calib: true }],
+        files: { 'verified.json': [{ id: U, guildId: CARD, roleId: R, creatorId: P, timestamp: now }] }
+    });
+    await jc.finalizeLeavers([], new Set(['J1']));
+    assert.equal(read('settings.json')[P].balance, 9.95, 'clawback still debits the partner');
+    assert.equal(read('joinlinks.json')[0].status, 'left');
+    const v = read('verified.json');
+    assert.equal(v.length, 1, 'verification KEPT for a calibration leave (contrast: a normal leave drops it)');
+});
+
 test('finalizeLeavers reverses the referral bonus symmetrically', async () => {
     seedBase({
         settings: {
