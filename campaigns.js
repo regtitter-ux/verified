@@ -78,6 +78,22 @@ function delivered(campaign, verifiedList, allCampaigns) {
         }
     }
 
+    // Calibration campaigns ALL share ONE sponsor invite (the same adKey), but each
+    // shows on only its OWN server and stamps its own campaignId at credit time. Count
+    // by that authoritative campaignId — never the shared-adKey cohort below, which
+    // would lump every server's calibration joins into the earliest-paid one (the
+    // "counter grows on one server, fed by other servers' joins" bug).
+    if (campaign.calibration) {
+        const seen = new Set();
+        for (const u of list) {
+            if (!u || String(u.campaignId || '') !== String(campaign.id)) continue;
+            if ((Number(u.timestamp) || 0) <= campaign.paidAt) continue;
+            if (left.has(String(u.id))) continue;
+            seen.add(u.id);
+        }
+        return seen.size;
+    }
+
     // Simple own-count (used for the fast path and dead campaigns).
     const ownCount = () => {
         const seen = new Set();

@@ -30,6 +30,27 @@ test('a no-check campaign is eligible WITHOUT sponsor coverage, but only on a ca
     assert.ok(!onPlain.includes('NC'), 'no-check needs a calibrated display server (elsewhere it can\'t deliver)');
 });
 
+test('calibration campaigns sharing one sponsor invite count joins by their OWN campaignId', () => {
+    const INV = 'https://discord.gg/calsp';
+    const K = adKeyOf(INV);
+    const A = { id: 'CA', invite: INV, sponsorGuildId: 'CALSPON', status: 'active', purchased: 100, paidAt: T1, calibration: true, calibrationGuild: 'SVR_A' };
+    const B = { id: 'CB', invite: INV, sponsorGuildId: 'CALSPON', status: 'active', purchased: 100, paidAt: T2, calibration: true, calibrationGuild: 'SVR_B' };
+    // Same adKey (shared sponsor invite), but each join is stamped with the campaign
+    // that was actually shown on its server: 3 on A, 2 on B.
+    const verified = [
+        { id: 'u1', adKey: K, campaignId: 'CA', timestamp: T2 + 1000 },
+        { id: 'u2', adKey: K, campaignId: 'CA', timestamp: T2 + 2000 },
+        { id: 'u3', adKey: K, campaignId: 'CA', timestamp: T2 + 3000 },
+        { id: 'u4', adKey: K, campaignId: 'CB', timestamp: T2 + 4000 },
+        { id: 'u5', adKey: K, campaignId: 'CB', timestamp: T2 + 5000 }
+    ];
+    seed({ 'campaigns.json': { CA: A, CB: B }, 'verified.json': verified });
+    // Without the calibration short-circuit the shared-adKey cohort would lump all 5
+    // into A (earliest paid). By campaignId: A=3, B=2.
+    assert.equal(campaigns.delivered(A, verified, { CA: A, CB: B }), 3, 'A counts only its own joins');
+    assert.equal(campaigns.delivered(B, verified, { CA: A, CB: B }), 2, 'B counts only its own joins, not A\'s');
+});
+
 test('a calibration campaign is eligible ONLY on the server it calibrates, flagged calibration', () => {
     const CAL = { id: 'CAL', invite: 'https://discord.gg/cal', sponsorGuildId: 'CALSPON', status: 'active', purchased: 100, paidAt: T1, calibration: true, calibrationGuild: 'TARGET' };
     seed({ 'campaigns.json': { CAL }, 'verified.json': [] });
