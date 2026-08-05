@@ -1760,7 +1760,10 @@ const startBot = (token) => {
                         creatorId, joinerId: user.id, cardGuildId: guild.id, channelId, roleId,
                         sponsorGuildId: sponsor.guildId, amount: credit.amount, linkId: credit.linkId,
                         referrerId: credit.referrerId, investorOwned: investorOwnedJoin || isCalib,
-                        revenue, reason: isCalib ? 'Calibration join — conversion measurement' : 'Join verified — member joined the sponsor server',
+                        revenue, noCheck: noCheckMode,
+                        reason: noCheckMode ? 'Pay-per-click credit — no-check ad (statistical join)'
+                            : isCalib ? 'Calibration join — conversion measurement'
+                            : 'Join verified — member joined the sponsor server',
                     });
                 }
             }

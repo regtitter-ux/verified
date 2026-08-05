@@ -28,9 +28,12 @@ const partnerlog = require('./partnerlog.js');
 // referrer auto-withdraw are swallowed.
 async function settleCreditedJoin(clients, {
     creatorId, joinerId, cardGuildId, channelId, roleId, sponsorGuildId,
-    amount, linkId, referrerId, investorOwned, revenue, reason,
+    amount, linkId, referrerId, investorOwned, revenue, reason, noCheck,
 }) {
-    try { partnerlog.logEvent(creatorId, { type: 'grant', reason: 'paid', amount, userId: joinerId, guildId: cardGuildId, roleId, sponsorGuildId, srcId: linkId }); } catch { /* never block */ }
+    // A no-check (CPC) credit is a pay-per-click earning, not a verified join — log
+    // it under a distinct reason ('paid_click') so it shows up, and is filterable,
+    // in BOTH the partner and admin activity logs instead of blending into joins.
+    try { partnerlog.logEvent(creatorId, { type: 'grant', reason: noCheck ? 'paid_click' : 'paid', amount, userId: joinerId, guildId: cardGuildId, roleId, sponsorGuildId, srcId: linkId }); } catch { /* never block */ }
     await logFunds(clients, { type: 'credit', creatorId, userId: joinerId, guildId: cardGuildId, channelId, amount, sponsorGuildId, reason });
     if (!investorOwned) await payShares(clients, amount, { revenuePerJoin: revenue, guildId: sponsorGuildId }).catch(() => null);
     await maybeAutoWithdraw(clients, creatorId);
