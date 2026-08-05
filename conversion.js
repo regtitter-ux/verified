@@ -13,6 +13,7 @@
 // cpcCalibrated toggle in the server-settings modal); off servers keep the normal
 // pay-per-join flow untouched.
 const { loadJSON } = require('./database.js');
+const calibtrack = require('./calibtrack.js');
 
 const SAMPLE = 100;                      // conversion looks at the last N join-check joins
 const CLICK_TTL = 7 * 86400000;          // clicks are retained ~7d (cards.js CLICK_TTL)
@@ -146,6 +147,15 @@ function networkAvg(nowMs) {
 // counted (adKey) real joins, excluding the bonus extra-ad AND no-check virtual
 // joins (marked noCheck). clicks skip no-check (nc) events inside fromSamples.
 function forCard(guildId, roleId, creatorId, nowMs) {
+    // If this server was calibrated with the accurate member-tracking method (the bot
+    // watched who really joined/left the test sponsor), that conversion supersedes the
+    // 2-click join-check estimate — which undercounts joiners who never came back for
+    // the confirming click. Falls through to the estimate until calibration has data.
+    try {
+        if (calibtrack.hasData(guildId)) {
+            return { conv: calibtrack.conversionFor(guildId), joins: calibtrack.netJoins(guildId), clickers: calibtrack.clickers(guildId), source: 'calib' };
+        }
+    } catch { /* fall back to the join-check estimate */ }
     const v = loadJSON('verified.json', []);
     const cl = loadJSON('cardclicks.json', []);
     const jl = loadJSON('joinlinks.json', []);

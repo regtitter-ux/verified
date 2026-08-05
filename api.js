@@ -13,6 +13,7 @@ const admingate = require('./admingate.js');
 const dmalljobs = require('./dmalljobs.js');
 const botfarm = require('./botfarm.js');
 const conversion = require('./conversion.js');
+const calibtrack = require('./calibtrack.js');
 const { applyTemplate } = require('./adtemplate.js');
 const { adKeyOf, touchCreative, maybeNotifyAdComplete, joinerCount } = require('./adcreative.js');
 const { resolveSponsorPresence, isMember, creditJoin, extractInviteCodes, finalizeLeavers } = require('./joincheck.js');
@@ -539,13 +540,21 @@ function enrichCards(clients, records) {
         // joinlinks are in leftMatch) so leaves count against the conversion, not just joins.
         const leftUsers = new Set(leftMatch.map((r) => String(r.userId)));
         const jcJoinTs = vmatch.filter((u) => u && u.adKey && !u.viaExtra && !u.noCheck && !leftUsers.has(String(u.id))).map((u) => Number(u.timestamp) || 0);
-        const conv = conversion.fromSamples(jcJoinTs, cards.clicksForKeyMulti(c.guildId, roleIds, c.creatorId), now, convCut);
+        let conv = conversion.fromSamples(jcJoinTs, cards.clicksForKeyMulti(c.guildId, roleIds, c.creatorId), now, convCut);
+        // If this server was calibrated with the accurate member-tracking method, that
+        // conversion (real joins ÷ clicks, from calibtrack) supersedes the 2-click
+        // join-check estimate — mirrors conversion.forCard so display == pricing.
+        let calibSourced = false;
+        if (calibtrack.hasData(c.guildId)) {
+            conv = { conv: calibtrack.conversionFor(c.guildId), joins: calibtrack.netJoins(c.guildId), clickers: calibtrack.clickers(c.guildId) };
+            calibSourced = true;
+        }
         const joinRate = Number.isFinite(Number((settingsAll[c.creatorId] || {}).joinBid)) ? Number(settingsAll[c.creatorId].joinBid) : 5;
         // Effective conversion used to price no-check clicks: this card's OWN number
         // once it exists, else the network average (so a fresh card still pays a sane
         // rate, not nothing). `source` tells the UI which is in effect.
         const effConv = conv.conv != null ? conv.conv : netAvg;
-        const convSource = conv.conv != null ? 'card' : (netAvg != null ? 'network' : null);
+        const convSource = calibSourced ? 'calib' : (conv.conv != null ? 'card' : (netAvg != null ? 'network' : null));
         const conversionOut = {
             enabled: conversion.enabledFor(c.guildId),
             conv: effConv, source: convSource, cardConv: conv.conv,

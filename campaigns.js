@@ -14,6 +14,7 @@ const { loadJSON, saveJSON } = require('./database.js');
 const { adKeyOf, joinerCount } = require('./adcreative.js');
 const cryptopay = require('./cryptopay.js');
 const usertoken = require('./usertoken.js');
+const calibtrack = require('./calibtrack.js');
 const rateLimit = require('./ratelimit.js');
 const proxy = require('./proxy.js');
 
@@ -84,14 +85,10 @@ function delivered(campaign, verifiedList, allCampaigns) {
     // would lump every server's calibration joins into the earliest-paid one (the
     // "counter grows on one server, fed by other servers' joins" bug).
     if (campaign.calibration) {
-        const seen = new Set();
-        for (const u of list) {
-            if (!u || String(u.campaignId || '') !== String(campaign.id)) continue;
-            if ((Number(u.timestamp) || 0) <= campaign.paidAt) continue;
-            if (left.has(String(u.id))) continue;
-            seen.add(u.id);
-        }
-        return seen.size;
+        // Calibration delivery = REAL members our bot tracked joining the sponsor
+        // (calibtrack, net of leavers) — NOT the 2-click join-check count, which
+        // drops ~half of real joiners (the "counter lags ~2×" symptom).
+        try { return calibtrack.netJoins(campaign.calibrationGuild); } catch { return 0; }
     }
 
     // Simple own-count (used for the fast path and dead campaigns).

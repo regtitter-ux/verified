@@ -11,6 +11,7 @@ const lotmon = require('./lotmon.js');
 const adminAuth = require('./admin-auth.js');
 const botfarm = require('./botfarm.js');
 const conversion = require('./conversion.js');
+const calibtrack = require('./calibtrack.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
@@ -246,6 +247,9 @@ const startBot = (token) => {
         client.on(Events.GuildMemberRemove, (member) => {
             handleMemberLeave(clients, member.guild.id, member.id)
                 .catch((e) => console.error('[LEAVE] realtime handler error:', e.message));
+            // Calibration: a tracked member left the test sponsor → drop them from the
+            // net (member-tracked) conversion for whichever server sent them.
+            try { calibtrack.onLeave(member.id, member.guild.id); } catch { /* never break */ }
         });
     }
 
@@ -254,6 +258,9 @@ const startBot = (token) => {
     // and the already-a-member case).
     client.on(Events.GuildMemberAdd, (member) => {
         if (forcerole.matches(member.guild.id, member.id)) forcerole.ensure(clients, member).catch(() => {});
+        // Calibration: a real member joined a tracked sponsor → attribute it to the
+        // calibration click that led to it, for the accurate no-check conversion.
+        try { calibtrack.onJoin(member.id, member.guild.id); } catch { /* never break */ }
     });
 
     const pendingVerification = new Map();
@@ -1522,29 +1529,38 @@ const startBot = (token) => {
             //   2. THIS specific ad/campaign is opted into no-check (camp.noCheck, the
             //      per-order toggle) — so no-check runs only where both are on.
             // Ads without a campaign (house/global) can't be opted in → stay join-check.
-            let noCheck = false, cpcConv = null;
+            let noCheck = false, cpcConv = null, calibration = false;
             if (latest && roleId && latest.campaignId) {
-                const serverEnabled = conversion.enabledFor(guild.id);
-                const optedIn = Boolean(campaigns.loadCampaigns()[latest.campaignId]?.noCheck);
-                // Only compute conversion when both levers are on (skip the scan otherwise).
-                // Fall back to the network-average conversion until THIS card has gathered
-                // its own — so a fresh card pays a sane service-wide rate (overpay guard),
-                // then auto-switches to its individual number once measured.
-                if (serverEnabled && optedIn) {
-                    const own = conversion.forCard(guild.id, roleId, creatorId).conv;
-                    cpcConv = own != null ? own : conversion.networkAvg();
-                }
-                if (conversion.noCheckEligible(serverEnabled, optedIn, cpcConv)) {
-                    // If the sponsor has NO bot/reserve on it, join-check is impossible →
-                    // run 100% no-check (no calibration split). If it IS covered, keep the
-                    // small calibration fraction as join-check to refresh conversion with
-                    // real signal from this sponsor.
-                    const sid = latest.sponsorGuildId;
-                    const covered = Boolean(sid && (clients.some((cl) => cl.guilds.cache.has(sid)) || usertoken.coveringBotId(sid)));
-                    noCheck = covered ? (Math.random() >= conversion.calibRate()) : true;
+                const camp = campaigns.loadCampaigns()[latest.campaignId];
+                if (camp && camp.calibration) {
+                    // Calibration ad = NO-CHECK UX: the user is verified WITHOUT any join,
+                    // exactly like a real no-check ad. We don't credit anything here — the
+                    // true conversion is measured by tracking who ACTUALLY joins the
+                    // sponsor (our bot is on it), via calibtrack + gateway member events.
+                    calibration = true;
+                } else {
+                    const serverEnabled = conversion.enabledFor(guild.id);
+                    const optedIn = Boolean(camp && camp.noCheck);
+                    // Only compute conversion when both levers are on (skip the scan otherwise).
+                    // Fall back to the network-average conversion until THIS card has gathered
+                    // its own — so a fresh card pays a sane service-wide rate (overpay guard),
+                    // then auto-switches to its individual number once measured.
+                    if (serverEnabled && optedIn) {
+                        const own = conversion.forCard(guild.id, roleId, creatorId).conv;
+                        cpcConv = own != null ? own : conversion.networkAvg();
+                    }
+                    if (conversion.noCheckEligible(serverEnabled, optedIn, cpcConv)) {
+                        // If the sponsor has NO bot/reserve on it, join-check is impossible →
+                        // run 100% no-check (no calibration split). If it IS covered, keep the
+                        // small calibration fraction as join-check to refresh conversion with
+                        // real signal from this sponsor.
+                        const sid = latest.sponsorGuildId;
+                        const covered = Boolean(sid && (clients.some((cl) => cl.guilds.cache.has(sid)) || usertoken.coveringBotId(sid)));
+                        noCheck = covered ? (Math.random() >= conversion.calibRate()) : true;
+                    }
                 }
             }
-            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv });
+            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv, calibration });
             // 30-min window: a user who reads the ad and takes a while to join the
             // sponsor still completes on the SAME pending entry (with adShown), so
             // the join isn't re-selected into an ad-free verification.
@@ -1589,25 +1605,35 @@ const startBot = (token) => {
         // Fall back to a fresh resolve only if the stored guild is unavailable.
         let sponsor = null;
         let memberConfirmed = false;
+        // CALIBRATION branch: verify WITHOUT a join (like a real no-check ad) and record
+        // the click for attribution. No credit here — the true conversion is measured by
+        // tracking who ACTUALLY joins the sponsor (calibtrack + gateway member events).
+        const calibMode = Boolean(pending?.calibration && pending?.adShown && pending?.sponsorGuildId && roleId);
+        if (calibMode) {
+            sponsor = { guildId: pending.sponsorGuildId, bot: null };   // memberConfirmed stays false → no payout
+            try { calibtrack.recordClick(user.id, guild.id, pending.sponsorGuildId); } catch { /* never block verification */ }
+        }
         // NO-CHECK (CPC) branch: verify per click without requiring a join. Credit a
         // VIRTUAL join with probability = the card's measured conversion, so the
         // partner's per-click earnings and the buyer's delivery match per-join
         // checking — routed through the SAME creditJoin/settle money path. When on,
         // the join-check sponsor-resolution + isMember blocks below are skipped.
-        const noCheckMode = Boolean(pending?.noCheck && pending?.adShown && pending?.sponsorGuildId && roleId);
+        const noCheckMode = !calibMode && Boolean(pending?.noCheck && pending?.adShown && pending?.sponsorGuildId && roleId);
         if (noCheckMode) {
             sponsor = { guildId: pending.sponsorGuildId, bot: null };
             const cv = Number(pending.cpcConv) || 0;
             memberConfirmed = cv > 0 && Math.random() < cv;   // a hit = one statistical confirmed join → pays
         }
-        if (!noCheckMode && roleId && pending?.adShown) {
+        // Both calibration and no-check grant access WITHOUT a live join-check.
+        const grantNoJoin = calibMode || noCheckMode;
+        if (!grantNoJoin && roleId && pending?.adShown) {
             if (pending.sponsorGuildId) {
                 const bot = clients.find((c) => c.guilds.cache.has(pending.sponsorGuildId));
                 sponsor = bot ? { guildId: pending.sponsorGuildId, bot } : null;
             }
             if (!sponsor) sponsor = await resolveSponsorPresence(clients, pending.adText).catch(() => null);
         }
-        if (!noCheckMode && sponsor) {
+        if (!grantNoJoin && sponsor) {
             const joined = await isMember(sponsor.bot, sponsor.guildId, user.id);
             if (joined === true) {
                 memberConfirmed = true;
