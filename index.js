@@ -1540,7 +1540,13 @@ const startBot = (token) => {
             // autojoin record) off the response path so they don't add to the
             // "thinking" time.
             const firstReply = interaction.editReply({ content: responseText, components: firstComponents }).catch(() => null);
-            try { cards.trackClick(guild.id, roleId, creatorId, user.id, noCheck); } catch (e) { /* stats must never break verification */ }
+            // Tag the click by WHAT was shown, so conversion counts only real
+            // opportunities: a join-check ad (counts), a no-check ad (nc), or NO ad at
+            // all (na — an ad-free verification, e.g. no eligible campaign / ads off).
+            // Counting no-ad clicks in the denominator is exactly what made a server
+            // read ~1k clicks / ~40 stays as "bad conversion" when most clicks simply
+            // had no join-check ad to convert on.
+            try { cards.trackClick(guild.id, roleId, creatorId, user.id, noCheck, !latest); } catch (e) { /* stats must never break verification */ }
             if (latest && latest.sponsorGuildId && roleId) {
                 try {
                     autojoin.record({

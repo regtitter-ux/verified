@@ -44,6 +44,15 @@ test('no-check (nc) clicks are excluded from the conversion denominator', () => 
     assert.ok(near(r.conv, 0.5), `10/20 = 0.50 (no-check clicks must not dilute it), got ${r.conv}`);
 });
 
+test('no-ad (na) clicks are excluded from the conversion denominator', () => {
+    const joins = Array.from({ length: 10 }, (_, i) => NOW - i * 1000);                                 // 10 join-check joins
+    const adClicks = Array.from({ length: 20 }, (_, i) => ({ u: 'c' + i, t: NOW - i * 100 }));          // 20 real ad-clickers
+    const noAd = Array.from({ length: 80 }, (_, i) => ({ u: 'n' + i, t: NOW - i * 100, na: 1 }));       // 80 no-ad clickers (ignored)
+    const r = conv.fromSamples(joins, adClicks.concat(noAd), NOW);
+    assert.equal(r.clickers, 20, 'only clicks that showed a join-check ad count');
+    assert.ok(near(r.conv, 0.5), `10/20 = 0.50 (no-ad clicks must not dilute it), got ${r.conv}`);
+});
+
 test('CALIB_RATE is a fraction in (0, 1]', () => {
     assert.ok(conv.CALIB_RATE > 0 && conv.CALIB_RATE <= 1, `got ${conv.CALIB_RATE}`);
 });

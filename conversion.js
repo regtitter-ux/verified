@@ -64,10 +64,13 @@ function fromSamples(joinTs, clickEvents, nowMs) {
     const joinsInWin = lastN.filter((t) => t >= windowStart).length;
     const clickers = new Set();
     for (const c of (Array.isArray(clickEvents) ? clickEvents : [])) {
-        // Skip no-check (nc) clicks: conversion must be measured ONLY on calibration
-        // (join-check) shows, or including no-check clicks — which produce no join-
-        // check joins — would drag it toward zero (a self-referential feedback loop).
-        if (c && !c.nc && (Number(c.t) || 0) >= windowStart && c.u) clickers.add(String(c.u));
+        // Skip nc (no-check ad) AND na (no ad shown) clicks: conversion is measured
+        // ONLY over clicks where a real join-check ad was displayed. Counting no-check
+        // clicks would be a self-referential feedback loop; counting no-ad clicks (an
+        // ad-free verification had nothing to convert on) understates conversion badly
+        // — e.g. a server with ~1k clicks but only ~40 stays, most clicks having had
+        // no join-check ad at all.
+        if (c && !c.nc && !c.na && (Number(c.t) || 0) >= windowStart && c.u) clickers.add(String(c.u));
     }
     const cWin = clickers.size;
     if (!joinsInWin || !cWin) return { conv: null, joins: joinsInWin, clickers: cWin };
@@ -107,7 +110,7 @@ function networkAvg(nowMs) {
     }
     const perCard = new Map();   // clickers are per-card, so dedupe within a card then sum
     for (const e of (Array.isArray(cl) ? cl : [])) {
-        if (!e || e.nc || !e.u || (Number(e.t) || 0) < winStart) continue;
+        if (!e || e.nc || e.na || !e.u || (Number(e.t) || 0) < winStart) continue;
         let s = perCard.get(e.k); if (!s) perCard.set(e.k, s = new Set());
         s.add(String(e.u));
     }
@@ -130,7 +133,7 @@ function forCard(guildId, roleId, creatorId, nowMs) {
         if (!u.adKey || u.viaExtra || u.noCheck) continue;
         joinTs.push(Number(u.timestamp) || 0);
     }
-    const clicks = (Array.isArray(cl) ? cl : []).filter((e) => e && e.k === ck).map((e) => ({ u: e.u, t: e.t, nc: e.nc }));
+    const clicks = (Array.isArray(cl) ? cl : []).filter((e) => e && e.k === ck).map((e) => ({ u: e.u, t: e.t, nc: e.nc, na: e.na }));
     return fromSamples(joinTs, clicks, nowMs);
 }
 

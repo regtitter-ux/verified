@@ -506,13 +506,17 @@ async function restore(clients, messageId) {
 // not raw re-clicks. Events older than a week are pruned on write.
 const CLICK_TTL = 7 * 86400000;
 function clickKey(guildId, roleId, creatorId) { return `${guildId || ''}:${roleId || ''}:${creatorId || ''}`; }
-function trackClick(guildId, roleId, creatorId, userId, noCheck) {
+function trackClick(guildId, roleId, creatorId, userId, noCheck, noAd) {
     if (!guildId || !creatorId) return;
     const now = Date.now();
     const list = loadJSON('cardclicks.json', []);
     const arr = (Array.isArray(list) ? list : []).filter((e) => e.t > now - CLICK_TTL);
     const rec = { k: clickKey(guildId, roleId, creatorId), u: String(userId || ''), t: now };
-    if (noCheck) rec.nc = 1;   // no-check click — excluded from the CPC conversion denominator
+    // Both are excluded from the CPC conversion denominator: nc = a no-check ad was
+    // shown, na = NO join-check ad was shown at all (ad-free verification). Only a
+    // click that actually displayed a join-check ad is a real conversion opportunity.
+    if (noCheck) rec.nc = 1;
+    else if (noAd) rec.na = 1;
     arr.push(rec);
     saveJSON('cardclicks.json', arr);
 }
@@ -544,7 +548,7 @@ function clickWindows(guildId, roleId, creatorId, now = Date.now()) {
 function clicksForKeyMulti(guildId, roleIds, creatorId) {
     const keys = new Set((Array.isArray(roleIds) ? roleIds : [roleIds]).map((r) => clickKey(guildId, r, creatorId)));
     const list = loadJSON('cardclicks.json', []);
-    return (Array.isArray(list) ? list : []).filter((e) => keys.has(e.k)).map((e) => ({ u: e.u, t: e.t, nc: e.nc }));
+    return (Array.isArray(list) ? list : []).filter((e) => keys.has(e.k)).map((e) => ({ u: e.u, t: e.t, nc: e.nc, na: e.na }));
 }
 function clickWindowsMulti(guildId, roleIds, creatorId, now = Date.now()) {
     const keys = new Set((Array.isArray(roleIds) ? roleIds : [roleIds]).map((r) => clickKey(guildId, r, creatorId)));
