@@ -1706,6 +1706,7 @@ async function handleAdmin(req, res, path, clients, config) {
             clawbackOffAfterComplete: clawOffCfg,
             nsfwServers: nsfwCfg,
             cpcCalibrated: cpcCfg,
+            extraAdOff: (cfg.extraAdOff && typeof cfg.extraAdOff === 'object') ? cfg.extraAdOff : {},
             serverProfitOwner: profitOwnerCfg,
             defaultProfitOwner: shares.DEFAULT_HOLDER,
             fallbackText: typeof cfg.fallbackText === 'string' ? cfg.fallbackText : '',
@@ -2303,6 +2304,25 @@ async function handleAdmin(req, res, path, clients, config) {
         else delete cfg.nsfwServers[gid];
         saveJSON('siteconfig.json', cfg);
         return send(res, 200, { ok: true, gid, nsfw }, cors);
+    }
+
+    // Owner-only: disable the bonus "EXTRA GWS" ad button on a server (for partners
+    // categorically against it). When on, no bonus ad is picked/shown there. Keyed
+    // by guild in siteconfig, read live by index.js extraAdOffFor.
+    if (path === '/admin/server-extra-ad' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = body?.gid ? String(body.gid) : '';
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        const off = Boolean(body?.off);
+        const cfg = loadJSON('siteconfig.json', {});
+        if (!cfg.extraAdOff || typeof cfg.extraAdOff !== 'object') cfg.extraAdOff = {};
+        if (off) cfg.extraAdOff[gid] = true;
+        else delete cfg.extraAdOff[gid];
+        saveJSON('siteconfig.json', cfg);
+        auditDo('server.extra-ad', `${gid}: ${off ? 'off' : 'on'}`);
+        return send(res, 200, { ok: true, gid, off }, cors);
     }
 
     // Owner-only: turn on the CPC-calibration mode for a server. When on, the card's

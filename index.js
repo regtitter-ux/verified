@@ -60,11 +60,20 @@ async function isMemberCached(bot, guildId, userId) {
     return val;
 }
 
+// Per-server owner toggle: some partners are categorically against the bonus
+// "EXTRA GWS" ad button on their server. When set (siteconfig.extraAdOff[guildId]),
+// no bonus ad is picked, recorded or shown on that display server.
+function extraAdOffFor(guildId) {
+    try { const cfg = loadJSON('siteconfig.json', {}); return Boolean(cfg && cfg.extraAdOff && cfg.extraAdOff[String(guildId)]); }
+    catch { return false; }
+}
+
 // Given an already-resolved extra pick { campaignId, raw, sponsorGuildId, url },
 // stamp its sponsor, record the join intent (so the autojoin sweep credits it if
 // they go through) and return the bonus-ad button row. No network calls.
 function attachExtraRow(guild, creatorId, userId, extra, placement, channelId) {
     if (!extra || !extra.url) return null;
+    if (extraAdOffFor(guild.id)) return null;   // partner opted out of the bonus ad here
     try { sponsorshow.stamp(extra.sponsorGuildId); } catch { /* stamping must never break verification */ }
     try {
         autojoin.record({
@@ -80,6 +89,7 @@ function attachExtraRow(guild, creatorId, userId, extra, placement, channelId) {
 // (the success / retry branches — the first click reuses its main selection pass).
 // Uses the cached membership check so it's cheap.
 async function buildExtraRow(clients, guild, creatorId, userId, excludeSponsorGuildId, placement, channelId) {
+    if (extraAdOffFor(guild.id)) return null;   // partner opted out of the bonus ad here
     try {
         const fleet = campaigns.fleetGuildIds(clients);
         if (usertoken.enabled()) { try { for (const g of await usertoken.coveredGuildIds()) fleet.add(g); } catch { /* ignore */ } }
