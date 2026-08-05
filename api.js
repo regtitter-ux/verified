@@ -1685,16 +1685,51 @@ async function handleAdmin(req, res, path, clients, config) {
             day: arr.filter((x) => (Number(x[tsField]) || 0) > now - 86400000).length,
             week: arr.filter((x) => (Number(x[tsField]) || 0) > now - 604800000).length
         });
-        const nfPaidStayed = nfWin(paidEntries, 'timestamp');
+        // Split paid verifications into REAL join-check joins vs NO-CHECK (CPC)
+        // virtual credits (adKey + noCheck). No-check joins are statistical: the user
+        // never actually joined the sponsor, so they never generate a 'left' record —
+        // leftRecs are all real join-check leavers.
+        const jcEntries = paidEntries.filter((u) => !u.noCheck);
+        const ncEntries = paidEntries.filter((u) => u.noCheck);
+        const nfJcStayed = nfWin(jcEntries, 'timestamp');       // real join-check, net stays
+        const nfNcStayed = nfWin(ncEntries, 'timestamp');       // no-check (CPC) credits, net
         const nfLeft = nfWin(leftRecs, 'ts');
         const nfNoAdStayed = nfWin(entries.filter((u) => u.noAd), 'timestamp');
+        // Clicks split by what was shown (cardclicks carry nc / na since the CPC model):
+        //   total = every start; jc = a join-check ad was shown (the conversion
+        //   denominator); nc = a no-check ad was shown (paid per click).
+        const nfClickSplit = (() => {
+            const cl = loadJSON('cardclicks.json', []);
+            const mk = () => ({ h: new Set(), d: new Set(), w: new Set() });
+            const jc = mk(), nc = mk();
+            for (const e of Array.isArray(cl) ? cl : []) {
+                const bucket = e.nc ? nc : (e.na ? null : jc);   // no-ad clicks: total only
+                if (!bucket) continue;
+                const k = e.k + '|' + e.u;
+                if (e.t > now - 3600000) bucket.h.add(k);
+                if (e.t > now - 86400000) bucket.d.add(k);
+                if (e.t > now - 604800000) bucket.w.add(k);
+            }
+            return { jc: { hour: jc.h.size, day: jc.d.size, week: jc.w.size }, nc: { hour: nc.h.size, day: nc.d.size, week: nc.w.size } };
+        })();
+        // Network conversion = net join-check stays ÷ join-check clickers (the same
+        // net-stays basis the per-card CPC conversion uses). null when no jc clicks.
+        const nfPct = (a, b) => (b > 0 ? Math.round((a / b) * 1000) / 10 : null);
+        const nfConv = {
+            hour: nfPct(nfJcStayed.hour, nfClickSplit.jc.hour),
+            day: nfPct(nfJcStayed.day, nfClickSplit.jc.day),
+            week: nfPct(nfJcStayed.week, nfClickSplit.jc.week)
+        };
         const networkFunnel = {
             servers: perGuild.length,
             clicks: nfClick,
+            clicksNc: nfClickSplit.nc,
             ads: {
-                checked: { hour: nfPaidStayed.hour + nfLeft.hour, day: nfPaidStayed.day + nfLeft.day, week: nfPaidStayed.week + nfLeft.week },
-                stayed: nfPaidStayed
+                checked: { hour: nfJcStayed.hour + nfLeft.hour, day: nfJcStayed.day + nfLeft.day, week: nfJcStayed.week + nfLeft.week },
+                stayed: nfJcStayed
             },
+            noCheck: nfNcStayed,
+            conv: nfConv,
             noAd: { checked: nfNoAdStayed, stayed: nfNoAdStayed }
         };
 
