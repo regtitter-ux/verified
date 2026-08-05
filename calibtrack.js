@@ -126,4 +126,17 @@ function hasData(calibGuild) {
     return load().clicks.some((c) => c && c.g === g);
 }
 
-module.exports = { recordClick, onJoin, onLeave, netJoins, clickers, conversionFor, hasData, unattributed };
+// Network-wide calibration conversion: pooled net real joins ÷ clickers across ALL
+// calibrated servers. The fallback for a card that hasn't been calibrated yet — so
+// conversion still comes ONLY from calibration, never from passive sponsor ads.
+function networkAvg() {
+    const { clicks, joins } = load();
+    const joined = new Set();
+    for (const j of joins) { if (j && !j.left && j.u && j.g) joined.add(j.u + '|' + j.g); }
+    const clk = new Set();
+    for (const c of clicks) { if (c && c.u && c.g) clk.add(c.u + '|' + c.g); }
+    if (!clk.size || !joined.size) return null;
+    return +Math.min(1, joined.size / clk.size).toFixed(4);
+}
+
+module.exports = { recordClick, onJoin, onLeave, netJoins, clickers, conversionFor, hasData, networkAvg, unattributed };

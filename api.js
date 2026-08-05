@@ -475,8 +475,7 @@ function userStats(userId) {
 // { list, avgVerifySeconds }, list mirroring the input order.
 function enrichCards(clients, records) {
     const now = Date.now();
-    const netAvg = conversion.networkAvg(now);   // computed once; fallback for cards without their own conversion
-    const convCut = conversion.resetAt();        // ignore join-check stats before the reset cutoff
+    const netAvg = conversion.networkAvg();   // network calibration average; fallback for not-yet-calibrated cards
     const vArr = (() => { const v = loadJSON('verified.json', []); return Array.isArray(v) ? v : []; })();
     const jArr = (() => { const j = loadJSON('joinlinks.json', []); return Array.isArray(j) ? j : []; })();
     const settingsAll = loadJSON('settings.json', {});   // for the per-card CPC rate (creator's join bid)
@@ -532,29 +531,22 @@ function enrichCards(clients, records) {
         const avgVerifySeconds = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length / 1000) : null;
         const rinfo = c.deletedAt ? cards.restoreInfo(clients, c) : null;
 
-        // Per-card CONVERSION (CPC calibration): last 100 join-check joins ÷ unique
-        // clickers. Uses the join-check joins already matched (adKey, excluding the
-        // bonus extra-ad) and this card's clicks — no extra scans. The pay-per-click
-        // rate mirrors the creator's own join rate ($/100) at that conversion.
-        // NET STAYS for conversion: drop users who left the sponsor (their 'left'
-        // joinlinks are in leftMatch) so leaves count against the conversion, not just joins.
-        const leftUsers = new Set(leftMatch.map((r) => String(r.userId)));
-        const jcJoinTs = vmatch.filter((u) => u && u.adKey && !u.viaExtra && !u.noCheck && !leftUsers.has(String(u.id))).map((u) => Number(u.timestamp) || 0);
-        let conv = conversion.fromSamples(jcJoinTs, cards.clicksForKeyMulti(c.guildId, roleIds, c.creatorId), now, convCut);
-        // If this server was calibrated with the accurate member-tracking method, that
-        // conversion (real joins ÷ clicks, from calibtrack) supersedes the 2-click
-        // join-check estimate — mirrors conversion.forCard so display == pricing.
+        // Per-card CONVERSION comes ONLY from manual calibration (calibtrack): our bot
+        // on the test sponsor watched who really joined/left. It is NOT measured from
+        // passive sponsor ads that merely happen to run where our bot sits. No
+        // calibration data → null, then the network calibration average prices clicks.
+        let conv = { conv: null, joins: 0, clickers: 0 };
         let calibSourced = false;
         if (calibtrack.hasData(c.guildId)) {
             conv = { conv: calibtrack.conversionFor(c.guildId), joins: calibtrack.netJoins(c.guildId), clickers: calibtrack.clickers(c.guildId) };
             calibSourced = true;
         }
         const joinRate = Number.isFinite(Number((settingsAll[c.creatorId] || {}).joinBid)) ? Number(settingsAll[c.creatorId].joinBid) : 5;
-        // Effective conversion used to price no-check clicks: this card's OWN number
-        // once it exists, else the network average (so a fresh card still pays a sane
-        // rate, not nothing). `source` tells the UI which is in effect.
+        // Effective conversion used to price no-check clicks: this card's OWN calibrated
+        // number once it exists, else the network calibration average (so a not-yet-
+        // calibrated card still pays a sane rate). `source` tells the UI which is in effect.
         const effConv = conv.conv != null ? conv.conv : netAvg;
-        const convSource = calibSourced ? 'calib' : (conv.conv != null ? 'card' : (netAvg != null ? 'network' : null));
+        const convSource = calibSourced ? 'calib' : (netAvg != null ? 'network' : null);
         const conversionOut = {
             enabled: conversion.enabledFor(c.guildId),
             conv: effConv, source: convSource, cardConv: conv.conv,

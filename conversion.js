@@ -100,84 +100,25 @@ function ratePer100Clicks(conv, joinRatePer100) {
 }
 const ratePerClick = (conv, joinRatePer100) => +((ratePer100Clicks(conv, joinRatePer100)) / 100).toFixed(6);
 
-// Network-average conversion — the fallback used to PRICE clicks on a card that
-// hasn't gathered its own conversion yet, so it still pays a sane, data-backed rate.
-// Averaged ONLY over CALIBRATION-ENABLED servers (the ones the owner trusts/measures)
-// — all their join-check joins ÷ the summed unique clickers per card, honoring the
-// reset cutoff. Callers compute it ONCE per pass (it scans two files). null when
-// those servers have no data yet. Once a card's OWN conversion exists, that takes over.
-function networkAvg(nowMs) {
-    const now = Number(nowMs) || Date.now();
-    const cfg = loadJSON('siteconfig.json', {});
-    const cal = (cfg && typeof cfg.cpcCalibrated === 'object' && !Array.isArray(cfg.cpcCalibrated)) ? cfg.cpcCalibrated : {};
-    const enabled = new Set(Object.keys(cal).filter((g) => cal[g]));
-    if (!enabled.size) return null;
-    const cut = Number(cfg.convResetAt) || 0;
-    const winStart = Math.max(now - CLICK_TTL, cut);
-    const v = loadJSON('verified.json', []);
-    const cl = loadJSON('cardclicks.json', []);
-    const jl = loadJSON('joinlinks.json', []);
-    // Net stays only — drop users who left the sponsor (a 'left' joinlink), keyed by
-    // user + card + role, so a leave counts against the network average too.
-    const left = new Set();
-    for (const r of (Array.isArray(jl) ? jl : [])) {
-        if (r && r.status === 'left') left.add(`${r.userId}|${r.cardGuildId}|${r.roleId || ''}`);
-    }
-    let joins = 0;
-    for (const u of (Array.isArray(v) ? v : [])) {
-        if (!u || !u.adKey || u.viaExtra || u.noCheck) continue;
-        if (!enabled.has(String(u.guildId))) continue;
-        if ((Number(u.timestamp) || 0) < winStart) continue;
-        if (left.has(`${u.id}|${u.guildId}|${u.roleId || ''}`)) continue;
-        joins++;
-    }
-    const perCard = new Map();   // clickers are per-card, so dedupe within a card then sum
-    for (const e of (Array.isArray(cl) ? cl : [])) {
-        if (!e || e.nc || e.na || !e.u || (Number(e.t) || 0) < winStart) continue;
-        if (!enabled.has(String(e.k || '').split(':')[0])) continue;
-        let s = perCard.get(e.k); if (!s) perCard.set(e.k, s = new Set());
-        s.add(String(e.u));
-    }
-    let clickers = 0; for (const s of perCard.values()) clickers += s.size;
-    if (joins <= 0 || clickers <= 0) return null;
-    return +Math.min(1, joins / clickers).toFixed(4);
+// Network-average conversion — the fallback used to PRICE clicks on a card that hasn't
+// been calibrated yet. Pooled across ALL manually-calibrated servers (calibtrack), so
+// conversion still comes ONLY from calibration, never from passive sponsor ads that
+// merely happen to run where our bot sits. null until some server has calibration data.
+function networkAvg() {
+    try { return calibtrack.networkAvg(); } catch { return null; }
 }
 
-// Live conversion for one card, computed from the stored stats. join-check joins =
-// counted (adKey) real joins, excluding the bonus extra-ad AND no-check virtual
-// joins (marked noCheck). clicks skip no-check (nc) events inside fromSamples.
-function forCard(guildId, roleId, creatorId, nowMs) {
-    // If this server was calibrated with the accurate member-tracking method (the bot
-    // watched who really joined/left the test sponsor), that conversion supersedes the
-    // 2-click join-check estimate — which undercounts joiners who never came back for
-    // the confirming click. Falls through to the estimate until calibration has data.
+// Conversion for one card — measured ONLY from manual calibration (calibtrack): our
+// bot on the test sponsor watched who really joined/left, per server. It is NOT taken
+// from passive sponsor ads that merely happen to run where our bot sits. No calibration
+// data for this server → null (the caller falls back to the network calibration avg).
+function forCard(guildId) {
     try {
         if (calibtrack.hasData(guildId)) {
             return { conv: calibtrack.conversionFor(guildId), joins: calibtrack.netJoins(guildId), clickers: calibtrack.clickers(guildId), source: 'calib' };
         }
-    } catch { /* fall back to the join-check estimate */ }
-    const v = loadJSON('verified.json', []);
-    const cl = loadJSON('cardclicks.json', []);
-    const jl = loadJSON('joinlinks.json', []);
-    // Conversion is NET STAYS, not gross joins (same as delivered()): a user who
-    // joined via this card and then LEFT the sponsor is not a conversion. A leave is
-    // a 'left' joinlink for this card — excluding them covers settled leavers and any
-    // case the verified-row removal hasn't caught, so leaves always count against it.
-    const left = new Set();
-    for (const r of (Array.isArray(jl) ? jl : [])) {
-        if (r && r.status === 'left' && String(r.cardGuildId) === String(guildId) && r.creatorId === creatorId && (r.roleId || null) === (roleId || null)) left.add(String(r.userId));
-    }
-    const ck = `${guildId || ''}:${roleId || ''}:${creatorId || ''}`;
-    const joinTs = [];
-    for (const u of (Array.isArray(v) ? v : [])) {
-        if (!u || u.creatorId !== creatorId || String(u.guildId) !== String(guildId)) continue;
-        if ((u.roleId || null) !== (roleId || null)) continue;
-        if (!u.adKey || u.viaExtra || u.noCheck) continue;
-        if (left.has(String(u.id))) continue;   // left the sponsor → not a stay
-        joinTs.push(Number(u.timestamp) || 0);
-    }
-    const clicks = (Array.isArray(cl) ? cl : []).filter((e) => e && e.k === ck).map((e) => ({ u: e.u, t: e.t, nc: e.nc, na: e.na }));
-    return fromSamples(joinTs, clicks, nowMs, resetAt());
+    } catch { /* no calibration data */ }
+    return { conv: null, joins: 0, clickers: 0, source: null };
 }
 
 module.exports = { SAMPLE, CALIB_RATE, calibRate, enabledFor, resetAt, noCheckEligible, fromSamples, forCard, networkAvg, ratePer100Clicks, ratePerClick };

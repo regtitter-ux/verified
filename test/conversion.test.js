@@ -65,37 +65,23 @@ test('noCheckEligible needs BOTH levers on AND a conversion', () => {
     assert.equal(conv.noCheckEligible(true, true, 0), true, 'a real 0% conversion is still a measured value');
 });
 
-test('networkAvg = join-check joins ÷ clickers, ONLY over calibration-enabled servers', () => {
+test('networkAvg is the pooled CALIBRATION conversion across servers (calibration only)', () => {
     reset();
-    seed({
-        'siteconfig.json': { cpcCalibrated: { g1: true, g2: true } },   // gX is NOT calibration-enabled
-        'verified.json': [
-            { id: 'a', guildId: 'g1', adKey: 'K', timestamp: NOW - 1000 },                 // counts
-            { id: 'b', guildId: 'g1', adKey: 'K', timestamp: NOW - 2000 },                 // counts
-            { id: 'c', guildId: 'g1', adKey: 'K', timestamp: NOW - 3000, noCheck: true },  // virtual → excluded
-            { id: 'd', guildId: 'g2', adKey: 'K', timestamp: NOW - 4000, viaExtra: true }, // bonus ad → excluded
-            { id: 'z', guildId: 'gX', adKey: 'K', timestamp: NOW - 500 }                   // server not calibrated → excluded
-        ],
-        'cardclicks.json': [
-            { k: 'g1:r:cr', u: 'a', t: NOW - 100 },
-            { k: 'g1:r:cr', u: 'b', t: NOW - 200 },
-            { k: 'g1:r:cr', u: 'a', t: NOW - 300 },              // dup clicker same card → 1
-            { k: 'g2:r:cr', u: 'x', t: NOW - 400 },              // other calibrated card → +1
-            { k: 'g2:r:cr', u: 'y', t: NOW - 500, nc: 1 },       // no-check click → excluded
-            { k: 'gX:r:cr', u: 'q', t: NOW - 100 }               // non-calibrated server → excluded
-        ]
-    });
-    // joins = a,b (g1) = 2; clickers = g1{a,b}=2 + g2{x}=1 = 3 → 0.6667
-    assert.ok(near(conv.networkAvg(NOW), 2 / 3), `2/3, got ${conv.networkAvg(NOW)}`);
+    seed({ 'calibtrack.json': { clicks: [
+        { u: 'a', g: 'g1', sp: 'SP', t: NOW }, { u: 'b', g: 'g1', sp: 'SP', t: NOW },
+        { u: 'x', g: 'g2', sp: 'SP', t: NOW }
+    ], joins: [
+        { u: 'a', g: 'g1', sp: 'SP', t: NOW + 1, left: 0 },
+        { u: 'x', g: 'g2', sp: 'SP', t: NOW + 1, left: 0 }
+    ] } });
+    // pooled net joins = a(g1) + x(g2) = 2; clickers = a,b(g1) + x(g2) = 3 → 0.6667
+    assert.ok(near(conv.networkAvg(), 2 / 3), `2/3, got ${conv.networkAvg()}`);
 });
 
-test('networkAvg is null with no calibration servers, or when they have no data', () => {
+test('networkAvg is null with no calibration data (passive ads do NOT feed it)', () => {
     reset();
-    seed({ 'verified.json': [], 'cardclicks.json': [] });
-    assert.equal(conv.networkAvg(NOW), null, 'no calibration-enabled servers → null');
-    reset();
-    seed({ 'siteconfig.json': { cpcCalibrated: { g1: true } }, 'verified.json': [], 'cardclicks.json': [] });
-    assert.equal(conv.networkAvg(NOW), null, 'enabled but empty → null');
+    seed({ 'verified.json': [{ id: 'u1', guildId: 'g1', adKey: 'K', timestamp: NOW }], 'cardclicks.json': [{ k: 'g1:r:cr', u: 'u1', t: NOW }] });
+    assert.equal(conv.networkAvg(), null, 'join-check ads alone → no network conversion');
 });
 
 test('conversion reset cutoff drops all join-check data before it', () => {
@@ -107,28 +93,26 @@ test('conversion reset cutoff drops all join-check data before it', () => {
     assert.equal(r.clickers, 2, 'only clicks after the cutoff count (old dropped)');
 });
 
-test('forCard measures NET STAYS — a user who left the sponsor is not counted', () => {
+test('forCard conversion comes ONLY from calibration (calibtrack), net of leavers', () => {
     reset();
-    seed({
-        'verified.json': [
-            { id: 'u1', guildId: 'G', roleId: 'R', creatorId: 'C', adKey: 'K', timestamp: NOW - 1000 },
-            { id: 'u2', guildId: 'G', roleId: 'R', creatorId: 'C', adKey: 'K', timestamp: NOW - 2000 }, // left (settled → row kept)
-            { id: 'u3', guildId: 'G', roleId: 'R', creatorId: 'C', adKey: 'K', timestamp: NOW - 3000 }
-        ],
-        'cardclicks.json': [
-            { k: 'G:R:C', u: 'u1', t: NOW - 900 },
-            { k: 'G:R:C', u: 'u2', t: NOW - 1900 },
-            { k: 'G:R:C', u: 'u3', t: NOW - 2900 },
-            { k: 'G:R:C', u: 'u4', t: NOW - 500 }   // clicked, never joined
-        ],
-        'joinlinks.json': [
-            { userId: 'u2', cardGuildId: 'G', roleId: 'R', creatorId: 'C', guildId: 'SP', status: 'left' }
-        ]
-    });
-    const r = conv.forCard('G', 'R', 'C', NOW);
-    assert.equal(r.joins, 2, 'u2 left → only u1,u3 count as stays');
-    assert.equal(r.clickers, 4, 'all four clickers still count in the denominator');
-    assert.ok(near(r.conv, 0.5), `2 stays / 4 clickers = 0.50, got ${r.conv}`);
+    seed({ 'calibtrack.json': { clicks: [
+        { u: 'u1', g: 'G', sp: 'SP', t: NOW }, { u: 'u2', g: 'G', sp: 'SP', t: NOW },
+        { u: 'u3', g: 'G', sp: 'SP', t: NOW }, { u: 'u4', g: 'G', sp: 'SP', t: NOW }
+    ], joins: [
+        { u: 'u1', g: 'G', sp: 'SP', t: NOW + 1, left: 0 },
+        { u: 'u2', g: 'G', sp: 'SP', t: NOW + 1, left: NOW + 2 }   // left → not a stay
+    ] } });
+    const r = conv.forCard('G');
+    assert.equal(r.source, 'calib');
+    assert.equal(r.joins, 1, 'u2 left → 1 net join');
+    assert.equal(r.clickers, 4);
+    assert.ok(near(r.conv, 0.25), `1 stay / 4 clickers = 0.25, got ${r.conv}`);
+});
+
+test('forCard is null when the server was never calibrated (no passive-ad conversion)', () => {
+    reset();
+    seed({ 'verified.json': [{ id: 'u1', guildId: 'G', roleId: 'R', creatorId: 'C', adKey: 'K', timestamp: NOW }], 'cardclicks.json': [{ k: 'G:R:C', u: 'u1', t: NOW }] });
+    assert.equal(conv.forCard('G', 'R', 'C').conv, null, 'no calibration → no conversion');
 });
 
 test('ratePer100Clicks = joinRate × conversion (matches per-join earnings)', () => {
