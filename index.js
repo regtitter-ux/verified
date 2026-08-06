@@ -1855,26 +1855,43 @@ async function handleCalibJoin(sponsorGuildId, userId) {
 // Reconcile joins the realtime GuildMemberAdd missed (bot restart / intent gap): for
 // calibration clicks with no tracked join yet, check if the user is NOW on the
 // sponsor and, if so, credit them — so no real join goes unpaid.
+let _calibCursor = 0;   // rotates through the older unattributed backlog across ticks
 function startCalibSweep() {
     const every = Number(process.env.CALIB_SWEEP_MS) || 5 * 60 * 1000;
     const tick = async () => {
         try {
-            const pend = calibtrack.unattributed();
-            let checked = 0;
-            for (const c of pend) {
-                if (checked >= 40) break;                     // bound the membership checks per tick
-                const bot = clients.find((cl) => { try { return cl.isReady() && cl.guilds.cache.has(c.sp); } catch { return false; } });
-                if (!bot) continue;                           // sponsor not covered → can't verify presence
-                checked++;
+            // Build the batch: the NEWEST unattributed clicks (a recent clicker is the
+            // one who may have JUST joined) PLUS a rotating slice of the older backlog
+            // (so a straggler who joins long after clicking is still caught eventually).
+            // The old order (oldest-first, fixed cap) got stuck re-checking a wall of
+            // hours-old non-joiners and never reached newer joiners — halting tracking.
+            const pend = calibtrack.unattributed().sort((a, b) => (b.t || 0) - (a.t || 0));
+            const NEWEST = 55, ROTATE = 25;
+            const batch = pend.slice(0, NEWEST);
+            const rest = pend.slice(NEWEST);
+            if (rest.length) {
+                _calibCursor %= rest.length;
+                for (let i = 0; i < Math.min(ROTATE, rest.length); i++) batch.push(rest[(_calibCursor + i) % rest.length]);
+                _calibCursor = (_calibCursor + ROTATE) % rest.length;
+            }
+            for (const c of batch) {
+                if (!c.sp || !c.u) continue;
+                const bot = clients.find((cl) => { try { return cl.isReady() && cl.guilds.cache.has(c.sp); } catch { return false; } }) || null;
+                const reserveCovers = !bot && usertoken.enabled() && await usertoken.coversGuild(c.sp).catch(() => false);
+                if (!bot && !reserveCovers) continue;         // sponsor not reachable → can't verify presence
                 const present = await isMember(bot, c.sp, c.u).catch(() => null);
                 if (present === true) await handleCalibJoin(c.sp, c.u).catch(() => null);
             }
         } catch (e) { console.error('[CALIB] sweep error:', e && e.message); }
     };
     setInterval(tick, every);
-    setTimeout(tick, 150 * 1000);   // after the fleet's caches have filled
+    setTimeout(tick, 40 * 1000);   // kick in soon after boot (once guild caches fill)
     console.log(`[CALIB] join reconcile sweep every ${Math.round(every / 60000)}m`);
 }
+// Backfill card (role/creator) onto older calibration joins so per-card conversion
+// counts them (pre-per-card joins otherwise read as 0 → every card shows the network
+// average). Idempotent, cheap; runs once now that the fleet has loaded.
+try { calibtrack.migrateJoins(); } catch (e) { console.error('[CALIB] migrate error:', e && e.message); }
 startCalibSweep();
 
 // Join-check reconciliation: reverse payouts when users leave the sponsor server.

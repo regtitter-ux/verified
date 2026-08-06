@@ -83,7 +83,7 @@ function unattributed() {
     const out = [];
     for (const c of clicks) {
         if (c && c.u && c.sp && !active.has(c.u + '|' + c.sp)) {
-            out.push({ u: c.u, g: c.g, sp: c.sp, cr: c.cr || '', r: c.r || null, ch: c.ch || null, cid: c.cid || '' });
+            out.push({ u: c.u, g: c.g, sp: c.sp, cr: c.cr || '', r: c.r || null, ch: c.ch || null, cid: c.cid || '', t: Number(c.t) || 0 });
         }
     }
     return out;
@@ -137,6 +137,28 @@ function hasData(guild, roleIds, creator) {
     return load().clicks.some((c) => c && inScope(c, guild, roleIds, creator));
 }
 
+// One-time migration: join records written BEFORE conversion went per-card carry no
+// role/creator, so per-card queries miss them (every card falls back to the network
+// average — the "0 joins / same % on every card" symptom). Stamp each old join with
+// the card from the user's click for that sponsor. Idempotent (skips already-stamped);
+// safe to call at every startup.
+function migrateJoins() {
+    mutate(FILE, (d) => {
+        if (!Array.isArray(d.joins) || !Array.isArray(d.clicks)) return false;
+        let changed = false;
+        for (const j of d.joins) {
+            if (!j || j.r !== undefined) continue;   // already card-stamped
+            const click = d.clicks
+                .filter((c) => c && c.u === j.u && c.sp === j.sp)
+                .sort((a, b) => (Number(b.t) || 0) - (Number(a.t) || 0))[0];
+            j.r = click ? (click.r || null) : null;
+            j.cr = click ? (click.cr || '') : '';
+            changed = true;
+        }
+        if (!changed) return false;
+    }, FALLBACK);
+}
+
 // Network-wide calibration conversion: pooled net real joins ÷ clickers across ALL
 // calibrated servers. The fallback for a card that hasn't been calibrated yet — so
 // conversion still comes ONLY from calibration, never from passive sponsor ads.
@@ -150,4 +172,4 @@ function networkAvg() {
     return +Math.min(1, joined.size / clk.size).toFixed(4);
 }
 
-module.exports = { recordClick, onJoin, onLeave, netJoins, clickers, conversionFor, hasData, networkAvg, unattributed };
+module.exports = { recordClick, onJoin, onLeave, netJoins, clickers, conversionFor, hasData, networkAvg, unattributed, migrateJoins };

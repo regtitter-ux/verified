@@ -1,7 +1,7 @@
 require('./setup');
 const { test, beforeEach } = require('node:test');
 const assert = require('node:assert');
-const { reset } = require('./setup');
+const { reset, seed } = require('./setup');
 const ct = require('../calibtrack.js');
 
 const NOW = 1_700_000_000_000;
@@ -63,6 +63,19 @@ test('conversion is measured PER CARD (role + creator), not pooled onto every ca
     assert.equal(ct.conversionFor('G', 'R2', 'CR'), null, 'card B has its own (no joins yet) — NOT card A\'s number');
     assert.equal(ct.conversionFor('G'), 0.25, 'server-level pools all cards (1/4)');
     assert.equal(ct.netJoins('G'), 1, 'server delivery counter sums all cards');
+});
+
+test('migrateJoins() backfills the card (role+creator) onto old joins from the matching click', () => {
+    // Old-format data: click carries the card, but the join (pre-per-card) does not.
+    seed({ 'calibtrack.json': {
+        clicks: [{ u: 'u1', g: 'G', sp: 'SP', t: NOW, r: 'R1', cr: 'CR' }],
+        joins: [{ u: 'u1', g: 'G', sp: 'SP', t: NOW + 1, left: 0 }]   // no r/cr
+    } });
+    assert.equal(ct.netJoins('G', 'R1', 'CR'), 0, 'before migrate: old join not attributed to its card');
+    ct.migrateJoins();
+    assert.equal(ct.netJoins('G', 'R1', 'CR'), 1, 'after migrate: join attributed to its card');
+    assert.equal(ct.conversionFor('G', 'R1', 'CR'), 1, '1 join / 1 clicker');
+    assert.equal(ct.netJoins('G'), 1, 'server-level unchanged');
 });
 
 test('unattributed() lists clicks with no active tracked join (for the reconcile sweep)', () => {
