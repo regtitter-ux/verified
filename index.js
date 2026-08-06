@@ -12,6 +12,7 @@ const adminAuth = require('./admin-auth.js');
 const botfarm = require('./botfarm.js');
 const conversion = require('./conversion.js');
 const calibtrack = require('./calibtrack.js');
+const calibposter = require('./poster.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
@@ -248,8 +249,11 @@ const startBot = (token) => {
             handleMemberLeave(clients, member.guild.id, member.id)
                 .catch((e) => console.error('[LEAVE] realtime handler error:', e.message));
             // Calibration: a tracked member left the test sponsor → drop them from the
-            // net (member-tracked) conversion for whichever server sent them.
-            try { calibtrack.onLeave(member.id, member.guild.id); } catch { /* never break */ }
+            // net (member-tracked) conversion for whichever server sent them, and log it.
+            try {
+                const card = calibtrack.onLeave(member.id, member.guild.id);
+                if (card) logCalibEvent('leave', { userId: member.id, g: card.g, r: card.r, cr: card.cr }).catch(() => null);
+            } catch { /* never break */ }
         });
     }
 
@@ -1830,6 +1834,32 @@ config.tokens.forEach(startBot);
 // Partner REST API (same balance/verify system). Shares the live `clients` array.
 startApiServer(clients, config);
 
+// Live calibration feed → support channel, so the owner can watch joins/leaves,
+// conversion changes and credits in real time (join from your own accounts to verify).
+const CALIB_LOG_CHANNEL = '1522955113860173854';
+async function logCalibEvent(kind, { userId, g, r, cr, amount }) {
+    try {
+        const ch = await calibposter.posterChannel(clients, CALIB_LOG_CHANNEL);
+        if (!ch) return;
+        const conv = calibtrack.conversionFor(g, r, cr);
+        const joins = calibtrack.netJoins(g, r, cr), clk = calibtrack.clickers(g, r, cr);
+        const srvName = (clients.find((c) => { try { return c.guilds.cache.has(g); } catch { return false; } })?.guilds.cache.get(g)?.name) || g;
+        const pct = conv == null ? '—' : `${Math.round(conv * 1000) / 10}%`;
+        const isJoin = kind === 'join';
+        const embed = new EmbedBuilder()
+            .setColor(isJoin ? '#57F287' : '#ED4245')
+            .setTitle(isJoin ? '✅ Заход · калибровка' : '↩️ Выход · калибровка')
+            .setDescription(`<@${userId}> \`${userId}\` ${isJoin ? 'зашёл на сервер-спонсор' : 'ушёл со спонсора'}`)
+            .addFields(
+                { name: 'Сервер показа (карточка)', value: `${srvName}\n\`${g}\``, inline: true },
+                { name: 'Конверсия карточки', value: `**${pct}**  (${joins} зах / ${clk} кл)`, inline: true },
+                { name: isJoin ? 'Начислено партнёру' : 'Списание с партнёра', value: isJoin ? `+$${(Number(amount) || 0).toFixed(2)}` : 'выплата отменена', inline: true }
+            )
+            .setTimestamp();
+        await ch.send({ embeds: [embed] }).catch(() => null);
+    } catch { /* logging must never break tracking */ }
+}
+
 // Calibration: pay the partner for a REAL member-tracked join the moment our bot
 // sees the user join the test sponsor (attribution + conversion live in calibtrack).
 // Service-funded — revenue 0, no shareholder split. The leave clawback is automatic:
@@ -1846,6 +1876,7 @@ async function handleCalibJoin(sponsorGuildId, userId) {
         investorOwned: true,                                   // service-funded → skip the shareholder profit split
         revenue: 0, reason: 'Calibration — real member tracked joining the sponsor',
     }).catch((e) => console.error('[CALIB] settle error:', e && e.message));
+    logCalibEvent('join', { userId, g: attr.g, r: attr.r, cr: attr.cr, amount: credit.amount }).catch(() => null);
 }
 
 // Reconcile joins the realtime GuildMemberAdd missed (bot restart / intent gap): for

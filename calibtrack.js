@@ -91,16 +91,25 @@ function unattributed() {
 
 // A member left a sponsor → mark their active tracked join as left (drops out of the
 // net conversion, exactly like the order counter's net-stays basis).
+// Returns the card {g, r, cr} of the join it marked left (for the live log), or null.
 function onLeave(userId, sponsor, nowMs) {
     const u = String(userId || ''), sp = String(sponsor || '');
-    if (!u || !sp) return;
+    if (!u || !sp) return null;
     const now = Number(nowMs) || Date.now();
+    let card = null;
     mutate(FILE, (d) => {
         if (!Array.isArray(d.joins)) return false;
         let changed = false;
-        for (const j of d.joins) { if (j && j.u === u && j.sp === sp && !j.left) { j.left = now; changed = true; } }
+        for (const j of d.joins) {
+            if (j && j.u === u && j.sp === sp && !j.left) {
+                j.left = now;
+                if (!card) card = { g: j.g, r: j.r || null, cr: j.cr || '' };
+                changed = true;
+            }
+        }
         if (!changed) return false;
     }, FALLBACK);
+    return card;
 }
 
 // Scope match: pass roleIds+creator to measure ONE CARD (guild + its role(s) + owner);
