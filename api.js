@@ -3235,20 +3235,13 @@ async function handleBuyer(req, res, path, clients, config) {
         const sponsorGuildId = (inv && inv.guild && inv.guild.id) || null;
         if (!sponsorGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
 
-        // Staff-only: create this order as a NO-CHECK (CPC) campaign. It delivers
-        // statistically (virtual joins by conversion) and therefore does NOT need a
-        // bot on the sponsor — so the no-bot guard below is skipped. Regular buyers
-        // can't opt in; their orders still require coverage.
-        const wantNoCheck = Boolean(body?.noCheck) && isAdminBuyer;
-
-        // The sponsor must be join-checkable — a network bot on it, OR the reserve
-        // covers it — otherwise NOTHING can deliver and the order would freeze at
-        // 0 delivered. Warn the buyer to add the bot (the frontend shows the invite
-        // link on 'no-bot') BEFORE taking any payment, instead of silently creating
-        // an undeliverable campaign. (The invite-change endpoint already does this.)
-        // A no-check order is exempt (delivers without coverage on calibrated servers).
+        // No bot is required to order anymore. If the sponsor has NO bot/reserve on
+        // it, the order runs as NO-CHECK (delivers statistically via no-check ads). If
+        // it IS covered, it keeps the join-check flow (staff can still force no-check).
+        // Nothing is blocked on coverage — any buyer can order for a botless server.
         const covered = await coveredGuildIds(clients);
-        if (!covered.has(sponsorGuildId) && !wantNoCheck) return send(res, 400, { error: 'no-bot' }, cors);
+        const hasBot = covered.has(sponsorGuildId);
+        const wantNoCheck = !hasBot || (Boolean(body?.noCheck) && isAdminBuyer);
 
         const isMgr = managers.isManager(buyerId);
         const pricePer100 = isMgr ? managers.PRICE_PER_100 : campaigns.PRICE_PER_100;
@@ -3578,11 +3571,10 @@ async function handleBuyer(req, res, path, clients, config) {
         const inv = await proxy.getInvite(inviteCode);
         const newGuildId = (inv && inv.guild && inv.guild.id) || null;
         if (!newGuildId) return send(res, 400, { error: 'bad-invite' }, cors);
-        // …and the server must be join-checkable: a network bot on it, OR the
-        // reserve user account (selfbot) is a member (invisible fallback). A no-check
-        // (CPC) campaign is exempt — it delivers without coverage.
+        // No bot requirement: changing to a botless server just switches the order to
+        // NO-CHECK delivery (a covered server keeps its current mode).
         const covered = await coveredGuildIds(clients);
-        if (!covered.has(newGuildId) && !c.noCheck) return send(res, 400, { error: 'no-bot' }, cors);
+        const newHasBot = covered.has(newGuildId);
 
         let dirty = false;
         const newInvite = `https://discord.gg/${inviteCode}`;
@@ -3594,6 +3586,7 @@ async function handleBuyer(req, res, path, clients, config) {
             c.sponsorGuildId = newGuildId;
             c.serverName = inv.guild?.name || c.serverName || null;
             c.inviteChangedAt = Date.now();
+            if (!newHasBot) c.noCheck = true;   // botless sponsor → runs as no-check
             dirty = true;
         }
         // The invite is confirmed working + join-checkable above, so revive an

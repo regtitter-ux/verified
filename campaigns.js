@@ -264,8 +264,6 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds, botId) {
     // servers the owner flagged NSFW live in siteconfig.nsfwServers (keyed by guild).
     const sc = loadJSON('siteconfig.json', {});
     const displayIsNsfw = Boolean(sc && sc.nsfwServers && sc.nsfwServers[displayGuildId]);
-    const cpcCal = (sc && sc.cpcCalibrated && typeof sc.cpcCalibrated === 'object') ? sc.cpcCalibrated : {};
-    const displayCalibrated = Boolean(cpcCal[displayGuildId]);
     const eligible = [];
     for (const c of Object.values(camps)) {
         if (!c || c.status !== 'active' || c.paused || c.autoPaused) continue;
@@ -279,11 +277,9 @@ function eligibleForGuild(displayGuildId, verifiedList, botGuildIds, botId) {
         // exactly like the per-server opt-out (only applies when a botId is given).
         if (bid && Array.isArray(c.disabledBots) && c.disabledBots.includes(bid)) continue;
         // Coverage: the sponsor normally needs a bot/reserve on it so joins can be
-        // verified. A no-check (CPC) campaign delivers statistically and can run
-        // WITHOUT sponsor coverage — but only on a CALIBRATED display server, where
-        // no-check actually fires (on a non-calibrated server it couldn't deliver, so
-        // don't waste the show there).
-        if (botGuildIds && !botGuildIds.has(c.sponsorGuildId) && !(c.noCheck && displayCalibrated)) continue;
+        // verified (join-check). A NO-CHECK order delivers statistically and runs
+        // WITHOUT sponsor coverage on ANY display server — so it's exempt from this.
+        if (botGuildIds && !botGuildIds.has(c.sponsorGuildId) && !c.noCheck) continue;
         const del = delivered(c, list, camps);
         const remaining = c.purchased - del;
         if (remaining <= 0) continue;                                      // already done

@@ -1525,10 +1525,9 @@ const startBot = (token) => {
             // (probability = the card's live conversion) through the normal creditJoin
             // money path. Only when an ad is shown AND a conversion is measured to
             // price it; otherwise the show stays join-check.
-            // Two manual levers compose here (AND), for a cautious rollout:
-            //   1. the PARTNER server is CPC-calibrated (conversion.enabledFor), and
-            //   2. THIS specific ad/campaign is opted into no-check (camp.noCheck, the
-            //      per-order toggle) — so no-check runs only where both are on.
+            // No bot on the sponsor = a no-check order (camp.noCheck) — it runs no-check
+            // on ANY display server (no per-server calibration opt-in needed), priced by
+            // the card's calibrated conversion or the network calibration average.
             // Ads without a campaign (house/global) can't be opted in → stay join-check.
             let noCheck = false, cpcConv = null, calibration = false;
             if (latest && roleId && latest.campaignId) {
@@ -1540,17 +1539,15 @@ const startBot = (token) => {
                     // sponsor (our bot is on it), via calibtrack + gateway member events.
                     calibration = true;
                 } else {
-                    const serverEnabled = conversion.enabledFor(guild.id);
                     const optedIn = Boolean(camp && camp.noCheck);
-                    // Only compute conversion when both levers are on (skip the scan otherwise).
-                    // Fall back to the network-average conversion until THIS card has gathered
-                    // its own — so a fresh card pays a sane service-wide rate (overpay guard),
-                    // then auto-switches to its individual number once measured.
-                    if (serverEnabled && optedIn) {
+                    // Price the click: this card's OWN calibrated conversion once it exists,
+                    // else the network calibration average (so a not-yet-calibrated card
+                    // still pays a sane rate). null → can't price → stays join-check.
+                    if (optedIn) {
                         const own = conversion.forCard(guild.id, roleId, creatorId).conv;
                         cpcConv = own != null ? own : conversion.networkAvg();
                     }
-                    if (conversion.noCheckEligible(serverEnabled, optedIn, cpcConv)) {
+                    if (conversion.noCheckEligible(optedIn, cpcConv)) {
                         // If the sponsor has NO bot/reserve on it, join-check is impossible →
                         // run 100% no-check (no calibration split). If it IS covered, keep the
                         // small calibration fraction as join-check to refresh conversion with

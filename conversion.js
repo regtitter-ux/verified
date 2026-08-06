@@ -34,8 +34,11 @@ function calibRate() {
 // specific ad/campaign opted into no-check (campaignOptedIn) — AND a conversion
 // exists to price the click. The per-show coin-flip (calibRate) happens in the
 // handler; this is the yes/no gate that must pass before a virtual join can pay.
-function noCheckEligible(serverEnabled, campaignOptedIn, conv) {
-    return Boolean(serverEnabled) && Boolean(campaignOptedIn) && conv != null;
+function noCheckEligible(campaignOptedIn, conv) {
+    // A no-check order runs on ANY display server (no per-server calibration opt-in
+    // required) — it just needs a conversion to price the click (the card's own
+    // calibrated number, or the network calibration average).
+    return Boolean(campaignOptedIn) && conv != null;
 }
 
 // A hard reset cutoff (siteconfig.convResetAt): conversion ignores all join-check

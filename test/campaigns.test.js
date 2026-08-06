@@ -16,18 +16,19 @@ function joins(n, base = T2 + 1000) {
 
 beforeEach(() => reset());
 
-test('a no-check campaign is eligible WITHOUT sponsor coverage, but only on a calibrated display server', () => {
+test('a no-check (botless) campaign is eligible WITHOUT sponsor coverage on ANY display server', () => {
     const NC = { id: 'NC', invite: 'https://discord.gg/nc', sponsorGuildId: 'SPON_NOBOT', status: 'active', purchased: 100, paidAt: T1, noCheck: true };
     const REG = { id: 'REG', invite: 'https://discord.gg/reg', sponsorGuildId: 'SPON_NOBOT2', status: 'active', purchased: 100, paidAt: T1 };
-    seed({ 'campaigns.json': { NC, REG }, 'verified.json': [], 'siteconfig.json': { cpcCalibrated: { CALIB: true } } });
+    seed({ 'campaigns.json': { NC, REG }, 'verified.json': [] });
     const covered = new Set();   // nobody is covered
 
-    const onCalib = campaigns.eligibleForGuild('CALIB', [], covered).map((e) => e.id);
-    assert.ok(onCalib.includes('NC'), 'no-check delivers on a calibrated server despite no sponsor bot');
-    assert.ok(!onCalib.includes('REG'), 'a normal uncovered campaign is never eligible');
-
-    const onPlain = campaigns.eligibleForGuild('PLAIN', [], covered).map((e) => e.id);
-    assert.ok(!onPlain.includes('NC'), 'no-check needs a calibrated display server (elsewhere it can\'t deliver)');
+    // No bot requirement anymore: a no-check order shows everywhere; a join-check
+    // (non-noCheck) order with no sponsor bot still can't deliver, so it's excluded.
+    for (const g of ['CALIB', 'PLAIN']) {
+        const ids = campaigns.eligibleForGuild(g, [], covered).map((e) => e.id);
+        assert.ok(ids.includes('NC'), `no-check order delivers on ${g} despite no sponsor bot`);
+        assert.ok(!ids.includes('REG'), `a join-check order with no bot is never eligible (${g})`);
+    }
 });
 
 test('calibration delivery = REAL member-tracked joins per server (calibtrack, net of leavers)', () => {
