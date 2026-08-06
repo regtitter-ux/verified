@@ -53,10 +53,6 @@ test('no-ad (na) clicks are excluded from the conversion denominator', () => {
     assert.ok(near(r.conv, 0.5), `10/20 = 0.50 (no-ad clicks must not dilute it), got ${r.conv}`);
 });
 
-test('CALIB_RATE is a fraction in (0, 1]', () => {
-    assert.ok(conv.CALIB_RATE > 0 && conv.CALIB_RATE <= 1, `got ${conv.CALIB_RATE}`);
-});
-
 test('noCheckEligible needs the order opted in AND a conversion (no per-server gate)', () => {
     assert.equal(conv.noCheckEligible(true, 0.2), true, 'opted-in ad + conv → eligible on any server');
     assert.equal(conv.noCheckEligible(false, 0.2), false, 'ad not opted in → no');

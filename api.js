@@ -2472,7 +2472,7 @@ async function handleAdmin(req, res, path, clients, config) {
             avgConv: sConvD > 0 ? +(sConvN / sConvD).toFixed(4) : null,
             totalNoCheckJoins: totNcAll, totalNoCheckClicksWeek: totNcWk,
             totalJoinCheckJoins: totJc, estPaidUsd: +(totPaidCents / 100).toFixed(2),
-            calibRate: conversion.calibRate(), sample: conversion.SAMPLE,
+            sample: conversion.SAMPLE,
             calibrationInvite: cfg.calibrationInvite || '',
             calibrationConfigured: Boolean(cfg.calibrationSponsorGuildId),
             convResetAt: Number(cfg.convResetAt) || 0
@@ -2554,22 +2554,6 @@ async function handleAdmin(req, res, path, clients, config) {
         campaigns.saveCampaigns(camps);
         auditDo('calibration.start', `${gid} (${id}) sponsor=${sponsor}`);
         return send(res, 200, { ok: true, running: true, gid, campaignId: id }, cors);
-    }
-
-    // Owner-only: tune the global calibration share — the fraction of shows kept
-    // join-check to keep measuring conversion (the rest run no-check). Stored in
-    // siteconfig.cpcCalibRate, read live by conversion.calibRate().
-    if (path === '/admin/cpc-rate' && req.method === 'PUT') {
-        if (!isOwner) return ownerOnly();
-        const body = await readBody(req);
-        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
-        const rate = Number(body?.rate);
-        if (!Number.isFinite(rate) || rate <= 0 || rate > 1) return send(res, 400, { error: 'rate must be in (0,1]' }, cors);
-        const cfg = loadJSON('siteconfig.json', {});
-        cfg.cpcCalibRate = +rate.toFixed(4);
-        saveJSON('siteconfig.json', cfg);
-        auditDo('cpc.rate', String(cfg.cpcCalibRate));
-        return send(res, 200, { ok: true, rate: cfg.cpcCalibRate }, cors);
     }
 
     // Owner-only: assign the recipient of a server's net join profit ("доля сервера").

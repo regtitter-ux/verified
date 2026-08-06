@@ -1547,15 +1547,11 @@ const startBot = (token) => {
                         const own = conversion.forCard(guild.id, roleId, creatorId).conv;
                         cpcConv = own != null ? own : conversion.networkAvg();
                     }
-                    if (conversion.noCheckEligible(optedIn, cpcConv)) {
-                        // If the sponsor has NO bot/reserve on it, join-check is impossible →
-                        // run 100% no-check (no calibration split). If it IS covered, keep the
-                        // small calibration fraction as join-check to refresh conversion with
-                        // real signal from this sponsor.
-                        const sid = latest.sponsorGuildId;
-                        const covered = Boolean(sid && (clients.some((cl) => cl.guilds.cache.has(sid)) || usertoken.coveringBotId(sid)));
-                        noCheck = covered ? (Math.random() >= conversion.calibRate()) : true;
-                    }
+                    // A no-check order runs 100% no-check. There's no passive join-check
+                    // "calibration split" anymore — conversion is measured only by the
+                    // manual calibration (member-tracking), so keeping some shows on
+                    // join-check would measure nothing and just waste them.
+                    if (conversion.noCheckEligible(optedIn, cpcConv)) noCheck = true;
                 }
             }
             pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv, calibration });

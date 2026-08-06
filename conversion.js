@@ -17,23 +17,11 @@ const calibtrack = require('./calibtrack.js');
 
 const SAMPLE = 100;                      // conversion looks at the last N join-check joins
 const CLICK_TTL = 7 * 86400000;          // clicks are retained ~7d (cards.js CLICK_TTL)
-// On a calibrated server this fraction of shows STAYS join-check (to keep measuring
-// the real conversion); the rest run no-check and pay per click. 0.15 = 15% calibration.
-const CALIB_RATE = (() => { const v = Number(process.env.CPC_CALIBRATION_RATE); return (Number.isFinite(v) && v > 0 && v <= 1) ? v : 0.15; })();
-// Live calibration share: owner can tune it from the admin panel (siteconfig.cpcCalibRate),
-// falling back to the env default. Bounded to (0,1] — never let it hit 0 (would stop
-// measuring conversion entirely) or exceed 1.
-function calibRate() {
-    const cfg = loadJSON('siteconfig.json', {});
-    const v = Number(cfg && cfg.cpcCalibRate);
-    return (Number.isFinite(v) && v > 0 && v <= 1) ? v : CALIB_RATE;
-}
 
-// Is a NO-CHECK show permitted for this (partner server, ad) pair? Both manual
-// levers must be on — the partner server is CPC-calibrated (serverEnabled) AND the
-// specific ad/campaign opted into no-check (campaignOptedIn) — AND a conversion
-// exists to price the click. The per-show coin-flip (calibRate) happens in the
-// handler; this is the yes/no gate that must pass before a virtual join can pay.
+// Is a NO-CHECK show permitted for this ad? The order must be opted into no-check
+// (campaignOptedIn) AND a conversion must exist to price the click. When both hold the
+// show runs no-check (there's no join-check split anymore — conversion is measured
+// only by the manual calibration, not by passively keeping some shows on join-check).
 function noCheckEligible(campaignOptedIn, conv) {
     // A no-check order runs on ANY display server (no per-server calibration opt-in
     // required) — it just needs a conversion to price the click (the card's own
@@ -129,4 +117,4 @@ function forCard(guildId, roleIds, creatorId) {
     return { conv: null, joins: 0, clickers: 0, source: null };
 }
 
-module.exports = { SAMPLE, CALIB_RATE, calibRate, enabledFor, resetAt, noCheckEligible, fromSamples, forCard, networkAvg, ratePer100Clicks, ratePerClick };
+module.exports = { SAMPLE, enabledFor, resetAt, noCheckEligible, fromSamples, forCard, networkAvg, ratePer100Clicks, ratePerClick };
