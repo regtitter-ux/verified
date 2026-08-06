@@ -537,8 +537,8 @@ function enrichCards(clients, records) {
         // calibration data → null, then the network calibration average prices clicks.
         let conv = { conv: null, joins: 0, clickers: 0 };
         let calibSourced = false;
-        if (calibtrack.hasData(c.guildId)) {
-            conv = { conv: calibtrack.conversionFor(c.guildId), joins: calibtrack.netJoins(c.guildId), clickers: calibtrack.clickers(c.guildId) };
+        if (calibtrack.hasData(c.guildId, roleIds, c.creatorId)) {
+            conv = { conv: calibtrack.conversionFor(c.guildId, roleIds, c.creatorId), joins: calibtrack.netJoins(c.guildId, roleIds, c.creatorId), clickers: calibtrack.clickers(c.guildId, roleIds, c.creatorId) };
             calibSourced = true;
         }
         const joinRate = Number.isFinite(Number((settingsAll[c.creatorId] || {}).joinBid)) ? Number(settingsAll[c.creatorId].joinBid) : 5;

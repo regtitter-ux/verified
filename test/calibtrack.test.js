@@ -53,6 +53,18 @@ test('a join is attributed to the MOST RECENT calibration click across servers',
     assert.equal(ct.clickers('A'), 1, 'A still counts its clicker in the denominator');
 });
 
+test('conversion is measured PER CARD (role + creator), not pooled onto every card', () => {
+    const A = { creatorId: 'CR', roleId: 'R1', channelId: 'CH', campaignId: 'CID' };
+    const B = { creatorId: 'CR', roleId: 'R2', channelId: 'CH', campaignId: 'CID' };   // same server + owner, different card
+    ct.recordClick('u1', 'G', 'SP', A, NOW); ct.recordClick('u2', 'G', 'SP', A, NOW);   // card A: 2 clickers
+    ct.recordClick('u3', 'G', 'SP', B, NOW); ct.recordClick('u4', 'G', 'SP', B, NOW);   // card B: 2 clickers
+    ct.onJoin('u1', 'SP', NOW + 1);                                                      // u1 (card A) really joins
+    assert.equal(ct.conversionFor('G', 'R1', 'CR'), 0.5, 'card A = 1 join / 2 clickers');
+    assert.equal(ct.conversionFor('G', 'R2', 'CR'), null, 'card B has its own (no joins yet) — NOT card A\'s number');
+    assert.equal(ct.conversionFor('G'), 0.25, 'server-level pools all cards (1/4)');
+    assert.equal(ct.netJoins('G'), 1, 'server delivery counter sums all cards');
+});
+
 test('unattributed() lists clicks with no active tracked join (for the reconcile sweep)', () => {
     ct.recordClick('u1', 'A', 'SP', M, NOW);
     ct.recordClick('u2', 'A', 'SP', M, NOW);

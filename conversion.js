@@ -115,10 +115,15 @@ function networkAvg() {
 // bot on the test sponsor watched who really joined/left, per server. It is NOT taken
 // from passive sponsor ads that merely happen to run where our bot sits. No calibration
 // data for this server → null (the caller falls back to the network calibration avg).
-function forCard(guildId) {
+function forCard(guildId, roleIds, creatorId) {
     try {
-        if (calibtrack.hasData(guildId)) {
-            return { conv: calibtrack.conversionFor(guildId), joins: calibtrack.netJoins(guildId), clickers: calibtrack.clickers(guildId), source: 'calib' };
+        if (calibtrack.hasData(guildId, roleIds, creatorId)) {
+            return {
+                conv: calibtrack.conversionFor(guildId, roleIds, creatorId),
+                joins: calibtrack.netJoins(guildId, roleIds, creatorId),
+                clickers: calibtrack.clickers(guildId, roleIds, creatorId),
+                source: 'calib'
+            };
         }
     } catch { /* no calibration data */ }
     return { conv: null, joins: 0, clickers: 0, source: null };

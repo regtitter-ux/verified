@@ -36,11 +36,14 @@ function recordClick(userId, calibGuild, sponsor, meta, nowMs) {
     if (!u || !g || !sp) return;
     const now = Number(nowMs) || Date.now();
     const m = meta || {};
+    const r = m.roleId ? String(m.roleId) : null, cr = String(m.creatorId || '');
     mutate(FILE, (d) => {
         if (!Array.isArray(d.clicks)) d.clicks = [];
         if (!Array.isArray(d.joins)) d.joins = [];
-        d.clicks = d.clicks.filter((c) => c && c.t > now - TTL && !(c.u === u && c.g === g));
-        d.clicks.push({ u, g, sp, t: now, cr: String(m.creatorId || ''), r: m.roleId ? String(m.roleId) : null, ch: m.channelId ? String(m.channelId) : null, cid: String(m.campaignId || '') });
+        // Dedup per CARD (user + guild + role + creator), not per guild — a user can
+        // click different cards on the same server; each card measures its own conversion.
+        d.clicks = d.clicks.filter((c) => c && c.t > now - TTL && !(c.u === u && c.g === g && (c.r || null) === r && String(c.cr || '') === cr));
+        d.clicks.push({ u, g, sp, t: now, cr, r, ch: m.channelId ? String(m.channelId) : null, cid: String(m.campaignId || '') });
         d.joins = d.joins.filter((j) => j && j.t > now - TTL);
     }, FALLBACK);
 }
@@ -64,7 +67,8 @@ function onJoin(userId, sponsor, nowMs) {
             .sort((a, b) => b.t - a.t)[0];
         if (!click) return false;   // joined without a calibration click → not ours
         attributed = { g: click.g, cr: click.cr || '', r: click.r || null, ch: click.ch || null, cid: click.cid || '' };
-        d.joins.push({ u, g: click.g, sp, t: now, left: 0 });
+        // Stamp the card (role + creator) on the join so conversion is measured PER CARD.
+        d.joins.push({ u, g: click.g, r: click.r || null, cr: click.cr || '', sp, t: now, left: 0 });
     }, FALLBACK);
     return attributed;
 }
@@ -99,31 +103,38 @@ function onLeave(userId, sponsor, nowMs) {
     }, FALLBACK);
 }
 
-// Net real joins attributed to this calibration server (joined, not left) — unique users.
-function netJoins(calibGuild) {
-    const g = String(calibGuild || '');
+// Scope match: pass roleIds+creator to measure ONE CARD (guild + its role(s) + owner);
+// omit roleIds (undefined/null) to measure the WHOLE SERVER (all its cards pooled —
+// used for the calibration delivery counter). roleIds may be a single id or an array.
+function inScope(rec, guild, roleIds, creator) {
+    if (String(rec.g || '') !== String(guild || '')) return false;
+    if (roleIds == null) return true;                                   // server-level
+    if (String(rec.cr || '') !== String(creator || '')) return false;
+    const set = Array.isArray(roleIds) ? roleIds : [roleIds];
+    return set.some((r) => (rec.r || null) === (r || null));
+}
+// Net real joins (joined, not left) — unique users — for a card or the whole server.
+function netJoins(guild, roleIds, creator) {
     const seen = new Set();
-    for (const j of load().joins) { if (j && j.g === g && !j.left) seen.add(j.u); }
+    for (const j of load().joins) { if (j && !j.left && inScope(j, guild, roleIds, creator)) seen.add(j.u); }
     return seen.size;
 }
-// Unique users who engaged with the calibration ad on this server (denominator).
-function clickers(calibGuild) {
-    const g = String(calibGuild || '');
+// Unique users who engaged with the calibration ad (denominator) — card or server.
+function clickers(guild, roleIds, creator) {
     const seen = new Set();
-    for (const c of load().clicks) { if (c && c.g === g) seen.add(c.u); }
+    for (const c of load().clicks) { if (c && inScope(c, guild, roleIds, creator)) seen.add(c.u); }
     return seen.size;
 }
-// True no-check conversion for this server: net real joins ÷ clickers (0..1), or null
-// until there's at least one click and one tracked join.
-function conversionFor(calibGuild) {
-    const j = netJoins(calibGuild), c = clickers(calibGuild);
+// True no-check conversion: net real joins ÷ clickers (0..1), or null until there's at
+// least one click and one tracked join. Per card when roleIds+creator given, else server.
+function conversionFor(guild, roleIds, creator) {
+    const j = netJoins(guild, roleIds, creator), c = clickers(guild, roleIds, creator);
     if (!c || !j) return null;
     return +Math.min(1, j / c).toFixed(4);
 }
-// Has this server ever been calibrated with the member-tracking method (any clicks)?
-function hasData(calibGuild) {
-    const g = String(calibGuild || '');
-    return load().clicks.some((c) => c && c.g === g);
+// Any calibration clicks for this card (or server)?
+function hasData(guild, roleIds, creator) {
+    return load().clicks.some((c) => c && inScope(c, guild, roleIds, creator));
 }
 
 // Network-wide calibration conversion: pooled net real joins ÷ clickers across ALL
