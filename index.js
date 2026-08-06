@@ -1837,7 +1837,7 @@ startApiServer(clients, config);
 // Live calibration feed → support channel, so the owner can watch joins/leaves,
 // conversion changes and credits in real time (join from your own accounts to verify).
 const CALIB_LOG_CHANNEL = '1522955113860173854';
-async function logCalibEvent(kind, { userId, g, r, cr, amount }) {
+async function logCalibEvent(kind, { userId, g, r, cr, amount, dup }) {
     try {
         const ch = await calibposter.posterChannel(clients, CALIB_LOG_CHANNEL);
         if (!ch) return;
@@ -1846,6 +1846,9 @@ async function logCalibEvent(kind, { userId, g, r, cr, amount }) {
         const srvName = (clients.find((c) => { try { return c.guilds.cache.has(g); } catch { return false; } })?.guilds.cache.get(g)?.name) || g;
         const pct = conv == null ? '—' : `${Math.round(conv * 1000) / 10}%`;
         const isJoin = kind === 'join';
+        const moneyField = !isJoin ? 'выплата отменена'
+            : dup ? 'уже был засчитан (без повторной оплаты)'
+                : `+$${(Number(amount) || 0).toFixed(2)}`;
         const embed = new EmbedBuilder()
             .setColor(isJoin ? '#57F287' : '#ED4245')
             .setTitle(isJoin ? '✅ Заход · калибровка' : '↩️ Выход · калибровка')
@@ -1853,7 +1856,7 @@ async function logCalibEvent(kind, { userId, g, r, cr, amount }) {
             .addFields(
                 { name: 'Сервер показа (карточка)', value: `${srvName}\n\`${g}\``, inline: true },
                 { name: 'Конверсия карточки', value: `**${pct}**  (${joins} зах / ${clk} кл)`, inline: true },
-                { name: isJoin ? 'Начислено партнёру' : 'Списание с партнёра', value: isJoin ? `+$${(Number(amount) || 0).toFixed(2)}` : 'выплата отменена', inline: true }
+                { name: isJoin ? 'Начислено партнёру' : 'Списание с партнёра', value: moneyField, inline: true }
             )
             .setTimestamp();
         await ch.send({ embeds: [embed] }).catch(() => null);
@@ -1869,14 +1872,17 @@ async function handleCalibJoin(sponsorGuildId, userId) {
     const attr = calibtrack.onJoin(userId, sponsorGuildId);
     if (!attr || !attr.cr || !attr.r) return;                 // no calibration click → not ours
     const credit = creditJoin(attr.cr, sponsorGuildId, userId, attr.g, attr.r, attr.ch, { campaignId: attr.cid, revenue: 0, calib: true });
-    if (credit.duplicate) return;                              // already credited for this (user, sponsor)
-    await settleCreditedJoin(clients, {
-        creatorId: attr.cr, joinerId: userId, cardGuildId: attr.g, channelId: attr.ch, roleId: attr.r,
-        sponsorGuildId, amount: credit.amount, linkId: credit.linkId, referrerId: credit.referrerId,
-        investorOwned: true,                                   // service-funded → skip the shareholder profit split
-        revenue: 0, reason: 'Calibration — real member tracked joining the sponsor',
-    }).catch((e) => console.error('[CALIB] settle error:', e && e.message));
-    logCalibEvent('join', { userId, g: attr.g, r: attr.r, cr: attr.cr, amount: credit.amount }).catch(() => null);
+    if (!credit.duplicate) {                                   // fresh credit (already-credited = duplicate, no double-pay)
+        await settleCreditedJoin(clients, {
+            creatorId: attr.cr, joinerId: userId, cardGuildId: attr.g, channelId: attr.ch, roleId: attr.r,
+            sponsorGuildId, amount: credit.amount, linkId: credit.linkId, referrerId: credit.referrerId,
+            investorOwned: true,                               // service-funded → skip the shareholder profit split
+            revenue: 0, reason: 'Calibration — real member tracked joining the sponsor',
+        }).catch((e) => console.error('[CALIB] settle error:', e && e.message));
+    }
+    // Log the join whether or not it was a fresh credit — the join + conversion update
+    // are real; a duplicate just means the partner was already paid for this member.
+    logCalibEvent('join', { userId, g: attr.g, r: attr.r, cr: attr.cr, amount: credit.amount, dup: credit.duplicate }).catch(() => null);
 }
 
 // Reconcile joins the realtime GuildMemberAdd missed (bot restart / intent gap): for
