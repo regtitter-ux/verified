@@ -1743,6 +1743,10 @@ async function handleAdmin(req, res, path, clients, config) {
             nsfwServers: nsfwCfg,
             cpcCalibrated: cpcCfg,
             extraAdOff: (cfg.extraAdOff && typeof cfg.extraAdOff === 'object') ? cfg.extraAdOff : {},
+            personalAdCpc: (cfg.personalAdCpc && typeof cfg.personalAdCpc === 'object') ? cfg.personalAdCpc : {},
+            personalAdUnlimited: (cfg.personalAdUnlimited && typeof cfg.personalAdUnlimited === 'object') ? cfg.personalAdUnlimited : {},
+            personalAdLimit: (cfg.personalAdLimit && typeof cfg.personalAdLimit === 'object') ? cfg.personalAdLimit : {},
+            personalAdStats: (() => { const p = loadJSON('personalads.json', {}) || {}; const out = {}; for (const g of Object.keys(p)) out[g] = { clicks: Number(p[g]?.clicks) || 0, paidUsd: +(((Number(p[g]?.paidCents) || 0) / 100).toFixed(2)) }; return out; })(),
             serverProfitOwner: profitOwnerCfg,
             defaultProfitOwner: shares.DEFAULT_HOLDER,
             fallbackText: typeof cfg.fallbackText === 'string' ? cfg.fallbackText : '',
@@ -2359,6 +2363,29 @@ async function handleAdmin(req, res, path, clients, config) {
         saveJSON('siteconfig.json', cfg);
         auditDo('server.extra-ad', `${gid}: ${off ? 'off' : 'on'}`);
         return send(res, 200, { ok: true, gid, off }, cors);
+    }
+
+    // Owner-only: personal-ad PAY-PER-CLICK for a server. When on, this server's
+    // personal ad (any text) shows as a no-check FILLER when no other order is
+    // eligible, and the partner earns per click by conversion. unlimited or a click
+    // limit. Per-server in siteconfig; read live by personalad.js.
+    if (path === '/admin/server-ad-cpc' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = body?.gid ? String(body.gid) : '';
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad gid' }, cors);
+        const cpc = Boolean(body?.cpc);
+        const unlimited = Boolean(body?.unlimited);
+        const limit = Math.max(0, Math.min(10_000_000, Math.floor(Number(body?.limit) || 0)));
+        const cfg = loadJSON('siteconfig.json', {});
+        for (const k of ['personalAdCpc', 'personalAdUnlimited', 'personalAdLimit']) if (!cfg[k] || typeof cfg[k] !== 'object') cfg[k] = {};
+        if (cpc) cfg.personalAdCpc[gid] = true; else delete cfg.personalAdCpc[gid];
+        if (unlimited) cfg.personalAdUnlimited[gid] = true; else delete cfg.personalAdUnlimited[gid];
+        if (limit > 0) cfg.personalAdLimit[gid] = limit; else delete cfg.personalAdLimit[gid];
+        saveJSON('siteconfig.json', cfg);
+        auditDo('server.ad-cpc', `${gid}: cpc=${cpc} unlim=${unlimited} limit=${limit}`);
+        return send(res, 200, { ok: true, gid, cpc, unlimited, limit }, cors);
     }
 
     // Owner-only: turn on the CPC-calibration mode for a server. When on, the card's

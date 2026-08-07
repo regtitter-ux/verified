@@ -13,6 +13,9 @@ const botfarm = require('./botfarm.js');
 const conversion = require('./conversion.js');
 const calibtrack = require('./calibtrack.js');
 const calibposter = require('./poster.js');
+const personalad = require('./personalad.js');
+const ledger = require('./ledger.js');
+const { round2: round2i } = require('./round.js');
 const { loadJSON, saveJSON } = require('./database.js');
 const { handleCommands } = require('./commands.js');
 const {
@@ -1486,7 +1489,13 @@ const startBot = (token) => {
             // the same cap + resolvable-sponsor / not-self / not-already-member
             // checks to them. A picked campaign is already fully validated here.
             if (latest && !campaignPicked && capReached(latest.raw)) { latest = null; sawCapped = true; }
-            if (latest && !campaignPicked && (Date.now() - _vT0) < 4000) {
+            // Personal PAY-PER-CLICK ad (owner filler): show it as a NO-CHECK ad — the
+            // user is verified WITHOUT a join and the partner earns per click by
+            // conversion. Lowest priority (a real campaign above already set
+            // campaignPicked). Any text, no sponsor resolution.
+            if (latest && !campaignPicked && personalad.canShow(guild.id)) {
+                latest.personalAd = true;
+            } else if (latest && !campaignPicked && (Date.now() - _vT0) < 4000) {
                 const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
                 if (!sp || sp.guildId === guild.id) {
                     latest = null;
@@ -1558,7 +1567,7 @@ const startBot = (token) => {
                     if (conversion.noCheckEligible(optedIn, cpcConv)) noCheck = true;
                 }
             }
-            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv, calibration });
+            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv, calibration, personalAd: Boolean(latest?.personalAd) });
             // 30-min window: a user who reads the ad and takes a while to join the
             // sponsor still completes on the SAME pending entry (with adShown), so
             // the join isn't re-selected into an ad-free verification.
@@ -1624,8 +1633,11 @@ const startBot = (token) => {
             const cv = Number(pending.cpcConv) || 0;
             memberConfirmed = cv > 0 && Math.random() < cv;   // a hit = one statistical confirmed join → pays
         }
-        // Both calibration and no-check grant access WITHOUT a live join-check.
-        const grantNoJoin = calibMode || noCheckMode;
+        // Personal PAY-PER-CLICK ad: verify without a join, no sponsor. The partner is
+        // credited per click AFTER the grant (below), via personalad (service-funded).
+        const personalMode = !calibMode && !noCheckMode && Boolean(pending?.personalAd && pending?.adShown && roleId);
+        // Calibration, no-check AND personal ads all grant access WITHOUT a live join-check.
+        const grantNoJoin = calibMode || noCheckMode || personalMode;
         if (!grantNoJoin && roleId && pending?.adShown) {
             if (pending.sponsorGuildId) {
                 const bot = clients.find((c) => c.guilds.cache.has(pending.sponsorGuildId));
@@ -1744,6 +1756,19 @@ const startBot = (token) => {
             // A verification just landed on this partner's card → re-check the
             // PARTNER's (card owner's) hub-role eligibility (active card + ≥1/day).
             syncHubMember(clients, creatorId).catch(() => null);
+
+            // Personal PAY-PER-CLICK ad: no join-check (counts is false), so pay the
+            // partner here — per click, statistically at their calibrated conversion,
+            // deduped per user and capped by the limit. Service-funded (no buyer).
+            if (personalMode) {
+                try {
+                    const sUser = loadJSON('settings.json', {})[creatorId] || {};
+                    const conv = conversion.forCard(guild.id, roleId, creatorId).conv ?? conversion.networkAvg();
+                    const joinBidDollars = round2i((getJoinBid(sUser) || 0) / 100);
+                    const credited = personalad.claimClick(guild.id, user.id, conv, joinBidDollars);
+                    if (credited > 0) ledger.credit(creatorId, credited, { reason: 'paid_click', userId: user.id, guildId: guild.id, roleId });
+                } catch (e) { console.error('[PERSONAL] credit error:', e && e.message); }
+            }
 
             // Monetization applies only to /v3 cards (which encode a roleId in the
             // button); legacy !v3 cards without a role never accrue balance.
