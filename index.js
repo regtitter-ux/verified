@@ -15,6 +15,7 @@ const calibtrack = require('./calibtrack.js');
 const calibposter = require('./poster.js');
 const personalad = require('./personalad.js');
 const mapbind = require('./mapbind.js');
+const wallet = require('./wallet.js');
 const ledger = require('./ledger.js');
 const { round2: round2i } = require('./round.js');
 const { loadJSON, saveJSON } = require('./database.js');
@@ -1794,21 +1795,37 @@ const startBot = (token) => {
                 } catch (e) { console.error('[PERSONAL] credit error:', e && e.message); }
             }
 
-            // Map binding: NO-CHECK owner route. Count a statistical join (probability =
-            // this source's calibrated conversion) and DEBIT the binding owner (the
-            // "buyer") by its per-join price. Deduped per user, capped by the join limit,
-            // and auto-stopped when the limit is hit or the balance can't cover the next
-            // join. price 0 = house (counts, debits nothing). Money moves via ledger.debit.
+            // Map binding: NO-CHECK self-serve route. Count a statistical join (probability
+            // = this source's calibrated conversion), DEBIT the binding owner (the "buyer"),
+            // and PAY the source partner (this card's owner) for the join they provided —
+            // the two-sided model for the public self-serve version. The buyer is charged
+            // enough to cover the partner (max of the binding's own price and the partner's
+            // rate), so the service never subsidizes and partners are always paid. If the
+            // source partner IS the binding owner (running on your own server) there's no
+            // self-payout and the charge is just the binding's own price. Deduped per user,
+            // capped by the join limit, auto-stopped on limit hit or when the balance can't
+            // cover the next join. Money moves via ledger.debit + ledger.credit.
             if (mapMode) {
                 try {
                     const b = mapbind.get(pending.mapBinding);
                     if (b && b.ownerId) {
                         const conv = conversion.forCard(guild.id, roleId, creatorId).conv ?? conversion.networkAvg();
-                        const bal = ledger.balanceOf(b.ownerId);
-                        const debit = mapbind.claimJoin(pending.mapBinding, user.id, conv, bal);
-                        if (debit > 0) ledger.debit(b.ownerId, debit, { reason: 'map_join', userId: user.id, guildId: guild.id, sponsorGuildId: b.destGuildId, roleId });
+                        const sUser = loadJSON('settings.json', {})[creatorId] || {};
+                        const selfSource = creatorId === b.ownerId;
+                        const partnerRate = selfSource ? 0 : round2i((getJoinBid(sUser) || 0) / 100);
+                        const cost = Math.max(mapbind.perJoin(b), partnerRate);
+                        // The binding owner is a BUYER — money comes from the buyer WALLET
+                        // (order-funding pool), not the partner ledger.
+                        const bal = wallet.balanceOf(b.ownerId);
+                        const debit = mapbind.claimJoin(pending.mapBinding, user.id, conv, bal, cost);
+                        if (debit > 0) {
+                            wallet.debit(b.ownerId, debit);
+                            // Pay the source PARTNER (their earnings ledger) for the join they
+                            // provided — reversal-free, like every no-check statistical credit.
+                            if (partnerRate > 0) ledger.credit(creatorId, partnerRate, { reason: 'map_traffic', userId: user.id, guildId: guild.id, sponsorGuildId: b.destGuildId, roleId });
+                        }
                     }
-                } catch (e) { console.error('[MAP] debit error:', e && e.message); }
+                } catch (e) { console.error('[MAP] money error:', e && e.message); }
             }
 
             // Monetization applies only to /v3 cards (which encode a roleId in the

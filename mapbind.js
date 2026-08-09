@@ -72,6 +72,21 @@ function list() {
 
 function get(id) { return view(loadAll()[String(id || '')]); }
 
+// Owner-scoped listing — a public self-serve caller only ever sees their OWN bindings.
+function listFor(ownerId) {
+    const o = String(ownerId || '');
+    return list().filter((b) => b.ownerId === o);
+}
+
+// Ownership guard for mutate/delete on public routes. Returns true only if this binding
+// exists and belongs to ownerId (pass allowOwner=the site owner id to let the owner manage any).
+function owns(id, ownerId, siteOwnerId) {
+    const b = loadAll()[String(id || '')];
+    if (!b) return false;
+    if (siteOwnerId && String(ownerId || '') === String(siteOwnerId)) return true;
+    return String(b.ownerId || '') === String(ownerId || '');
+}
+
 // Create a binding. dest{guildId,name,icon} come from the API's one-time invite resolve.
 function create(ownerId, invite, dest, nowMs) {
     const id = newId();
@@ -146,11 +161,14 @@ function pickForSource(sourceGid) {
 }
 
 // Count a statistical join for a binding and decide the owner debit. Dedup per (binding,
-// user); one unique clicker is one Bernoulli trial at `conv`. A HIT costs perJoin(b)
-// dollars — but only if the owner can afford it (ownerBalance) and the limit isn't hit;
-// otherwise the binding auto-stops ('funds' / 'limit') and nothing is counted. Returns
-// the dollars for the caller to ledger.debit from the owner (0 on miss/dup/stop).
-function claimJoin(bindingId, userId, conv, ownerBalance, nowMs) {
+// user); one unique clicker is one Bernoulli trial at `conv`. A HIT costs `costDollars`
+// (the caller computes it so the buyer always covers the source partner's payout; when
+// omitted it falls back to the binding's own perJoin price) — but only if the owner can
+// afford it (ownerBalance) and the limit isn't hit; otherwise the binding auto-stops
+// ('funds' / 'limit') and nothing is counted. Returns the dollars for the caller to
+// ledger.debit from the owner (0 on miss/dup/stop) — a positive return means the join
+// was counted, so the caller should also pay the source partner.
+function claimJoin(bindingId, userId, conv, ownerBalance, costDollars, nowMs) {
     const g = String(bindingId || ''), u = String(userId || '');
     const t = now(nowMs);
     let debit = 0;
@@ -166,7 +184,7 @@ function claimJoin(bindingId, userId, conv, ownerBalance, nowMs) {
         const cv = Number(conv) || 0;
         const hit = cv > 0 && Math.random() < cv;
         if (!hit) return;                                               // recorded the trial; it just didn't convert
-        const cost = perJoin(b);
+        const cost = costDollars != null ? round2(Math.max(0, Number(costDollars) || 0)) : perJoin(b);
         // Can't afford this join → stop the binding, don't count it.
         if (cost > (Number(ownerBalance) || 0) + 1e-9) { b.running = false; b.stoppedReason = 'funds'; return; }
         const limit = Math.max(0, Math.floor(Number(b.limit) || 0));
@@ -182,4 +200,4 @@ function claimJoin(bindingId, userId, conv, ownerBalance, nowMs) {
     return debit;
 }
 
-module.exports = { list, get, create, update, remove, pickForSource, claimJoin, deliverable, view, perJoin, FILE };
+module.exports = { list, listFor, owns, get, create, update, remove, pickForSource, claimJoin, deliverable, view, perJoin, FILE };

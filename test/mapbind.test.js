@@ -60,50 +60,68 @@ test('pickForSource returns only a running, covering, under-limit binding (oldes
     assert.equal(mb.pickForSource(b2.destGuildId), null);
 });
 
-test('claimJoin: dedup per user, statistical hit debits perJoin, miss records but pays 0', () => {
+test('claimJoin: dedup per user, hit debits the given cost, miss records but pays 0', () => {
     const b = mb.create('OWNER', 'https://discord.gg/x', DEST, 1000);
     mb.update(b.id, { sources: [SRC_A], pricePer100: 10, running: true }, 1500);   // $0.10 / join
 
     Math.random = () => 0;   // force a hit whenever conv > 0
-    assert.equal(mb.claimJoin(b.id, 'u1', 0.5, 100, 2000), 0.10, 'hit debits $0.10');
-    assert.equal(mb.claimJoin(b.id, 'u1', 0.5, 100, 2100), 0, 'same user deduped');
+    assert.equal(mb.claimJoin(b.id, 'u1', 0.5, 100, 0.10, 2000), 0.10, 'hit debits the cost');
+    assert.equal(mb.claimJoin(b.id, 'u1', 0.5, 100, 0.10, 2100), 0, 'same user deduped');
     assert.equal(read('bindings.json')[b.id].delivered, 1);
     assert.equal(read('bindings.json')[b.id].spentUsd, 0.10);
 
     Math.random = () => 0.999;   // force a miss
-    assert.equal(mb.claimJoin(b.id, 'u2', 0.5, 100, 2200), 0, 'miss pays nothing');
+    assert.equal(mb.claimJoin(b.id, 'u2', 0.5, 100, 0.10, 2200), 0, 'miss pays nothing');
     assert.equal(read('bindings.json')[b.id].delivered, 1, 'miss not counted as a join');
     assert.ok(read('bindings.json')[b.id].users.u2, 'but the clicker is deduped');
+});
+
+test('claimJoin cost falls back to the binding price when no cost is passed', () => {
+    const b = mb.create('OWNER', 'https://discord.gg/x', DEST, 1000);
+    mb.update(b.id, { sources: [SRC_A], pricePer100: 20, running: true }, 1500);   // $0.20 / join
+    Math.random = () => 0;
+    assert.equal(mb.claimJoin(b.id, 'u1', 1, 100, null, 2000), 0.20, 'defaults to perJoin');
 });
 
 test('claimJoin auto-stops at the join limit', () => {
     const b = mb.create('OWNER', 'https://discord.gg/x', DEST, 1000);
     mb.update(b.id, { sources: [SRC_A], pricePer100: 10, limit: 2, running: true }, 1500);
     Math.random = () => 0;
-    assert.equal(mb.claimJoin(b.id, 'u1', 1, 100, 2000), 0.10);
-    assert.equal(mb.claimJoin(b.id, 'u2', 1, 100, 2100), 0.10);
+    assert.equal(mb.claimJoin(b.id, 'u1', 1, 100, 0.10, 2000), 0.10);
+    assert.equal(mb.claimJoin(b.id, 'u2', 1, 100, 0.10, 2100), 0.10);
     const v = mb.get(b.id);
     assert.equal(v.delivered, 2);
     assert.equal(v.running, false);
     assert.equal(v.stoppedReason, 'limit');
-    assert.equal(mb.claimJoin(b.id, 'u3', 1, 100, 2200), 0, 'stopped → no more charges');
+    assert.equal(mb.claimJoin(b.id, 'u3', 1, 100, 0.10, 2200), 0, 'stopped → no more charges');
 });
 
 test('claimJoin auto-stops when the owner cannot afford the next join', () => {
     const b = mb.create('OWNER', 'https://discord.gg/x', DEST, 1000);
     mb.update(b.id, { sources: [SRC_A], pricePer100: 100, running: true }, 1500);   // $1.00 / join
     Math.random = () => 0;
-    assert.equal(mb.claimJoin(b.id, 'u1', 1, 0.5, 2000), 0, 'balance 0.5 < 1.0 → not charged');
+    assert.equal(mb.claimJoin(b.id, 'u1', 1, 0.5, 1.0, 2000), 0, 'balance 0.5 < 1.0 → not charged');
     const v = mb.get(b.id);
     assert.equal(v.delivered, 0);
     assert.equal(v.running, false);
     assert.equal(v.stoppedReason, 'funds');
 });
 
-test('price 0 (house) still counts joins but debits nothing', () => {
+test('cost 0 (house, own server) still counts joins but debits nothing', () => {
     const b = mb.create('OWNER', 'https://discord.gg/x', DEST, 1000);
     mb.update(b.id, { sources: [SRC_A], pricePer100: 0, running: true }, 1500);
     Math.random = () => 0;
-    assert.equal(mb.claimJoin(b.id, 'u1', 1, 0, 2000), 0, 'house join is free even at balance 0');
+    assert.equal(mb.claimJoin(b.id, 'u1', 1, 0, 0, 2000), 0, 'free join even at balance 0');
     assert.equal(mb.get(b.id).delivered, 1, 'still counted');
+});
+
+test('listFor + owns isolate bindings per owner', () => {
+    const a = mb.create('ALICE', 'https://discord.gg/a', DEST, 1000);
+    const b = mb.create('BOB', 'https://discord.gg/b', DEST, 2000);
+    assert.deepEqual(mb.listFor('ALICE').map((x) => x.id), [a.id]);
+    assert.deepEqual(mb.listFor('BOB').map((x) => x.id), [b.id]);
+    assert.equal(mb.owns(a.id, 'ALICE'), true);
+    assert.equal(mb.owns(a.id, 'BOB'), false, 'bob cannot touch alice binding');
+    assert.equal(mb.owns(a.id, 'BOB', 'BOB'), true, 'site owner override');
+    assert.equal(mb.owns('nope', 'ALICE'), false);
 });

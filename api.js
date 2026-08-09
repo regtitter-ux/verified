@@ -118,7 +118,6 @@ const extraad = require('./extraad.js');
 const wallet = require('./wallet.js');
 const ledger = require('./ledger.js');
 const mapbind = require('./mapbind.js');
-const { round2 } = require('./round.js');
 const lots = require('./lots.js');
 const lotmon = require('./lotmon.js');
 const investors = require('./investors.js');
@@ -884,6 +883,59 @@ function verifStats(entries) {
 // and the global ads-off toggle. Every response includes CORS headers so the
 // vemoni.info frontend can talk to us (empty when origin mismatches → browser
 // blocks the call).
+// Resolve a Discord invite (url or bare code) to its destination guild — ONCE, off the
+// click path (the network-free show-ad keystone). Used by both the admin and buyer map
+// routes. Returns { invite, guildId, name, icon } or null.
+async function resolveInviteDest(raw) {
+    const s = String(raw || '').trim();
+    const m = s.match(/^(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/([a-z0-9-]{2,32})$/i) || s.match(/^([a-z0-9-]{2,32})$/i);
+    if (!m) return null;
+    const inv = await proxy.getInvite(m[1]).catch(() => null);
+    const gid = (inv && inv.guild && inv.guild.id) || null;
+    if (!gid) return null;
+    const icon = inv.guild.icon ? `https://cdn.discordapp.com/icons/${gid}/${inv.guild.icon}.png` : '';
+    return { invite: `https://discord.gg/${m[1]}`, guildId: String(gid), name: inv.guild.name || '', icon };
+}
+
+// Candidate SOURCE servers for a map binding: every guild where we have a verification
+// card, with its member count, unique-clicker volume (hour/day/week) and conversion → an
+// ESTIMATED joins-per-window (clicks × conversion). Shared by admin + buyer map routes.
+function mapSourceRows(clients) {
+    const now = Date.now();
+    const allCards = cards.loadCards();
+    const live = (Array.isArray(allCards) ? allCards : []).filter((c) => c && !c.deletedAt);
+    const enriched = enrichCards(clients, live).list;
+    const clArr = (() => { const c = loadJSON('cardclicks.json', []); return Array.isArray(c) ? c : []; })();
+    const cw = new Map();
+    for (const e of clArr) {
+        if (!e) continue;
+        const g = String(e.k || '').split(':')[0];
+        if (!/^\d{17,20}$/.test(g)) continue;
+        let s = cw.get(g); if (!s) cw.set(g, s = { h: new Set(), d: new Set(), w: new Set() });
+        if (e.t > now - 3600000) s.h.add(e.u);
+        if (e.t > now - 86400000) s.d.add(e.u);
+        if (e.t > now - 604800000) s.w.add(e.u);
+    }
+    const byGuild = new Map();
+    for (const c of enriched) {
+        const g = String(c.guildId);
+        let e = byGuild.get(g);
+        if (!e) byGuild.set(g, e = { name: c.guildName, icon: c.guildIcon, members: c.memberCount, cn: 0, cd: 0 });
+        const cv = c.conversion || {};
+        if (cv.conv != null && cv.clickers > 0) { e.cn += cv.conv * cv.clickers; e.cd += cv.clickers; }
+        if (!e.members && c.memberCount) e.members = c.memberCount;
+    }
+    const netAvg = conversion.networkAvg();
+    return [...byGuild.keys()].map((g) => {
+        const e = byGuild.get(g); const s = cw.get(g) || { h: new Set(), d: new Set(), w: new Set() };
+        const conv = e.cd > 0 ? +(e.cn / e.cd).toFixed(4) : null;
+        const c = conv != null ? conv : (netAvg || 0);
+        const clk = { hour: s.h.size, day: s.d.size, week: s.w.size };
+        const est = { hour: +(clk.hour * c).toFixed(1), day: +(clk.day * c).toFixed(1), week: +(clk.week * c).toFixed(1) };
+        return { gid: g, name: e.name, icon: e.icon, memberCount: e.members || 0, conv, clicks: clk, est };
+    }).sort((a, b) => (b.est.week - a.est.week) || (b.memberCount - a.memberCount));
+}
+
 async function handleAdmin(req, res, path, clients, config) {
     const cors = corsHeaders(req);
     if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
@@ -2517,20 +2569,11 @@ async function handleAdmin(req, res, path, clients, config) {
     // we only curate the records and surface live stats. Later this goes public (any
     // buyer, charged from their own wallet). Invite→guild resolution happens ONCE here,
     // never on the click path (the network-free show-ad keystone).
-    const resolveInviteDest = async (raw) => {
-        const s = String(raw || '').trim();
-        const m = s.match(/^(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/([a-z0-9-]{2,32})$/i) || s.match(/^([a-z0-9-]{2,32})$/i);
-        if (!m) return null;
-        const inv = await proxy.getInvite(m[1]).catch(() => null);
-        const gid = (inv && inv.guild && inv.guild.id) || null;
-        if (!gid) return null;
-        const icon = inv.guild.icon ? `https://cdn.discordapp.com/icons/${gid}/${inv.guild.icon}.png` : '';
-        return { invite: `https://discord.gg/${m[1]}`, guildId: String(gid), name: inv.guild.name || '', icon };
-    };
-
+    // Admin view = the owner's OWN bindings (self-serve lives in /order/map). Balance is
+    // the buyer WALLET (order-funding pool), which is what Map spends.
     if (path === '/admin/map' && req.method === 'GET') {
         if (!isOwner) return ownerOnly();
-        return send(res, 200, { ok: true, bindings: mapbind.list(), balance: round2(ledger.balanceOf(session.userId)), networkConv: conversion.networkAvg() }, cors);
+        return send(res, 200, { ok: true, bindings: mapbind.listFor(session.userId), balance: wallet.balanceOf(session.userId), networkConv: conversion.networkAvg() }, cors);
     }
     if (path === '/admin/map' && req.method === 'POST') {
         if (!isOwner) return ownerOnly();
@@ -2547,7 +2590,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const id = String(body?.id || '');
-        if (!mapbind.get(id)) return send(res, 404, { error: 'not-found' }, cors);
+        if (!mapbind.owns(id, session.userId, session.userId)) return send(res, 404, { error: 'not-found' }, cors);
         const patch = {};
         if (body.invite != null) {
             const dest = await resolveInviteDest(body.invite);
@@ -2567,49 +2610,14 @@ async function handleAdmin(req, res, path, clients, config) {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const id = String(body?.id || '');
+        if (!mapbind.owns(id, session.userId, session.userId)) return send(res, 404, { error: 'not-found' }, cors);
         const ok = mapbind.remove(id);
         if (ok) auditDo('map.delete', id);
         return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'not-found' }, cors);
     }
-    // Candidate SOURCE servers: every guild where we have a verification card, with its
-    // member count, unique-clicker volume (hour/day/week) and conversion → an ESTIMATED
-    // joins-per-window (clicks × conversion). This is the "right side" of the editor.
     if (path === '/admin/map/sources' && req.method === 'GET') {
         if (!isOwner) return ownerOnly();
-        const now = Date.now();
-        const allCards = cards.loadCards();
-        const live = (Array.isArray(allCards) ? allCards : []).filter((c) => c && !c.deletedAt);
-        const enriched = enrichCards(clients, live).list;
-        const clArr = (() => { const c = loadJSON('cardclicks.json', []); return Array.isArray(c) ? c : []; })();
-        const cw = new Map();   // gid -> { h:Set, d:Set, w:Set } of unique clickers
-        for (const e of clArr) {
-            if (!e) continue;
-            const g = String(e.k || '').split(':')[0];
-            if (!/^\d{17,20}$/.test(g)) continue;
-            let s = cw.get(g); if (!s) cw.set(g, s = { h: new Set(), d: new Set(), w: new Set() });
-            if (e.t > now - 3600000) s.h.add(e.u);
-            if (e.t > now - 86400000) s.d.add(e.u);
-            if (e.t > now - 604800000) s.w.add(e.u);
-        }
-        const byGuild = new Map();
-        for (const c of enriched) {
-            const g = String(c.guildId);
-            let e = byGuild.get(g);
-            if (!e) byGuild.set(g, e = { name: c.guildName, icon: c.guildIcon, members: c.memberCount, cn: 0, cd: 0 });
-            const cv = c.conversion || {};
-            if (cv.conv != null && cv.clickers > 0) { e.cn += cv.conv * cv.clickers; e.cd += cv.clickers; }
-            if (!e.members && c.memberCount) e.members = c.memberCount;
-        }
-        const netAvg = conversion.networkAvg();
-        const sources = [...byGuild.keys()].map((g) => {
-            const e = byGuild.get(g); const s = cw.get(g) || { h: new Set(), d: new Set(), w: new Set() };
-            const conv = e.cd > 0 ? +(e.cn / e.cd).toFixed(4) : null;
-            const c = conv != null ? conv : (netAvg || 0);
-            const clk = { hour: s.h.size, day: s.d.size, week: s.w.size };
-            const est = { hour: +(clk.hour * c).toFixed(1), day: +(clk.day * c).toFixed(1), week: +(clk.week * c).toFixed(1) };
-            return { gid: g, name: e.name, icon: e.icon, memberCount: e.members || 0, conv, clicks: clk, est };
-        }).sort((a, b) => (b.est.week - a.est.week) || (b.memberCount - a.memberCount));
-        return send(res, 200, { ok: true, sources, networkConv: netAvg }, cors);
+        return send(res, 200, { ok: true, sources: mapSourceRows(clients), networkConv: conversion.networkAvg() }, cors);
     }
 
     // Owner-only: RESET all conversion stats — set a cutoff so every conversion
@@ -3034,6 +3042,57 @@ async function handleBuyer(req, res, path, clients, config) {
     const buyerId = sess.userId;
     // Owner or an assigned admin may view and manage ANY buyer's campaigns.
     const isAdminBuyer = adminAuth.isOwnerId(buyerId) || Boolean(adminAuth.roleOf(buyerId));
+
+    // ---- Map: self-serve traffic-route bindings (my link → source servers) ----
+    // Public for any logged-in user. A binding shows its destination invite as a NO-CHECK
+    // filler on the chosen source servers (a real paid order always overrides it), verifies
+    // without a join, and per statistical join CHARGES the buyer's wallet + PAYS the source
+    // partner (index.js). Every row is strictly scoped to the caller (ownerId === buyerId);
+    // an admin/owner may see all. Invite→guild resolves once here, off the click path.
+    if (path === '/order/map' && req.method === 'GET') {
+        const bindings = isAdminBuyer ? mapbind.list() : mapbind.listFor(buyerId);
+        return send(res, 200, { ok: true, bindings, balance: wallet.balanceOf(buyerId), networkConv: conversion.networkAvg() }, cors);
+    }
+    if (path === '/order/map/sources' && req.method === 'GET') {
+        return send(res, 200, { ok: true, sources: mapSourceRows(clients), networkConv: conversion.networkAvg() }, cors);
+    }
+    if (path === '/order/map' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const dest = await resolveInviteDest(body?.invite);
+        if (!dest) return send(res, 400, { error: 'bad-invite' }, cors);
+        const b = mapbind.create(buyerId, dest.invite, dest);
+        audit.logAction(buyerId, 'map.create', `${b.id} → ${dest.guildId}`);
+        return send(res, 200, { ok: true, binding: b }, cors);
+    }
+    if (path === '/order/map' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const id = String(body?.id || '');
+        if (!mapbind.owns(id, buyerId, isAdminBuyer ? buyerId : '')) return send(res, 404, { error: 'not found' }, cors);
+        const patch = {};
+        if (body.invite != null) {
+            const dest = await resolveInviteDest(body.invite);
+            if (!dest) return send(res, 400, { error: 'bad-invite' }, cors);
+            patch.invite = dest.invite; patch.dest = dest;
+        }
+        if (Array.isArray(body.sources)) patch.sources = body.sources;
+        if (body.limit != null) patch.limit = body.limit;
+        if (body.pricePer100 != null) patch.pricePer100 = body.pricePer100;
+        if (body.running != null) patch.running = Boolean(body.running);
+        const b = mapbind.update(id, patch);
+        audit.logAction(buyerId, 'map.update', `${id}${patch.running != null ? ` running=${patch.running}` : ''}`);
+        return send(res, 200, { ok: true, binding: b }, cors);
+    }
+    if (path === '/order/map' && req.method === 'DELETE') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const id = String(body?.id || '');
+        if (!mapbind.owns(id, buyerId, isAdminBuyer ? buyerId : '')) return send(res, 404, { error: 'not found' }, cors);
+        const ok = mapbind.remove(id);
+        if (ok) audit.logAction(buyerId, 'map.delete', id);
+        return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'not found' }, cors);
+    }
 
     // ---- Bot breeders (ботоводы): manage reserve user-bot tokens as cards ----
     // Gated to owners + granted bot keepers. Tokens are never returned to the client.
