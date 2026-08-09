@@ -117,6 +117,8 @@ const poster = require('./poster.js');
 const extraad = require('./extraad.js');
 const wallet = require('./wallet.js');
 const ledger = require('./ledger.js');
+const mapbind = require('./mapbind.js');
+const { round2 } = require('./round.js');
 const lots = require('./lots.js');
 const lotmon = require('./lotmon.js');
 const investors = require('./investors.js');
@@ -2505,6 +2507,109 @@ async function handleAdmin(req, res, path, clients, config) {
             convResetAt: Number(cfg.convResetAt) || 0
         };
         return send(res, 200, { ok: true, summary, servers }, cors);
+    }
+
+    // ===== Map bindings (owner-only) =====
+    // A "binding" = one destination invite + a set of SOURCE guilds it runs on. When
+    // running, its invite shows as a NO-CHECK filler on those sources (lowest priority —
+    // a real order always overrides it), verifies without a join, and DEBITS the owner's
+    // balance per statistical join. Traffic mechanics live in mapbind.js + index.js; here
+    // we only curate the records and surface live stats. Later this goes public (any
+    // buyer, charged from their own wallet). Invite→guild resolution happens ONCE here,
+    // never on the click path (the network-free show-ad keystone).
+    const resolveInviteDest = async (raw) => {
+        const s = String(raw || '').trim();
+        const m = s.match(/^(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/([a-z0-9-]{2,32})$/i) || s.match(/^([a-z0-9-]{2,32})$/i);
+        if (!m) return null;
+        const inv = await proxy.getInvite(m[1]).catch(() => null);
+        const gid = (inv && inv.guild && inv.guild.id) || null;
+        if (!gid) return null;
+        const icon = inv.guild.icon ? `https://cdn.discordapp.com/icons/${gid}/${inv.guild.icon}.png` : '';
+        return { invite: `https://discord.gg/${m[1]}`, guildId: String(gid), name: inv.guild.name || '', icon };
+    };
+
+    if (path === '/admin/map' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        return send(res, 200, { ok: true, bindings: mapbind.list(), balance: round2(ledger.balanceOf(session.userId)), networkConv: conversion.networkAvg() }, cors);
+    }
+    if (path === '/admin/map' && req.method === 'POST') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const dest = await resolveInviteDest(body?.invite);
+        if (!dest) return send(res, 400, { error: 'bad-invite' }, cors);
+        const b = mapbind.create(session.userId, dest.invite, dest);
+        auditDo('map.create', `${b.id} → ${dest.guildId}`);
+        return send(res, 200, { ok: true, binding: b }, cors);
+    }
+    if (path === '/admin/map' && req.method === 'PUT') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const id = String(body?.id || '');
+        if (!mapbind.get(id)) return send(res, 404, { error: 'not-found' }, cors);
+        const patch = {};
+        if (body.invite != null) {
+            const dest = await resolveInviteDest(body.invite);
+            if (!dest) return send(res, 400, { error: 'bad-invite' }, cors);
+            patch.invite = dest.invite; patch.dest = dest;
+        }
+        if (Array.isArray(body.sources)) patch.sources = body.sources;
+        if (body.limit != null) patch.limit = body.limit;
+        if (body.pricePer100 != null) patch.pricePer100 = body.pricePer100;
+        if (body.running != null) patch.running = Boolean(body.running);
+        const b = mapbind.update(id, patch);
+        auditDo('map.update', `${id}${patch.running != null ? ` running=${patch.running}` : ''}`);
+        return send(res, 200, { ok: true, binding: b }, cors);
+    }
+    if (path === '/admin/map' && req.method === 'DELETE') {
+        if (!isOwner) return ownerOnly();
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const id = String(body?.id || '');
+        const ok = mapbind.remove(id);
+        if (ok) auditDo('map.delete', id);
+        return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'not-found' }, cors);
+    }
+    // Candidate SOURCE servers: every guild where we have a verification card, with its
+    // member count, unique-clicker volume (hour/day/week) and conversion → an ESTIMATED
+    // joins-per-window (clicks × conversion). This is the "right side" of the editor.
+    if (path === '/admin/map/sources' && req.method === 'GET') {
+        if (!isOwner) return ownerOnly();
+        const now = Date.now();
+        const allCards = cards.loadCards();
+        const live = (Array.isArray(allCards) ? allCards : []).filter((c) => c && !c.deletedAt);
+        const enriched = enrichCards(clients, live).list;
+        const clArr = (() => { const c = loadJSON('cardclicks.json', []); return Array.isArray(c) ? c : []; })();
+        const cw = new Map();   // gid -> { h:Set, d:Set, w:Set } of unique clickers
+        for (const e of clArr) {
+            if (!e) continue;
+            const g = String(e.k || '').split(':')[0];
+            if (!/^\d{17,20}$/.test(g)) continue;
+            let s = cw.get(g); if (!s) cw.set(g, s = { h: new Set(), d: new Set(), w: new Set() });
+            if (e.t > now - 3600000) s.h.add(e.u);
+            if (e.t > now - 86400000) s.d.add(e.u);
+            if (e.t > now - 604800000) s.w.add(e.u);
+        }
+        const byGuild = new Map();
+        for (const c of enriched) {
+            const g = String(c.guildId);
+            let e = byGuild.get(g);
+            if (!e) byGuild.set(g, e = { name: c.guildName, icon: c.guildIcon, members: c.memberCount, cn: 0, cd: 0 });
+            const cv = c.conversion || {};
+            if (cv.conv != null && cv.clickers > 0) { e.cn += cv.conv * cv.clickers; e.cd += cv.clickers; }
+            if (!e.members && c.memberCount) e.members = c.memberCount;
+        }
+        const netAvg = conversion.networkAvg();
+        const sources = [...byGuild.keys()].map((g) => {
+            const e = byGuild.get(g); const s = cw.get(g) || { h: new Set(), d: new Set(), w: new Set() };
+            const conv = e.cd > 0 ? +(e.cn / e.cd).toFixed(4) : null;
+            const c = conv != null ? conv : (netAvg || 0);
+            const clk = { hour: s.h.size, day: s.d.size, week: s.w.size };
+            const est = { hour: +(clk.hour * c).toFixed(1), day: +(clk.day * c).toFixed(1), week: +(clk.week * c).toFixed(1) };
+            return { gid: g, name: e.name, icon: e.icon, memberCount: e.members || 0, conv, clicks: clk, est };
+        }).sort((a, b) => (b.est.week - a.est.week) || (b.memberCount - a.memberCount));
+        return send(res, 200, { ok: true, sources, networkConv: netAvg }, cors);
     }
 
     // Owner-only: RESET all conversion stats — set a cutoff so every conversion

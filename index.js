@@ -14,6 +14,7 @@ const conversion = require('./conversion.js');
 const calibtrack = require('./calibtrack.js');
 const calibposter = require('./poster.js');
 const personalad = require('./personalad.js');
+const mapbind = require('./mapbind.js');
 const ledger = require('./ledger.js');
 const { round2: round2i } = require('./round.js');
 const { loadJSON, saveJSON } = require('./database.js');
@@ -1485,17 +1486,37 @@ const startBot = (token) => {
                 } catch (e) { console.error('[VERIFY] selection error u=' + user.id, e && e.message); }
             }
 
+            // Map binding filler (owner-directed no-check route): when NO paid campaign
+            // was picked for this source, a running binding that covers this guild shows
+            // its destination invite as a NO-CHECK ad. It overrides house/personal
+            // fillers (an explicit, wallet-funded route), but a real campaign above
+            // always wins. NETWORK-FREE (the show-ad keystone): the destination guild
+            // comes off the stored binding, never an invite lookup on this path. Skip it
+            // only if our fleet already covers the destination AND the user is a member
+            // (no real join to drive) — a cache-only check, no network.
+            if (!campaignPicked) {
+                try {
+                    const b = mapbind.pickForSource(guild.id);
+                    if (b && b.invite) {
+                        let skip = false;
+                        const covBot = clients.find((c) => c.guilds.cache.has(b.destGuildId));
+                        if (covBot && await isMemberCached(covBot, b.destGuildId, user.id) === true) { skip = true; sawMember = true; }
+                        if (!skip) latest = { text: b.invite, ts: Date.now(), raw: b.invite, mapBinding: b.id, sponsorGuildId: b.destGuildId };
+                    }
+                } catch (e) { console.error('[MAP] selection error u=' + user.id, e && e.message); }
+            }
             // House ads (owner/partner advText) weren't validated above — apply
             // the same cap + resolvable-sponsor / not-self / not-already-member
             // checks to them. A picked campaign is already fully validated here.
-            if (latest && !campaignPicked && capReached(latest.raw)) { latest = null; sawCapped = true; }
+            // A map binding is self-contained (its own invite + resolved dest) → bypass.
+            if (latest && !campaignPicked && !latest.mapBinding && capReached(latest.raw)) { latest = null; sawCapped = true; }
             // Personal PAY-PER-CLICK ad (owner filler): show it as a NO-CHECK ad — the
             // user is verified WITHOUT a join and the partner earns per click by
             // conversion. Lowest priority (a real campaign above already set
             // campaignPicked). Any text, no sponsor resolution.
-            if (latest && !campaignPicked && personalad.canShow(guild.id)) {
+            if (latest && !campaignPicked && !latest.mapBinding && personalad.canShow(guild.id)) {
                 latest.personalAd = true;
-            } else if (latest && !campaignPicked && (Date.now() - _vT0) < 4000) {
+            } else if (latest && !campaignPicked && !latest.mapBinding && (Date.now() - _vT0) < 4000) {
                 const sp = await resolveSponsorPresence(clients, latest.text).catch(() => null);
                 if (!sp || sp.guildId === guild.id) {
                     latest = null;
@@ -1567,7 +1588,7 @@ const startBot = (token) => {
                     if (conversion.noCheckEligible(optedIn, cpcConv)) noCheck = true;
                 }
             }
-            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv, calibration, personalAd: Boolean(latest?.personalAd) });
+            pendingVerification.set(pendingKey, { adShown: Boolean(latest), adShownAt: Date.now(), adText: latest?.text || '', adRaw: latest?.raw || '', campaignId: latest?.campaignId || '', sponsorGuildId: latest?.sponsorGuildId || '', noAdReason: latest ? '' : noAdReason, noCheck, cpcConv, calibration, personalAd: Boolean(latest?.personalAd), mapBinding: latest?.mapBinding || '' });
             // 30-min window: a user who reads the ad and takes a while to join the
             // sponsor still completes on the SAME pending entry (with adShown), so
             // the join isn't re-selected into an ad-free verification.
@@ -1636,8 +1657,11 @@ const startBot = (token) => {
         // Personal PAY-PER-CLICK ad: verify without a join, no sponsor. The partner is
         // credited per click AFTER the grant (below), via personalad (service-funded).
         const personalMode = !calibMode && !noCheckMode && Boolean(pending?.personalAd && pending?.adShown && roleId);
-        // Calibration, no-check AND personal ads all grant access WITHOUT a live join-check.
-        const grantNoJoin = calibMode || noCheckMode || personalMode;
+        // Map binding: an owner-directed NO-CHECK route. Verify without a join; the
+        // owner (the "buyer") is DEBITED per statistical join AFTER the grant (below).
+        const mapMode = !calibMode && !noCheckMode && !personalMode && Boolean(pending?.mapBinding && pending?.adShown && roleId);
+        // Calibration, no-check, personal AND map bindings all grant access WITHOUT a live join-check.
+        const grantNoJoin = calibMode || noCheckMode || personalMode || mapMode;
         if (!grantNoJoin && roleId && pending?.adShown) {
             if (pending.sponsorGuildId) {
                 const bot = clients.find((c) => c.guilds.cache.has(pending.sponsorGuildId));
@@ -1768,6 +1792,23 @@ const startBot = (token) => {
                     const credited = personalad.claimClick(guild.id, user.id, conv, joinBidDollars);
                     if (credited > 0) ledger.credit(creatorId, credited, { reason: 'paid_click', userId: user.id, guildId: guild.id, roleId });
                 } catch (e) { console.error('[PERSONAL] credit error:', e && e.message); }
+            }
+
+            // Map binding: NO-CHECK owner route. Count a statistical join (probability =
+            // this source's calibrated conversion) and DEBIT the binding owner (the
+            // "buyer") by its per-join price. Deduped per user, capped by the join limit,
+            // and auto-stopped when the limit is hit or the balance can't cover the next
+            // join. price 0 = house (counts, debits nothing). Money moves via ledger.debit.
+            if (mapMode) {
+                try {
+                    const b = mapbind.get(pending.mapBinding);
+                    if (b && b.ownerId) {
+                        const conv = conversion.forCard(guild.id, roleId, creatorId).conv ?? conversion.networkAvg();
+                        const bal = ledger.balanceOf(b.ownerId);
+                        const debit = mapbind.claimJoin(pending.mapBinding, user.id, conv, bal);
+                        if (debit > 0) ledger.debit(b.ownerId, debit, { reason: 'map_join', userId: user.id, guildId: guild.id, sponsorGuildId: b.destGuildId, roleId });
+                    }
+                } catch (e) { console.error('[MAP] debit error:', e && e.message); }
             }
 
             // Monetization applies only to /v3 cards (which encode a roleId in the
