@@ -11,6 +11,7 @@ const { maybeAutoWithdraw, retryWithdrawal } = require('./payouts.js');
 const adminAuth = require('./admin-auth.js');
 const admingate = require('./admingate.js');
 const dmalljobs = require('./dmalljobs.js');
+const dmallop = require('./dmallop.js');
 const botfarm = require('./botfarm.js');
 const conversion = require('./conversion.js');
 const calibtrack = require('./calibtrack.js');
@@ -2947,6 +2948,18 @@ function readBody(req) {
     });
 }
 
+// Like readBody but with a caller-set byte cap — media/avatar uploads carry base64
+// images that exceed the default 1 MB. Returns the parsed object, or null on bad JSON /
+// over-cap (the socket is destroyed so an over-cap upload can't hang the process).
+function readBodyBig(req, cap = 8e6) {
+    return new Promise((resolve) => {
+        let data = '';
+        req.on('data', (c) => { data += c; if (data.length > cap) { req.destroy(); resolve(null); } });
+        req.on('end', () => { if (!data) return resolve({}); try { resolve(JSON.parse(data)); } catch { resolve(null); } });
+        req.on('error', () => resolve(null));
+    });
+}
+
 function getKey(req) {
     const auth = req.headers['authorization'] || '';
     if (auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim();
@@ -3314,6 +3327,58 @@ async function handleBuyer(req, res, path, clients, config) {
         const allowed = adminAuth.isOwnerId(buyerId) || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
         if (!allowed) return send(res, 403, { error: 'no dmall access' }, cors);
         return send(res, 200, { jobs: dmalljobs.forBuyer(buyerId, 50) }, cors);
+    }
+
+    // ---- DMALL operator micro-service: proxy to the external Broadcast-Operator API ----
+    // The operator (discord-sensor.com) actually sends the DMs with ITS bot pool; we drive
+    // it over HTTP with a secret bop_ key that stays SERVER-SIDE (dmallop reads it from
+    // env). Every route is DMALL-access gated. Run creation additionally CHARGES the buyer
+    // wallet (reusing the $1/1000 price), refunding if the operator rejects it; staff
+    // (owner/admin) broadcast free. Everything else is a thin authenticated passthrough.
+    if (path.startsWith('/order/dmall/op/') || path === '/order/dmall/op') {
+        const dmOk = adminAuth.isOwnerId(buyerId) || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
+        if (!dmOk) return send(res, 403, { error: 'no dmall access' }, cors);
+        if (!dmallop.enabled()) return send(res, 503, { error: 'dmall-operator-not-configured', hint: 'set DMALL_OP_KEY in the Railway env' }, cors);
+        const sub = path === '/order/dmall/op' ? '' : path.slice('/order/dmall/op/'.length).replace(/^\/+/, '');
+        if (sub.includes('..')) return send(res, 400, { error: 'bad path' }, cors);
+
+        // Media / avatar uploads carry base64 images → allow a larger body.
+        if ((sub === 'media' || sub === 'avatars') && req.method === 'POST') {
+            const body = await readBodyBig(req, 8e6);
+            if (!body) return send(res, 400, { error: 'bad json or too large' }, cors);
+            const r = sub === 'media' ? await dmallop.media(body.data, body.content_type || body.contentType) : await dmallop.avatar(body.data, body.content_type || body.contentType);
+            return send(res, r.status, r.body, cors);
+        }
+
+        // Run creation — the ONLY money path. Charge the wallet (non-staff), then create;
+        // refund if the operator rejects. Retry (also billable) is staff-only via passthrough.
+        if (sub === 'runs' && req.method === 'POST') {
+            const body = await readBody(req);
+            if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+            const count = Math.max(0, Math.floor(Number(body.message_limit) || 0));
+            const charge = isAdminBuyer ? 0 : dmalljobs.priceFor(count);
+            if (charge > 0 && wallet.debit(buyerId, charge) === null) return send(res, 402, { error: 'insufficient', balance: wallet.balanceOf(buyerId), price: charge }, cors);
+            const idem = req.headers['idempotency-key'] || undefined;
+            const r = await dmallop.runCreate(body, idem);
+            if (!r.ok && charge > 0) wallet.credit(buyerId, charge);   // refund on operator failure
+            if (r.ok) audit.logAction(buyerId, 'dmall.op.run', `${(r.body && r.body.run && r.body.run.id) || '?'} count=${count} charge=${charge}`);
+            const extra = { charged: r.ok ? charge : 0, balance: wallet.balanceOf(buyerId) };
+            return send(res, r.status, (r.body && typeof r.body === 'object') ? { ...r.body, ...extra } : r.body, cors);
+        }
+        // A retry mints a NEW billable run — keep it off the free passthrough for non-staff.
+        if (/^runs\/[^/]+\/retry$/.test(sub) && req.method === 'POST' && !isAdminBuyer) {
+            return send(res, 403, { error: 'retry-staff-only', hint: 'create a new broadcast instead' }, cors);
+        }
+
+        // Generic authenticated passthrough for every other operator endpoint.
+        const method = req.method;
+        if (!['GET', 'POST', 'PATCH'].includes(method)) return send(res, 405, { error: 'method not allowed' }, cors);
+        const q = new URL(req.url, 'http://x').searchParams;
+        const query = {}; for (const [k, v] of q.entries()) query[k] = v;
+        let body;
+        if (method !== 'GET') { body = await readBody(req); if (body === null) return send(res, 400, { error: 'bad json' }, cors); }
+        const r = await dmallop.call(method, '/' + sub, { query: Object.keys(query).length ? query : undefined, body });
+        return send(res, r.status, r.body, cors);
     }
 
     // Wallet: balance + recent top-ups (reconciles pending top-ups first).
