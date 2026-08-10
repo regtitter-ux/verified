@@ -3045,6 +3045,18 @@ async function handleBuyer(req, res, path, clients, config) {
                 });
             }
         }
+        // Also include the account's OWN network servers — guilds where it is the card
+        // creator (i.e. it's a partner authorized via the bot). This is what makes a
+        // code/gate-login account show "its servers" without a Discord OAuth capture.
+        try {
+            const allCards = cards.loadCards();
+            for (const c of (Array.isArray(allCards) ? allCards : [])) {
+                if (!c || c.deletedAt || String(c.creatorId || '') !== uid) continue;
+                const gid = String(c.guildId || '');
+                if (!/^\d{17,20}$/.test(gid) || seen.has(gid)) continue;
+                seen.set(gid, { id: gid, name: guildNameOf(clients, gid) || gid, avatar: guildIconOf(clients, gid) || '', banner: '', online: guildMembersOf(clients, gid) || null, bot: fleetHas(gid) });
+            }
+        } catch { /* cards are best-effort */ }
         const list = [...seen.values()].sort((a, b) => (b.bot ? 1 : 0) - (a.bot ? 1 : 0) || ((b.online || 0) - (a.online || 0)));
         return send(res, 200, { servers: list }, cors);
     }
