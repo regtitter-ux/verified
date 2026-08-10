@@ -3057,6 +3057,22 @@ async function handleBuyer(req, res, path, clients, config) {
                 seen.set(gid, { id: gid, name: guildNameOf(clients, gid) || gid, avatar: guildIconOf(clients, gid) || '', banner: '', online: guildMembersOf(clients, gid) || null, bot: fleetHas(gid) });
             }
         } catch { /* cards are best-effort */ }
+        // Staff testing convenience: in the DEFAULT view (no ?as=), an admin/owner also
+        // gets ALL network servers (guilds where our bots are) so DMALL can be tested
+        // against any real server. Capped + searchable. "View as <id>" stays focused.
+        if (isAdminBuyer && !asId) {
+            const fleet = [];
+            for (const c of (Array.isArray(clients) ? clients : [])) {
+                if (!c || !c.guilds || !c.guilds.cache) continue;
+                for (const g of c.guilds.cache.values()) {
+                    if (!g || seen.has(String(g.id))) continue;
+                    let avatar = ''; try { avatar = g.iconURL ? (g.iconURL({ size: 128, extension: 'png', forceStatic: true }) || '') : ''; } catch { /* ignore */ }
+                    fleet.push({ id: String(g.id), name: g.name || String(g.id), avatar, banner: '', online: g.memberCount != null ? g.memberCount : null, bot: true });
+                }
+            }
+            fleet.sort((a, b) => (b.online || 0) - (a.online || 0));
+            for (const s of fleet.slice(0, 300)) if (!seen.has(s.id)) seen.set(s.id, s);
+        }
         const list = [...seen.values()].sort((a, b) => (b.bot ? 1 : 0) - (a.bot ? 1 : 0) || ((b.online || 0) - (a.online || 0)));
         return send(res, 200, { servers: list }, cors);
     }
