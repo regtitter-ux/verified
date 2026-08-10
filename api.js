@@ -3015,8 +3015,12 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/servers' && req.method === 'GET') {
         const cdn = (kind, id, hash, size) => hash ? `https://cdn.discordapp.com/${kind}/${id}/${hash}.${String(hash).startsWith('a_') ? 'gif' : 'png'}?size=${size}` : '';
         const fleetHas = (gid) => (Array.isArray(clients) ? clients : []).some((c) => c && c.guilds && c.guilds.cache && c.guilds.cache.has(gid));
+        // Staff "view as": an admin/owner may pass ?as=<discordId> to list ANOTHER account's
+        // servers (for DMALL testing). Only honored for staff; everyone else is themselves.
+        const asId = new URL(req.url, 'http://x').searchParams.get('as') || '';
+        const uid = (isAdminBuyer && /^\d{17,20}$/.test(asId)) ? asId : buyerId;
         const seen = new Map();
-        for (const g of adminAuth.getUserGuilds(buyerId) || []) {
+        for (const g of adminAuth.getUserGuilds(uid) || []) {
             if (!g || !g.id) continue;
             seen.set(String(g.id), {
                 id: String(g.id), name: g.name || String(g.id),
@@ -3029,8 +3033,8 @@ async function handleBuyer(req, res, path, clients, config) {
             if (!c || !c.guilds || !c.guilds.cache) continue;
             for (const g of c.guilds.cache.values()) {
                 if (!g || seen.has(String(g.id))) continue;
-                let isAdmin = g.ownerId === buyerId;
-                if (!isAdmin) { const m = g.members && g.members.cache && g.members.cache.get(buyerId); if (m) { try { isAdmin = m.permissions.has('Administrator'); } catch { /* ignore */ } } }
+                let isAdmin = g.ownerId === uid;
+                if (!isAdmin) { const m = g.members && g.members.cache && g.members.cache.get(uid); if (m) { try { isAdmin = m.permissions.has('Administrator'); } catch { /* ignore */ } } }
                 if (!isAdmin) continue;
                 let avatar = ''; try { avatar = g.iconURL ? (g.iconURL({ size: 128, extension: 'png', forceStatic: true }) || '') : ''; } catch { /* ignore */ }
                 let banner = ''; try { banner = g.bannerURL ? (g.bannerURL({ size: 480, extension: 'png' }) || '') : ''; } catch { /* ignore */ }
