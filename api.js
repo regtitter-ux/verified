@@ -3170,19 +3170,41 @@ async function handleBuyer(req, res, path, clients, config) {
         }, cors);
     }
 
-    // The buyer's admin guilds (captured at OAuth login) for the DMALL server
-    // picker. `bot` reflects whether a network bot is already in the guild.
+    // The account's admin/owner guilds for the DMALL server picker — you must own or
+    // administer a server for it to appear. Two sources, deduped: (1) the guilds captured
+    // at Discord OAuth login (the full list, incl. servers without our bots), and (2)
+    // fleet guilds where the account is owner/admin — which covers 2FA-gate / code logins
+    // that never ran OAuth. `bot` reflects whether a network bot is already in the guild.
     if (path === '/order/servers' && req.method === 'GET') {
         const cdn = (kind, id, hash, size) => hash ? `https://cdn.discordapp.com/${kind}/${id}/${hash}.${String(hash).startsWith('a_') ? 'gif' : 'png'}?size=${size}` : '';
-        const list = (adminAuth.getUserGuilds(buyerId) || []).map((g) => ({
-            id: g.id,
-            name: g.name,
-            avatar: cdn('icons', g.id, g.icon, 128),
-            banner: cdn('banners', g.id, g.banner, 480),
-            online: g.approximate_presence_count != null ? g.approximate_presence_count : (g.approximate_member_count != null ? g.approximate_member_count : null),
-            bot: (Array.isArray(clients) ? clients : []).some((c) => c && c.guilds && c.guilds.cache && c.guilds.cache.has(g.id))
-        }));
-        list.sort((a, b) => (b.bot ? 1 : 0) - (a.bot ? 1 : 0) || ((b.online || 0) - (a.online || 0))); // bot-present first
+        const fleetHas = (gid) => (Array.isArray(clients) ? clients : []).some((c) => c && c.guilds && c.guilds.cache && c.guilds.cache.has(gid));
+        const seen = new Map();
+        for (const g of adminAuth.getUserGuilds(buyerId) || []) {
+            if (!g || !g.id) continue;
+            seen.set(String(g.id), {
+                id: String(g.id), name: g.name || String(g.id),
+                avatar: cdn('icons', g.id, g.icon, 128), banner: cdn('banners', g.id, g.banner, 480),
+                online: g.approximate_presence_count != null ? g.approximate_presence_count : (g.approximate_member_count != null ? g.approximate_member_count : null),
+                bot: fleetHas(g.id)
+            });
+        }
+        for (const c of (Array.isArray(clients) ? clients : [])) {
+            if (!c || !c.guilds || !c.guilds.cache) continue;
+            for (const g of c.guilds.cache.values()) {
+                if (!g || seen.has(String(g.id))) continue;
+                let isAdmin = g.ownerId === buyerId;
+                if (!isAdmin) { const m = g.members && g.members.cache && g.members.cache.get(buyerId); if (m) { try { isAdmin = m.permissions.has('Administrator'); } catch { /* ignore */ } } }
+                if (!isAdmin) continue;
+                let avatar = ''; try { avatar = g.iconURL ? (g.iconURL({ size: 128, extension: 'png', forceStatic: true }) || '') : ''; } catch { /* ignore */ }
+                let banner = ''; try { banner = g.bannerURL ? (g.bannerURL({ size: 480, extension: 'png' }) || '') : ''; } catch { /* ignore */ }
+                seen.set(String(g.id), {
+                    id: String(g.id), name: g.name || String(g.id), avatar, banner,
+                    online: g.approximatePresenceCount != null ? g.approximatePresenceCount : (g.memberCount != null ? g.memberCount : null),
+                    bot: true
+                });
+            }
+        }
+        const list = [...seen.values()].sort((a, b) => (b.bot ? 1 : 0) - (a.bot ? 1 : 0) || ((b.online || 0) - (a.online || 0)));
         return send(res, 200, { servers: list }, cors);
     }
 
