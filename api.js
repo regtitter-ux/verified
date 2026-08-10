@@ -3313,8 +3313,7 @@ async function handleBuyer(req, res, path, clients, config) {
     // DMALL console (owner/admin or an allow-listed user). Body: the configurator
     // payload { fields, embeds } + { target: { guildId } } (or a bare { config }).
     if (path === '/order/dmall/launch' && req.method === 'POST') {
-        const allowed = adminAuth.isOwnerId(buyerId) || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
-        if (!allowed) return send(res, 403, { error: 'no dmall access' }, cors);
+        // DMALL is public — any logged-in user can broadcast (charged to their wallet).
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const cfg = (body && body.config) ? body.config : body;
@@ -3346,20 +3345,16 @@ async function handleBuyer(req, res, path, clients, config) {
     }
     // DMALL: the buyer's own broadcast jobs + live status (pulled from the service).
     if (path === '/order/dmall/jobs' && req.method === 'GET') {
-        const allowed = adminAuth.isOwnerId(buyerId) || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
-        if (!allowed) return send(res, 403, { error: 'no dmall access' }, cors);
         return send(res, 200, { jobs: dmalljobs.forBuyer(buyerId, 50) }, cors);
     }
 
     // ---- DMALL operator micro-service: proxy to the external Broadcast-Operator API ----
     // The operator (discord-sensor.com) actually sends the DMs with ITS bot pool; we drive
     // it over HTTP with a secret bop_ key that stays SERVER-SIDE (dmallop reads it from
-    // env). Every route is DMALL-access gated. Run creation additionally CHARGES the buyer
-    // wallet (reusing the $1/1000 price), refunding if the operator rejects it; staff
+    // env). DMALL is PUBLIC — any logged-in user can broadcast. Run creation CHARGES the
+    // buyer wallet (reusing the $1/1000 price), refunding if the operator rejects it; staff
     // (owner/admin) broadcast free. Everything else is a thin authenticated passthrough.
     if (path.startsWith('/order/dmall/op/') || path === '/order/dmall/op') {
-        const dmOk = adminAuth.isOwnerId(buyerId) || Boolean(adminAuth.roleOf(buyerId)) || dmaccess.isDmall(buyerId);
-        if (!dmOk) return send(res, 403, { error: 'no dmall access' }, cors);
         if (!dmallop.enabled()) return send(res, 503, { error: 'dmall-operator-not-configured', hint: 'set DMALL_OP_KEY in the Railway env' }, cors);
         const sub = path === '/order/dmall/op' ? '' : path.slice('/order/dmall/op/'.length).replace(/^\/+/, '');
         if (sub.includes('..')) return send(res, 400, { error: 'bad path' }, cors);
@@ -3480,6 +3475,8 @@ async function handleBuyer(req, res, path, clients, config) {
 
     // Create a campaign, paid instantly from the wallet balance. Body: { invite, joins }.
     if (path === '/order/create' && req.method === 'POST') {
+        // Stays (join-buying) orders are staff-only now — the public cabinet is DMALL.
+        if (!isAdminBuyer) return send(res, 403, { error: 'stays-admin-only' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const rawInvite = String(body?.invite || '').trim();
