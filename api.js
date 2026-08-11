@@ -3321,8 +3321,11 @@ async function handleBuyer(req, res, path, clients, config) {
                     id: m.id, status: op.status || 'queued',
                     messages_sent: Number(op.messages_sent) || 0,
                     message_limit: Number(m.count) || 0,
+                    estimated: Number(op.estimated_messages) || 0,
                     server_ids: op.server_ids || (m.serverId ? [m.serverId] : []),
-                    title: op.template_name || undefined, worker_phase: op.worker_phase, status_detail: op.status_detail
+                    title: op.template_name || undefined, worker_phase: op.worker_phase, status_detail: op.status_detail,
+                    // Why delivery was (in)complete — the operator gives a ready RU label.
+                    reason: (op.completion && op.completion.reason_label_ru) || op.status_detail || op.error_summary || ''
                 };
             });
             return send(res, 200, { runs }, cors);
