@@ -3403,15 +3403,21 @@ async function handleBuyer(req, res, path, clients, config) {
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const gid = String(body.gid || '').trim();
         if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad-gid' }, cors);
-        if (dmallserverstatus.recentFailure(gid, 3 * 60 * 1000)) return send(res, 200, { available: false, cooldown: true }, cors);
-        const bp = await dmallBotsPool(gid);   // { body, ... } cached 8s to avoid hammering the operator
+        const bp = await dmallBotsPool(gid);   // cached 8s to avoid hammering the operator
         const botsOn = (bp && bp.success !== false) ? (Number(bp.bots_on_server) || 0) : 0;
         const out = dmallruns.serverOutcomes(gid);
-        const dead = botsOn <= 0 && out.failed >= 2 && out.ok === 0;
-        const available = botsOn > 0 || !dead;
+        const dead = out.failed >= 2 && out.ok === 0;   // never delivered, failed repeatedly
+        // Block only DURING a cooldown after a failure (longer for a proven-dead server); once it
+        // passes, allow a re-test — so a block is never permanent and self-recovers if the cause
+        // (often an operator-side join bug, not the server) is fixed. Resident bots → always OK.
+        const blockMs = dead ? 30 * 60 * 1000 : 3 * 60 * 1000;
+        let available;
+        if (botsOn > 0) available = true;
+        else if (dmallserverstatus.recentFailure(gid, blockMs)) available = false;
+        else available = true;   // cooldown passed → give it another chance
         const changed = dmallserverstatus.set(gid, available);
         if (changed) dmallStatusBroadcast({ gid, available });
-        return send(res, 200, { available, changed, detail: bp, outcomes: out }, cors);
+        return send(res, 200, { available, changed, cooldown: !available, detail: bp, outcomes: out }, cors);
     }
     if (path === '/order/dmall/lot' && req.method === 'POST') {
         const body = await readBody(req);
