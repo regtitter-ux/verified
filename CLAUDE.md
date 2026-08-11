@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The **backend** of the Vemoni Discord ad/verification network: a Node.js + discord.js v14 bot fleet plus a raw-`http` JSON API, all in **one single-threaded process**. Deployed on Railway (service `secure-gratitude`, API at `api.vemoni.info`). It moves real money (partner payouts, buyer wallets, investor accounts), so the money invariants below are load-bearing.
 
-The **frontend** is a separate repo/dir at `../vemoni` (sibling of this one), a static site served at `vemoni.info` with cabinets `/order`, `/partner`, `/investor`, and `/admin`. It talks to this backend over CORS. `README.md` and `CONTRIBUTING.md` here are authoritative for money/data invariants but predate the 2FA gate and the network-free ad path — the sections below supersede them where they differ.
+The **frontend** is a separate repo/dir at `../vemoni` (sibling of this one), a static site served at `vemoni.info` with cabinets `/dmall` (the buyer/DMALL cabinet — folder `dmall/`, formerly `/order`; **the backend API namespace is still `/order/*`**, only the page path moved), `/partner`, `/investor`, and `/admin`. It talks to this backend over CORS. `README.md` and `CONTRIBUTING.md` here are authoritative for money/data invariants but predate the 2FA gate and the network-free ad path — the sections below supersede them where they differ.
 
 ## Commands
 
