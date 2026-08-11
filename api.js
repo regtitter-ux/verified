@@ -16,6 +16,7 @@ const dmalllots = require('./dmalllots.js');
 const dmallruns = require('./dmallruns.js');
 const dmallserverstatus = require('./dmallserverstatus.js');
 const dmallchat = require('./dmallchat.js');
+const dmallchatmute = require('./dmallchatmute.js');
 const dmallemojis = require('./dmallemojis.js');
 const dmallupload = require('./dmallupload.js');
 // Open SSE connections subscribed to DMALL server-availability changes (any origin, no auth —
@@ -3503,6 +3504,7 @@ async function handleBuyer(req, res, path, clients, config) {
     // The realtime feed rides the public SSE stream (/order/dmall/chat/stream); these two write
     // paths are authenticated so we know who's posting/deleting. Staff = owner or admin.
     if (path === '/order/dmall/chat' && req.method === 'POST') {
+        if (dmallchatmute.isMuted(buyerId)) return send(res, 403, { error: 'muted' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         let text = String(body.text || '').replace(/\r\n/g, '\n').trim();
@@ -3545,6 +3547,19 @@ async function handleBuyer(req, res, path, clients, config) {
         dmallTypers.set(String(buyerId), { name: nm, until: Date.now() + 5000 });
         dmallChatBroadcast({ type: 'typing', userId: buyerId, name: nm });
         return send(res, 200, { ok: true }, cors);
+    }
+    // Moderation (staff only): mute / unmute a user, or purge all their messages.
+    if ((path === '/order/dmall/chat/mute' || path === '/order/dmall/chat/unmute' || path === '/order/dmall/chat/purge') && req.method === 'POST') {
+        if (!isAdminBuyer) return send(res, 403, { error: 'forbidden' }, cors);
+        const body = await readBody(req);
+        const uid = body && String(body.userId || '');
+        if (!/^\d{17,20}$/.test(uid || '')) return send(res, 400, { error: 'bad user id' }, cors);
+        if (path.endsWith('/mute')) { dmallchatmute.mute(uid, Number(body.minutes) || 0); return send(res, 200, { ok: true }, cors); }
+        if (path.endsWith('/unmute')) { dmallchatmute.unmute(uid); return send(res, 200, { ok: true }, cors); }
+        // purge → delete every message from that user and tell all clients.
+        const n = dmallchat.delByUser(uid);
+        if (n > 0) dmallChatBroadcast({ type: 'delUser', userId: uid });
+        return send(res, 200, { ok: true, removed: n }, cors);
     }
     if (path.startsWith('/order/dmall/chat/') && req.method === 'DELETE') {
         const id = decodeURIComponent(path.slice('/order/dmall/chat/'.length));
