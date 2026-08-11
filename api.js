@@ -16,6 +16,8 @@ const dmalllots = require('./dmalllots.js');
 const dmallruns = require('./dmallruns.js');
 const dmallserverstatus = require('./dmallserverstatus.js');
 const dmallchat = require('./dmallchat.js');
+const dmallemojis = require('./dmallemojis.js');
+const dmallupload = require('./dmallupload.js');
 // Open SSE connections subscribed to DMALL server-availability changes (any origin, no auth —
 // availability is non-sensitive). A status change is pushed to all so every picker updates live.
 const dmallStatusClients = new Set();
@@ -3497,7 +3499,10 @@ async function handleBuyer(req, res, path, clients, config) {
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         let text = String(body.text || '').replace(/\r\n/g, '\n').trim();
         if (!text) return send(res, 400, { error: 'empty' }, cors);
-        if (text.length > 1000) text = text.slice(0, 1000);
+        // An attachment message is a token — it MUST point at our own /uploads (no external URLs).
+        const attach = /^\[\[(img|vid|file):([^\]|]+)(\|[^\]]*)?\]\]$/.exec(text);
+        if (attach && !/^\/uploads\/[0-9a-f]{16}\.[a-z0-9]{1,8}$/.test(attach[2])) return send(res, 400, { error: 'bad-attachment' }, cors);
+        if (!attach && text.length > 1000) text = text.slice(0, 1000);
         // A reply carries the answered author + a short snippet (a ping, not a thread).
         let reply = null;
         if (body.reply && /^\d{17,20}$/.test(String(body.reply.userId || ''))) {
@@ -3516,6 +3521,15 @@ async function handleBuyer(req, res, path, clients, config) {
         });
         dmallChatBroadcast({ type: 'add', message: msg });
         return send(res, 200, { message: msg }, cors);
+    }
+    // Chat attachment upload (image / video / file). Open to any logged-in user — NO boost/VIP
+    // gate (unlike vibecheckbot). Returns a token URL the client then posts as a message.
+    if (path === '/order/dmall/chat/upload' && req.method === 'POST') {
+        const body = await readBodyBig(req, 36e6);
+        if (!body) return send(res, 400, { error: 'bad json or too large' }, cors);
+        const out = dmallupload.save(body.dataUrl, body.name);
+        if (out.error) return send(res, out.status || 400, { error: out.error, limitMb: out.limitMb }, cors);
+        return send(res, 200, out, cors);
     }
     if (path.startsWith('/order/dmall/chat/') && req.method === 'DELETE') {
         const id = decodeURIComponent(path.slice('/order/dmall/chat/'.length));
@@ -5049,6 +5063,14 @@ function startApiServer(clients, config) {
                 dmallChatClients.add(res);
                 req.on('close', () => dmallChatClients.delete(res));
                 return;
+            }
+            // Public: custom-emoji + sticker catalog from the servers our bots are on.
+            if (req.method === 'GET' && p === '/order/dmall/chat/catalog') {
+                return send(res, 200, dmallemojis.catalog(clients), { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=60' });
+            }
+            // Public: serve chat attachments (hashed filenames, immutable, Range-capable).
+            if (req.method === 'GET' && p.startsWith('/uploads/')) {
+                return dmallupload.serve(req, res, p);
             }
 
             // Public: NOWPayments IPN webhook. We never trust the posted status — we
