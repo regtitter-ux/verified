@@ -3369,10 +3369,28 @@ async function handleBuyer(req, res, path, clients, config) {
             const runId = sub.slice('runs/'.length).replace(/\/repeat$/, '');
             const stored = dmallruns.get(runId);
             if (!stored || String(stored.buyerId || '') !== String(buyerId)) return send(res, 404, { error: 'run-not-found' }, cors);
-            if (!stored.body || !stored.body.template_id) return send(res, 400, { error: 'no-stored-settings' }, cors);
+            let body = stored.body;
+            // Older runs predate body persistence — rebuild from the operator's run object
+            // (template ref + targeting), using our stored count for the message limit.
+            if (!body || !body.template_id) {
+                const g = await dmallop.runGet(runId);
+                const run = g.ok && g.body && g.body.run;
+                const tplId = run && (run.template_id || (run.template && run.template.id));
+                if (tplId) {
+                    body = {
+                        template_id: tplId,
+                        server_ids: (run.server_ids && run.server_ids.length) ? run.server_ids : (stored.serverId ? [stored.serverId] : []),
+                        message_limit: Number(stored.count) || Number(run.message_limit) || 0,
+                        targeting: run.targeting || { audience: 'all' },
+                        options: run.options || {},
+                        destination_link: run.destination_link || ''
+                    };
+                }
+            }
+            if (!body || !body.template_id) return send(res, 400, { error: 'no-stored-settings' }, cors);
             // Fresh 5s-bucket key so a double-click can't spawn two, but distinct from the original.
             const idem = 'repeat-' + runId + '-' + Math.floor(Date.now() / 5000);
-            const out = await performDmallRunCreate(buyerId, isAdminBuyer, { ...stored.body }, idem);
+            const out = await performDmallRunCreate(buyerId, isAdminBuyer, { ...body }, idem);
             return send(res, out.status, out.payload, cors);
         }
         // Runs LIST → only the caller's OWN runs (the operator list is account-wide),
