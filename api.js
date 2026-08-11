@@ -3392,14 +3392,15 @@ async function handleBuyer(req, res, path, clients, config) {
         if (dmallserverstatus.recentFailure(gid, 3 * 60 * 1000)) return send(res, 200, { available: false, cooldown: true }, cors);
         const cached = dmallserverstatus.recent(gid, 8000);   // short cache: don't hammer the operator
         if (cached !== undefined) return send(res, 200, { available: cached, cached: true }, cors);
-        let available = true;   // couldn't check → don't block the user
+        let available = true, detail = null;   // couldn't check → don't block the user
         try {
             const r = await dmallop.call('GET', '/servers/' + gid + '/bots-pool');
-            if (r.ok && r.body && r.body.success !== false) available = (Number(r.body.bots_on_server) || 0) > 0;
-        } catch (_) { /* keep available=true on our own failure */ }
+            if (r.ok && r.body && r.body.success !== false) { available = (Number(r.body.bots_on_server) || 0) > 0; detail = r.body; }
+            else detail = { checkStatus: r.status, body: r.body || null };
+        } catch (e) { detail = { error: String((e && e.message) || e) }; }
         const changed = dmallserverstatus.set(gid, available);
         if (changed) dmallStatusBroadcast({ gid, available });
-        return send(res, 200, { available, changed }, cors);
+        return send(res, 200, { available, changed, detail }, cors);
     }
     if (path === '/order/dmall/lot' && req.method === 'POST') {
         const body = await readBody(req);
