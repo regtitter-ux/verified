@@ -32,7 +32,12 @@ function buildQuery(query) {
 async function call(method, subpath, { query, body, idempotencyKey } = {}) {
     if (!enabled()) return { ok: false, status: 503, body: { error: 'dmall-operator-not-configured', code: 'not_configured' } };
     const url = OP_BASE + (subpath.startsWith('/') ? subpath : `/${subpath}`) + buildQuery(query);
-    const headers = { Authorization: `Bearer ${key()}`, Accept: 'application/json' };
+    const headers = { Authorization: `Bearer ${key()}`, Accept: 'application/json', 'User-Agent': 'Vemoni-DMALL/1.0 (+https://vemoni.info)' };
+    // Optional shared secret so the operator can add a Cloudflare "skip challenge" rule
+    // matching this header (IP-independent — Railway egress can rotate). Set DMALL_OP_BYPASS
+    // on both sides. Header name is fixed: X-Vemoni-Op.
+    const bypass = (process.env.DMALL_OP_BYPASS || '').trim();
+    if (bypass) headers['X-Vemoni-Op'] = bypass;
     const opts = { method, headers };
     if (body !== undefined) { headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
     if (idempotencyKey) headers['Idempotency-Key'] = String(idempotencyKey).slice(0, 128);
