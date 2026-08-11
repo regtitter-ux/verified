@@ -45,4 +45,18 @@ function serverOutcomes(gid) {
     return { ok, failed };
 }
 
-module.exports = { FILE, load, save, get, forBuyer, statsByServer, forServer, serverOutcomes };
+// Messages this user SOLD: delivered on runs against THEIR lots that someone else bought.
+// run.creatorId is stamped only when the buyer ≠ the lot owner (own-server broadcasts don't
+// count as a sale), so summing delivered where creatorId matches is exactly "sold". Complements
+// forBuyer's delivered total ("bought").
+function soldFor(creatorId) {
+    const o = load(); let delivered = 0, runs = 0;
+    for (const r of Object.values(o)) {
+        if (!r || String(r.creatorId || '') !== String(creatorId || '')) continue;
+        const del = Math.max(0, Number(r.delivered) || 0);
+        delivered += del; if (del > 0) runs += 1;
+    }
+    return { delivered, runs };
+}
+
+module.exports = { FILE, load, save, get, forBuyer, statsByServer, forServer, serverOutcomes, soldFor };

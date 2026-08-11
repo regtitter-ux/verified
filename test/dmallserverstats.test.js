@@ -37,3 +37,19 @@ test('serverOutcomes splits settled runs into ok (delivered≥1) vs failed (0) �
     assert.deepEqual(dmallruns.serverOutcomes(G2), { ok: 0, failed: 2 }, '≥2 failed, 0 ok → dead');
     assert.deepEqual(dmallruns.serverOutcomes('999'), { ok: 0, failed: 0 }, 'new server → zeros → allowed');
 });
+
+test('soldFor sums delivered on runs against a user\'s lots (creatorId), i.e. bought by others', () => {
+    const SELLER = 'seller-1', BUYER = 'buyer-1';
+    seed({ 'dmallruns.json': {
+        // Someone else bought on SELLER's lot → counts as SELLER's "sold".
+        S1: { id: 'S1', buyerId: BUYER, creatorId: SELLER, delivered: 200, settled: true },
+        S2: { id: 'S2', buyerId: BUYER, creatorId: SELLER, delivered: 112, settled: true },
+        S3: { id: 'S3', buyerId: BUYER, creatorId: SELLER, delivered: 0, settled: true },   // nothing delivered → not a run, still $0
+        // SELLER broadcasting on their OWN server has no creatorId → not a sale (it's their "bought").
+        O1: { id: 'O1', buyerId: SELLER, creatorId: '', delivered: 500, settled: true },
+        // A different seller's sale → not SELLER's.
+        X1: { id: 'X1', buyerId: BUYER, creatorId: 'seller-2', delivered: 90, settled: true },
+    } });
+    assert.deepEqual(dmallruns.soldFor(SELLER), { delivered: 312, runs: 2 }, 'S1+S2 (S3 delivered 0 → not a run); own-server O1 and other seller X1 excluded');
+    assert.deepEqual(dmallruns.soldFor('nobody'), { delivered: 0, runs: 0 }, 'no lots sold → zeros');
+});

@@ -3471,8 +3471,11 @@ async function handleBuyer(req, res, path, clients, config) {
         try { evs = partnerlog.forPartner(buyerId, { reason: 'dmall_lot', limit: 100 }) || []; } catch (_) { evs = []; }
         const earnings = evs.map((e) => ({ ts: e.ts || 0, type: e.type || 'credit', amount: money2(e.amount), guildId: e.guildId || '', serverName: guildNameOf(clients, e.guildId) || e.guildId || '' }));
         const earned = money2(earnings.reduce((a, e) => a + (e.type === 'debit' ? -e.amount : e.amount), 0));
+        const sold = dmallruns.soldFor(buyerId);   // messages delivered on this user's lots (bought by others)
         return send(res, 200, {
-            stats: { spent, sent: delivered, runs: runs.length, delivered, earnings: earned, balance: wallet.balanceOf(buyerId) },
+            // `bought` = messages delivered on the user's own orders; `sold` = delivered on their lots.
+            // `sent`/`delivered` kept for back-compat with any older client.
+            stats: { spent, bought: delivered, sold: sold.delivered, sent: delivered, runs: runs.length, delivered, earnings: earned, balance: wallet.balanceOf(buyerId) },
             orders, earnings
         }, cors);
     }
