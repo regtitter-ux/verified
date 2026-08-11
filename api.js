@@ -3531,6 +3531,11 @@ async function handleBuyer(req, res, path, clients, config) {
         if (out.error) return send(res, out.status || 400, { error: out.error, limitMb: out.limitMb }, cors);
         return send(res, 200, out, cors);
     }
+    // Typing indicator: broadcast "<name> is typing" to everyone (no storage, fire-and-forget).
+    if (path === '/order/dmall/chat/typing' && req.method === 'POST') {
+        dmallChatBroadcast({ type: 'typing', userId: buyerId, name: userNameOf(clients, buyerId) || 'user' });
+        return send(res, 200, { ok: true }, cors);
+    }
     if (path.startsWith('/order/dmall/chat/') && req.method === 'DELETE') {
         const id = decodeURIComponent(path.slice('/order/dmall/chat/'.length));
         const msg = dmallchat.get(id);
@@ -5063,6 +5068,10 @@ function startApiServer(clients, config) {
                 dmallChatClients.add(res);
                 req.on('close', () => dmallChatClients.delete(res));
                 return;
+            }
+            // Public: chat backlog (polling fallback when the SSE stream is blocked/buffered).
+            if (req.method === 'GET' && p === '/order/dmall/chat/list') {
+                return send(res, 200, { messages: dmallchat.list() }, { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
             }
             // Public: custom-emoji + sticker catalog from the servers our bots are on.
             if (req.method === 'GET' && p === '/order/dmall/chat/catalog') {

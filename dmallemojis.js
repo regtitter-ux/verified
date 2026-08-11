@@ -31,8 +31,13 @@ function build(clients) {
                 .filter((s) => s.id && [1, 2, 4].includes(Number(s.format)))
                 .map((s) => ({ id: s.id, name: s.name, format: Number(s.format), url: stickerUrl(s.id, s.format) }));
             if (!emojis.length && !stickers.length) continue;
+            // Build the icon URL straight from the cached hash (always a static png — animated
+            // a_ icons have a flaky .gif asset). More reliable than iconURL(), which returned null.
             let guildIcon = null;
-            try { guildIcon = typeof g.iconURL === 'function' ? g.iconURL({ size: 48, extension: 'png' }) : null; } catch (_) {}
+            try {
+                if (g.icon) guildIcon = `${CDN}/icons/${g.id}/${g.icon}.png?size=48`;
+                else if (typeof g.iconURL === 'function') guildIcon = g.iconURL({ size: 48, extension: 'png', forceStatic: true }) || null;
+            } catch (_) {}
             byGuild.set(g.id, {
                 head: { guildId: g.id, guildName: g.name || 'Server', guildIcon },
                 memberCount: g.memberCount || 0,
