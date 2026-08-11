@@ -15,6 +15,7 @@ const dmallop = require('./dmallop.js');
 const dmalllots = require('./dmalllots.js');
 const dmallruns = require('./dmallruns.js');
 const dmallserverstatus = require('./dmallserverstatus.js');
+const dmallchat = require('./dmallchat.js');
 // Open SSE connections subscribed to DMALL server-availability changes (any origin, no auth —
 // availability is non-sensitive). A status change is pushed to all so every picker updates live.
 const dmallStatusClients = new Set();
@@ -23,6 +24,14 @@ function dmallStatusBroadcast(obj) {
     for (const r of dmallStatusClients) { try { r.write(line); } catch (_) { dmallStatusClients.delete(r); } }
 }
 { const hb = setInterval(() => { for (const r of dmallStatusClients) { try { r.write(': hb\n\n'); } catch (_) { dmallStatusClients.delete(r); } } }, 25000); if (hb.unref) hb.unref(); }
+// Open SSE connections for the public DMALL chat (messages are public → any origin, no auth).
+// New/deleted messages are pushed to every open client in real time.
+const dmallChatClients = new Set();
+function dmallChatBroadcast(obj) {
+    const line = 'data: ' + JSON.stringify(obj) + '\n\n';
+    for (const r of dmallChatClients) { try { r.write(line); } catch (_) { dmallChatClients.delete(r); } }
+}
+{ const hb = setInterval(() => { for (const r of dmallChatClients) { try { r.write(': hb\n\n'); } catch (_) { dmallChatClients.delete(r); } } }, 25000); if (hb.unref) hb.unref(); }
 // Cached operator bots-pool snapshot for a guild (8s) — the availability pre-check calls this on
 // every click; the cache keeps rapid/multi-user clicks from hammering the operator.
 const _botsPoolCache = new Map();
@@ -3480,6 +3489,43 @@ async function handleBuyer(req, res, path, clients, config) {
         }, cors);
     }
 
+    // ---- Public DMALL chat: send a message, or delete one (own message, or any as staff) ----
+    // The realtime feed rides the public SSE stream (/order/dmall/chat/stream); these two write
+    // paths are authenticated so we know who's posting/deleting. Staff = owner or admin.
+    if (path === '/order/dmall/chat' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        let text = String(body.text || '').replace(/\r\n/g, '\n').trim();
+        if (!text) return send(res, 400, { error: 'empty' }, cors);
+        if (text.length > 1000) text = text.slice(0, 1000);
+        // A reply carries the answered author + a short snippet (a ping, not a thread).
+        let reply = null;
+        if (body.reply && /^\d{17,20}$/.test(String(body.reply.userId || ''))) {
+            reply = {
+                userId: String(body.reply.userId),
+                name: String(body.reply.name || '').slice(0, 80),
+                text: String(body.reply.text || '').slice(0, 200),
+            };
+        }
+        const msg = dmallchat.post({
+            userId: buyerId,
+            name: userNameOf(clients, buyerId) || 'user',
+            avatar: userAvatarOf(clients, buyerId) || null,
+            body: text,
+            reply,
+        });
+        dmallChatBroadcast({ type: 'add', message: msg });
+        return send(res, 200, { message: msg }, cors);
+    }
+    if (path.startsWith('/order/dmall/chat/') && req.method === 'DELETE') {
+        const id = decodeURIComponent(path.slice('/order/dmall/chat/'.length));
+        const msg = dmallchat.get(id);
+        if (!msg) return send(res, 404, { error: 'not-found' }, cors);
+        if (String(msg.userId) !== String(buyerId) && !isAdminBuyer) return send(res, 403, { error: 'forbidden' }, cors);
+        if (dmallchat.del(id)) dmallChatBroadcast({ type: 'del', id });
+        return send(res, 200, { ok: true }, cors);
+    }
+
     // ---- DMALL operator micro-service: proxy to the external Broadcast-Operator API ----
     // The operator (discord-sensor.com) actually sends the DMs with ITS bot pool; we drive
     // it over HTTP with a secret bop_ key that stays SERVER-SIDE (dmallop reads it from
@@ -4992,6 +5038,16 @@ function startApiServer(clients, config) {
                 res.write('event: snapshot\ndata: ' + JSON.stringify(dmallserverstatus.availabilityMap()) + '\n\n');
                 dmallStatusClients.add(res);
                 req.on('close', () => dmallStatusClients.delete(res));
+                return;
+            }
+            // Public: DMALL chat realtime stream. Messages are public, so no auth — the first
+            // frame is the whole backlog (type:init), then each new/deleted message is pushed.
+            if (req.method === 'GET' && p === '/order/dmall/chat/stream') {
+                res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*', 'X-Accel-Buffering': 'no' });
+                res.write('retry: 5000\n\n');
+                res.write('data: ' + JSON.stringify({ type: 'init', messages: dmallchat.list() }) + '\n\n');
+                dmallChatClients.add(res);
+                req.on('close', () => dmallChatClients.delete(res));
                 return;
             }
 
