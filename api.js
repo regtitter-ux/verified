@@ -14,6 +14,15 @@ const dmalljobs = require('./dmalljobs.js');
 const dmallop = require('./dmallop.js');
 const dmalllots = require('./dmalllots.js');
 const dmallruns = require('./dmallruns.js');
+const dmallserverstatus = require('./dmallserverstatus.js');
+// Open SSE connections subscribed to DMALL server-availability changes (any origin, no auth —
+// availability is non-sensitive). A status change is pushed to all so every picker updates live.
+const dmallStatusClients = new Set();
+function dmallStatusBroadcast(obj) {
+    const line = 'data: ' + JSON.stringify(obj) + '\n\n';
+    for (const r of dmallStatusClients) { try { r.write(line); } catch (_) { dmallStatusClients.delete(r); } }
+}
+{ const hb = setInterval(() => { for (const r of dmallStatusClients) { try { r.write(': hb\n\n'); } catch (_) { dmallStatusClients.delete(r); } } }, 25000); if (hb.unref) hb.unref(); }
 const botfarm = require('./botfarm.js');
 const conversion = require('./conversion.js');
 const calibtrack = require('./calibtrack.js');
@@ -3346,12 +3355,38 @@ async function handleBuyer(req, res, path, clients, config) {
         await Promise.all(lots.map(async (l) => {
             const st = stats[String(l.serverId)] || { runs: 0, delivered: 0 };
             l.runsDone = st.runs; l.delivered = st.delivered;
+            // Shared availability (false = a check found the broadcast can't run; unknown → available).
+            l.available = dmallserverstatus.isAvailable(l.serverId) !== false;
             try {
                 const g = await dmalllots.guildInfo(l.serverId);
-                if (g) { l.icon = g.icon || ''; l.banner = g.banner || ''; if (g.members) l.memberCount = g.members; if (g.name && !l.serverName) l.serverName = g.name; }
+                l._present = g ? g.present : undefined;   // true / false(kicked) / undefined(unknown)
+                if (g && g.present) { l.icon = g.icon || ''; l.banner = g.banner || ''; if (g.members) l.memberCount = g.members; if (g.name && !l.serverName) l.serverName = g.name; }
             } catch (_) { /* leave letter fallback */ }
         }));
-        return send(res, 200, { lots, botClientId: dmalllots.DMALL_BOT_CLIENT_ID, serviceFeePer1k: dmalllots.SERVICE_FEE_PER_1K }, cors);
+        // Auth bot kicked from the server → the lot is unusable; drop it from the catalog (the lot
+        // record is kept so it reappears if the bot rejoins). Unknown/transient is NOT dropped.
+        const shown = lots.filter((l) => l._present !== false);
+        shown.forEach((l) => { delete l._present; });
+        return send(res, 200, { lots: shown, botClientId: dmalllots.DMALL_BOT_CLIENT_ID, serviceFeePer1k: dmalllots.SERVICE_FEE_PER_1K }, cors);
+    }
+    // Per-click broadcast-viability check → stored + broadcast so all users see the change live.
+    // Viable if the operator has RESIDENT bots on the server (bots_on_server > 0); the pool's
+    // can_join_more is misleading (join doesn't stick on servers that block new bots).
+    if (path === '/order/dmall/server-check' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const gid = String(body.gid || '').trim();
+        if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad-gid' }, cors);
+        const cached = dmallserverstatus.recent(gid, 8000);   // short cache: don't hammer the operator
+        if (cached !== undefined) return send(res, 200, { available: cached, cached: true }, cors);
+        let available = true;   // couldn't check → don't block the user
+        try {
+            const r = await dmallop.call('GET', '/servers/' + gid + '/bots-pool');
+            if (r.ok && r.body && r.body.success !== false) available = (Number(r.body.bots_on_server) || 0) > 0;
+        } catch (_) { /* keep available=true on our own failure */ }
+        const changed = dmallserverstatus.set(gid, available);
+        if (changed) dmallStatusBroadcast({ gid, available });
+        return send(res, 200, { available, changed }, cors);
     }
     if (path === '/order/dmall/lot' && req.method === 'POST') {
         const body = await readBody(req);
@@ -4894,6 +4929,21 @@ function startApiServer(clients, config) {
                     if (events.length >= 25) break;
                 }
                 return send(res, 200, { events }, { 'Access-Control-Allow-Origin': '*' });
+            }
+
+            // Public: shared DMALL server availability. A snapshot (for initial state / polling
+            // fallback) and an SSE stream that pushes every status change to all open pickers in
+            // real time. Non-sensitive → any origin, no auth. Handled before the /order/* gate.
+            if (req.method === 'GET' && p === '/order/dmall/statuses') {
+                return send(res, 200, { statuses: dmallserverstatus.availabilityMap() }, { 'Access-Control-Allow-Origin': '*' });
+            }
+            if (req.method === 'GET' && p === '/order/dmall/status-stream') {
+                res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*', 'X-Accel-Buffering': 'no' });
+                res.write('retry: 5000\n\n');
+                res.write('event: snapshot\ndata: ' + JSON.stringify(dmallserverstatus.availabilityMap()) + '\n\n');
+                dmallStatusClients.add(res);
+                req.on('close', () => dmallStatusClients.delete(res));
+                return;
             }
 
             // Public: NOWPayments IPN webhook. We never trust the posted status — we

@@ -118,16 +118,21 @@ async function guildInfo(gid) {
         if (r.status === 200) {
             const d = await r.json().catch(() => ({}));
             info = {
+                present: true,
                 name: d.name || '',
                 members: Number(d.approximate_member_count) || 0,
                 icon: d.icon ? `https://cdn.discordapp.com/icons/${g}/${d.icon}.png?size=128` : '',
                 banner: d.banner ? `https://cdn.discordapp.com/banners/${g}/${d.banner}.png?size=600` : ''
             };
+        } else if (r.status === 404 || r.status === 403) {
+            info = { present: false };   // the auth bot is no longer on the guild (kicked / removed)
+        } else {
+            return null;   // transient (5xx / rate limit) → unknown, don't cache
         }
-        _guildCache.set(g, { at: Date.now(), info });   // cache misses too (avoid re-hitting a gone guild)
+        _guildCache.set(g, { at: Date.now(), info });
         return info;
     } catch (_) {
-        return null;
+        return null;   // timeout / network → unknown
     } finally { clearTimeout(timer); }
 }
 
