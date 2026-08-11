@@ -3336,12 +3336,25 @@ async function handleBuyer(req, res, path, clients, config) {
     // Public (DMALL is public). Listing returns ALL lots as broadcast targets; `mine`
     // marks the caller's own. Creating a lot verifies the DMALL bot is on the server.
     if (path === '/order/dmall/lots' && req.method === 'GET') {
-        const lots = dmalllots.list().map((l) => ({ ...l, mine: l.creatorId === buyerId }));
+        // Private lots are visible only to their creator (or staff).
+        const lots = dmalllots.list()
+            .filter((l) => !l.private || l.creatorId === buyerId || isAdminBuyer)
+            .map((l) => ({ ...l, mine: l.creatorId === buyerId }));
         return send(res, 200, { lots, botClientId: dmalllots.DMALL_BOT_CLIENT_ID, serviceFeePer1k: dmalllots.SERVICE_FEE_PER_1K }, cors);
     }
     if (path === '/order/dmall/lot' && req.method === 'POST') {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        // Update an existing lot (price / privacy) — creator or staff only, no bot re-check.
+        if (body.id) {
+            const patch = {};
+            if (body.pricePer1k != null) patch.pricePer1k = Math.max(0, Number(body.pricePer1k) || 0);
+            if (body.private != null) patch.private = Boolean(body.private);
+            const upd = dmalllots.update(String(body.id), buyerId, isAdminBuyer, patch);
+            if (!upd) return send(res, 404, { error: 'not found' }, cors);
+            audit.logAction(buyerId, 'dmall.lot.update', `${body.id} ${JSON.stringify(patch)}`);
+            return send(res, 200, { ok: true, lot: upd }, cors);
+        }
         const serverId = String(body?.serverId || '').trim();
         if (!/^\d{17,20}$/.test(serverId)) return send(res, 400, { error: 'bad-server-id' }, cors);
         const pricePer1k = Math.max(0, Number(body?.pricePer1k) || 0);

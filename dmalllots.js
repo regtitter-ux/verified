@@ -31,6 +31,7 @@ function view(l) {
         pricePer1k: Math.max(0, Number(l.pricePer1k) || 0),
         userPricePer1k: userPricePer1k(l.pricePer1k),
         serviceFeePer1k: SERVICE_FEE_PER_1K,
+        private: Boolean(l.private),   // private lots are visible only to their creator
         createdAt: l.createdAt || 0
     };
 }
@@ -48,6 +49,22 @@ function create(creatorId, { serverId, serverName, memberCount, pricePer1k }) {
     };
     mutate(FILE, (o) => { o[id] = lot; });
     return view(lot);
+}
+
+// Update a lot's price and/or privacy — only its creator (or staff) may. The server can't
+// change (it's the lot's identity). Returns the updated view, or null if not found/allowed.
+function update(id, byId, isStaff, patch) {
+    const g = String(id || '');
+    let out = null;
+    mutate(FILE, (o) => {
+        const l = o[g];
+        if (!l) return false;
+        if (!isStaff && String(l.creatorId || '') !== String(byId || '')) return false;
+        if (patch && patch.pricePer1k != null) l.pricePer1k = Math.max(0, Number(patch.pricePer1k) || 0);
+        if (patch && patch.private != null) l.private = Boolean(patch.private);
+        out = { ...l };
+    });
+    return out ? view(out) : null;
 }
 
 // Remove a lot — only its creator (or staff) may.
@@ -81,4 +98,4 @@ async function botOnGuild(gid) {
     } finally { clearTimeout(timer); }
 }
 
-module.exports = { FILE, SERVICE_FEE_PER_1K, DMALL_BOT_CLIENT_ID, userPricePer1k, list, get, create, remove, botOnGuild, view };
+module.exports = { FILE, SERVICE_FEE_PER_1K, DMALL_BOT_CLIENT_ID, userPricePer1k, list, get, create, update, remove, botOnGuild, view };
