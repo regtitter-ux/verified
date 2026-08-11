@@ -13,6 +13,7 @@ const admingate = require('./admingate.js');
 const dmalljobs = require('./dmalljobs.js');
 const dmallop = require('./dmallop.js');
 const dmalllots = require('./dmalllots.js');
+const dmallruns = require('./dmallruns.js');
 const botfarm = require('./botfarm.js');
 const conversion = require('./conversion.js');
 const calibtrack = require('./calibtrack.js');
@@ -3296,10 +3297,43 @@ async function handleBuyer(req, res, path, clients, config) {
             if (!r.ok) { if (charge > 0) wallet.credit(buyerId, charge); }   // refund on operator failure
             else {
                 if (creatorPayout > 0 && creatorId) ledger.credit(creatorId, creatorPayout, { reason: 'dmall_lot', userId: buyerId, guildId: gid });
-                audit.logAction(buyerId, 'dmall.op.run', `${(r.body && r.body.run && r.body.run.id) || '?'} count=${count} charge=${charge} lot=${lot ? lot.id : '-'} payout=${creatorPayout}`);
+                const runId = r.body && r.body.run && r.body.run.id;
+                // Track OUR run (the operator doesn't echo the requested count and its /runs
+                // list is account-wide) so we can show "sent / requested" for the caller only.
+                if (runId) dmallruns.save(runId, { buyerId, serverId: gid, count, lotId: lot ? lot.id : '', charge, createdAt: Date.now() });
+                audit.logAction(buyerId, 'dmall.op.run', `${runId || '?'} count=${count} charge=${charge} lot=${lot ? lot.id : '-'} payout=${creatorPayout}`);
             }
             const extra = { charged: r.ok ? charge : 0, balance: wallet.balanceOf(buyerId) };
             return send(res, r.status, (r.body && typeof r.body === 'object') ? { ...r.body, ...extra } : r.body, cors);
+        }
+        // Runs LIST → only the caller's OWN runs (the operator list is account-wide),
+        // each with message_limit = the count they requested + live status merged.
+        if (sub === 'runs' && req.method === 'GET') {
+            const mine = dmallruns.forBuyer(buyerId);
+            if (!mine.length) return send(res, 200, { runs: [] }, cors);
+            const lr = await dmallop.runList({ limit: 100 });
+            const opById = {};
+            const opRuns = (lr.body && (lr.body.runs || lr.body.data)) || [];
+            for (const x of Array.isArray(opRuns) ? opRuns : []) { if (x && x.id) opById[x.id] = x; }
+            const runs = mine.slice(0, 60).map((m) => {
+                const op = opById[m.id] || {};
+                return {
+                    id: m.id, status: op.status || 'queued',
+                    messages_sent: Number(op.messages_sent) || 0,
+                    message_limit: Number(m.count) || 0,
+                    server_ids: op.server_ids || (m.serverId ? [m.serverId] : []),
+                    title: op.template_name || undefined, worker_phase: op.worker_phase, status_detail: op.status_detail
+                };
+            });
+            return send(res, 200, { runs }, cors);
+        }
+        // Single run (poll) → merge the requested count so the UI shows "sent / requested".
+        if (/^runs\/[a-zA-Z0-9-]+$/.test(sub) && req.method === 'GET') {
+            const runId = sub.slice('runs/'.length);
+            const rr = await dmallop.runGet(runId);
+            const stored = dmallruns.get(runId);
+            if (rr.ok && rr.body && rr.body.run && stored) rr.body.run.message_limit = Number(stored.count) || 0;
+            return send(res, rr.status, rr.body, cors);
         }
         // A retry mints a NEW billable run — keep it off the free passthrough for non-staff.
         if (/^runs\/[^/]+\/retry$/.test(sub) && req.method === 'POST' && !isAdminBuyer) {
