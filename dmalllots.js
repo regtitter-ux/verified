@@ -98,4 +98,37 @@ async function botOnGuild(gid) {
     } finally { clearTimeout(timer); }
 }
 
-module.exports = { FILE, SERVICE_FEE_PER_1K, DMALL_BOT_CLIENT_ID, userPricePer1k, list, get, create, update, remove, botOnGuild, view };
+// Live guild presentation (name / member count / icon + banner CDN URLs) for a lot's server,
+// via the auth-bot. Cached in-memory (10 min) so listing N lots doesn't hammer Discord.
+// Icons/banners are requested as static PNG (animated a_ hashes render their first frame,
+// avoiding broken .gif CDN assets). Returns null if unavailable.
+const _guildCache = new Map();
+const GUILD_TTL = 10 * 60 * 1000;
+async function guildInfo(gid) {
+    const g = String(gid || '');
+    const c = _guildCache.get(g);
+    if (c && Date.now() - c.at < GUILD_TTL) return c.info;
+    const tok = (process.env.AUTH_BOT_TOKEN || '').trim();
+    if (!tok || !/^\d{17,20}$/.test(g)) return null;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12000);
+    let info = null;
+    try {
+        const r = await fetch(`https://discord.com/api/v10/guilds/${g}?with_counts=true`, { headers: { Authorization: 'Bot ' + tok }, signal: ctrl.signal });
+        if (r.status === 200) {
+            const d = await r.json().catch(() => ({}));
+            info = {
+                name: d.name || '',
+                members: Number(d.approximate_member_count) || 0,
+                icon: d.icon ? `https://cdn.discordapp.com/icons/${g}/${d.icon}.png?size=128` : '',
+                banner: d.banner ? `https://cdn.discordapp.com/banners/${g}/${d.banner}.png?size=600` : ''
+            };
+        }
+        _guildCache.set(g, { at: Date.now(), info });   // cache misses too (avoid re-hitting a gone guild)
+        return info;
+    } catch (_) {
+        return null;
+    } finally { clearTimeout(timer); }
+}
+
+module.exports = { FILE, SERVICE_FEE_PER_1K, DMALL_BOT_CLIENT_ID, userPricePer1k, list, get, create, update, remove, botOnGuild, guildInfo, view };

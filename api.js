@@ -3340,6 +3340,17 @@ async function handleBuyer(req, res, path, clients, config) {
         const lots = dmalllots.list()
             .filter((l) => !l.private || l.creatorId === buyerId || isAdminBuyer)
             .map((l) => ({ ...l, mine: l.creatorId === buyerId }));
+        // Lifetime per-server stats (keyed by serverId, so they persist across lot recreation).
+        const stats = dmallruns.statsByServer();
+        // Live server icon/banner/member count (cached), so cards show real avatars/banners.
+        await Promise.all(lots.map(async (l) => {
+            const st = stats[String(l.serverId)] || { runs: 0, delivered: 0 };
+            l.runsDone = st.runs; l.delivered = st.delivered;
+            try {
+                const g = await dmalllots.guildInfo(l.serverId);
+                if (g) { l.icon = g.icon || ''; l.banner = g.banner || ''; if (g.members) l.memberCount = g.members; if (g.name && !l.serverName) l.serverName = g.name; }
+            } catch (_) { /* leave letter fallback */ }
+        }));
         return send(res, 200, { lots, botClientId: dmalllots.DMALL_BOT_CLIENT_ID, serviceFeePer1k: dmalllots.SERVICE_FEE_PER_1K }, cors);
     }
     if (path === '/order/dmall/lot' && req.method === 'POST') {
