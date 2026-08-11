@@ -820,6 +820,30 @@ function guildIconOf(clients, gid) {
     return (r && r.icon) ? `https://cdn.discordapp.com/icons/${r.id}/${r.icon}.png?size=64` : null;
 }
 
+// Normalize an operator-supplied guild icon into a usable URL: pass through a full URL,
+// build a CDN URL from a bare icon hash, else null (frontend shows a letter tile).
+function normalizeGuildIcon(v, gid) {
+    if (!v || typeof v !== 'string') return null;
+    if (/^https?:\/\//.test(v)) return v;
+    return `https://cdn.discordapp.com/icons/${gid}/${v}.png?size=64`;
+}
+
+// Build the "from" (source) server list for a DMALL run card: {id, name, icon}. Prefers the
+// operator's resolved names/icons, falling back to our own fleet metadata (e.g. lot servers
+// where our DMALL bot lives) and finally the bare id / a letter tile.
+function dmallSourceServers(op, storedServerId, clients) {
+    const raw = (Array.isArray(op.servers) && op.servers.length)
+        ? op.servers.map((s) => ({ id: String(s.guild_id || ''), name: s.guild_name || '', icon: s.guild_icon || null }))
+        : (Array.isArray(op.server_ids) && op.server_ids.length ? op.server_ids : (storedServerId ? [storedServerId] : []))
+            .map((id, i) => ({ id: String(id), name: (op.server_names || [])[i] || '', icon: null }));
+    return raw.map((s) => {
+        const id = s.id;
+        const opName = (s.name && s.name !== id) ? s.name : '';
+        const opIcon = normalizeGuildIcon(s.icon, id);
+        return { id, name: opName || guildNameOf(clients, id) || id, icon: opIcon || guildIconOf(clients, id) || null };
+    });
+}
+
 // Member count across the fleet caches, falling back to the reserve account's
 // view for servers no bot is on. Null when nobody can see the guild.
 function guildMembersOf(clients, gid) {
@@ -3411,6 +3435,12 @@ async function handleBuyer(req, res, path, clients, config) {
                     message_limit: Number(m.count) || 0,
                     estimated: Number(op.estimated_messages) || 0,
                     server_ids: op.server_ids || (m.serverId ? [m.serverId] : []),
+                    // "From" servers (avatar + name) and the "to" destination (name + invite,
+                    // no avatar — our bot isn't in the destination) for the run card.
+                    servers: dmallSourceServers(op, m.serverId, clients),
+                    destination: (op.destination && (op.destination.guild_name || op.destination.url))
+                        ? { name: op.destination.guild_name || '', url: op.destination.url || op.destination.input || '', members: Number(op.destination.approximate_member_count) || 0 }
+                        : null,
                     title: op.template_name || undefined, worker_phase: op.worker_phase,
                     // Why delivery was (in)complete — localized on the client from these.
                     reasonCode: (op.completion && op.completion.reason_code) || '',
