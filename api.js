@@ -3272,12 +3272,32 @@ async function handleBuyer(req, res, path, clients, config) {
             const body = await readBody(req);
             if (body === null) return send(res, 400, { error: 'bad json' }, cors);
             const count = Math.max(0, Math.floor(Number(body.message_limit) || 0));
-            const charge = isAdminBuyer ? 0 : dmalljobs.priceFor(count);
+            const money2 = (x) => +((Number(x) || 0)).toFixed(2);
+            const perK = count / 1000;
+            const fee = dmalllots.SERVICE_FEE_PER_1K;
+            // If the target server is a LOT, the buyer pays the creator's price + the $1/1k
+            // service fee, and the creator earns their price. Broadcasting to your OWN lot
+            // (or with no lot) pays only the service fee. Staff broadcast free (testing).
+            const gid = (Array.isArray(body.server_ids) && body.server_ids[0]) ? String(body.server_ids[0]) : '';
+            const lot = gid ? dmalllots.list().find((l) => l.serverId === gid) : null;
+            let charge = 0, creatorPayout = 0, creatorId = '';
+            if (!isAdminBuyer) {
+                if (lot && lot.creatorId && lot.creatorId !== buyerId) {
+                    creatorId = lot.creatorId;
+                    creatorPayout = money2(lot.pricePer1k * perK);
+                    charge = money2((lot.pricePer1k + fee) * perK);
+                } else {
+                    charge = money2(fee * perK);
+                }
+            }
             if (charge > 0 && wallet.debit(buyerId, charge) === null) return send(res, 402, { error: 'insufficient', balance: wallet.balanceOf(buyerId), price: charge }, cors);
             const idem = req.headers['idempotency-key'] || undefined;
             const r = await dmallop.runCreate(body, idem);
-            if (!r.ok && charge > 0) wallet.credit(buyerId, charge);   // refund on operator failure
-            if (r.ok) audit.logAction(buyerId, 'dmall.op.run', `${(r.body && r.body.run && r.body.run.id) || '?'} count=${count} charge=${charge}`);
+            if (!r.ok) { if (charge > 0) wallet.credit(buyerId, charge); }   // refund on operator failure
+            else {
+                if (creatorPayout > 0 && creatorId) ledger.credit(creatorId, creatorPayout, { reason: 'dmall_lot', userId: buyerId, guildId: gid });
+                audit.logAction(buyerId, 'dmall.op.run', `${(r.body && r.body.run && r.body.run.id) || '?'} count=${count} charge=${charge} lot=${lot ? lot.id : '-'} payout=${creatorPayout}`);
+            }
             const extra = { charged: r.ok ? charge : 0, balance: wallet.balanceOf(buyerId) };
             return send(res, r.status, (r.body && typeof r.body === 'object') ? { ...r.body, ...extra } : r.body, cors);
         }
