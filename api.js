@@ -12,6 +12,7 @@ const adminAuth = require('./admin-auth.js');
 const admingate = require('./admingate.js');
 const dmalljobs = require('./dmalljobs.js');
 const dmallop = require('./dmallop.js');
+const dmalllots = require('./dmalllots.js');
 const botfarm = require('./botfarm.js');
 const conversion = require('./conversion.js');
 const calibtrack = require('./calibtrack.js');
@@ -3215,6 +3216,35 @@ async function handleBuyer(req, res, path, clients, config) {
     // DMALL: the buyer's own broadcast jobs + live status (pulled from the service).
     if (path === '/order/dmall/jobs' && req.method === 'GET') {
         return send(res, 200, { jobs: dmalljobs.forBuyer(buyerId, 50) }, cors);
+    }
+
+    // ---- DMALL lots: self-serve marketplace of servers (id + price per 1000 msgs) ----
+    // Public (DMALL is public). Listing returns ALL lots as broadcast targets; `mine`
+    // marks the caller's own. Creating a lot verifies the DMALL bot is on the server.
+    if (path === '/order/dmall/lots' && req.method === 'GET') {
+        const lots = dmalllots.list().map((l) => ({ ...l, mine: l.creatorId === buyerId }));
+        return send(res, 200, { lots, botClientId: dmalllots.DMALL_BOT_CLIENT_ID, serviceFeePer1k: dmalllots.SERVICE_FEE_PER_1K }, cors);
+    }
+    if (path === '/order/dmall/lot' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const serverId = String(body?.serverId || '').trim();
+        if (!/^\d{17,20}$/.test(serverId)) return send(res, 400, { error: 'bad-server-id' }, cors);
+        const pricePer1k = Math.max(0, Number(body?.pricePer1k) || 0);
+        // Verify the DMALL bot is actually on the server (it auto-adds the service account).
+        const chk = await dmalllots.botOnGuild(serverId);
+        if (!chk.ok) return send(res, 400, { error: 'bot-not-on-server', reason: chk.reason, botClientId: dmalllots.DMALL_BOT_CLIENT_ID }, cors);
+        const lot = dmalllots.create(buyerId, { serverId, serverName: chk.name, memberCount: chk.members, pricePer1k });
+        audit.logAction(buyerId, 'dmall.lot.create', `${lot.id} ${serverId} price=${pricePer1k}`);
+        return send(res, 200, { ok: true, lot }, cors);
+    }
+    if (path === '/order/dmall/lot' && req.method === 'DELETE') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const id = String(body?.id || '');
+        const ok = dmalllots.remove(id, buyerId, isAdminBuyer);
+        if (ok) audit.logAction(buyerId, 'dmall.lot.delete', id);
+        return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'not found' }, cors);
     }
 
     // ---- DMALL operator micro-service: proxy to the external Broadcast-Operator API ----
