@@ -120,6 +120,47 @@ const poster = require('./poster.js');
 const extraad = require('./extraad.js');
 const wallet = require('./wallet.js');
 const ledger = require('./ledger.js');
+
+// In-memory idempotency for DMALL run-create: idemKey → { id, ts }. Reserved SYNCHRONOUSLY
+// before the wallet charge + operator await, so a concurrent/retried POST with the same key
+// returns the first run without charging twice. Single-process, TTL-pruned (10 min window).
+const dmallRunIdem = new Map();
+function dmallIdemPrune() {
+    if (dmallRunIdem.size < 200) return;
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [k, v] of dmallRunIdem) if (!v || v.ts < cutoff) dmallRunIdem.delete(k);
+}
+
+// Settle a DMALL run on its terminal state, scaled to messages actually delivered:
+//  • refund the buyer for the UNDELIVERED portion of the upfront hold, and
+//  • pay the lot creator ONLY for delivered messages (creatorPrice × delivered/1000).
+// Idempotent: guarded by the `settled` flag stored per run. Safe to call on every poll.
+function settleDmallRun(runId, opRun) {
+    const stored = dmallruns.get(runId);
+    if (!stored || stored.settled) return;
+    const status = opRun && opRun.status;
+    if (!['completed', 'failed', 'stopped'].includes(status)) return;
+    const money2 = (x) => +((Number(x) || 0)).toFixed(2);
+    const requested = Math.max(0, Number(stored.count) || 0);
+    const delivered = Math.max(0, Math.min(requested, Number(opRun.messages_sent) || 0));
+    const charge = Number(stored.charge) || 0;
+    const creatorId = stored.creatorId || '';
+    const creatorPrice = Number(stored.creatorPrice) || 0;
+    let refund = 0, payout = 0;
+    // Refund the buyer for what was paid but not delivered.
+    if (charge > 0 && requested > 0 && delivered < requested) {
+        refund = money2(charge * (requested - delivered) / requested);
+        if (refund > 0) wallet.credit(stored.buyerId, refund);
+    }
+    // Pay the creator for delivered messages only.
+    if (creatorId && creatorPrice > 0 && delivered > 0) {
+        payout = money2(creatorPrice * delivered / 1000);
+        if (payout > 0) ledger.credit(creatorId, payout, { reason: 'dmall_lot', userId: stored.buyerId, guildId: stored.serverId });
+    }
+    dmallruns.save(runId, { settled: true, delivered, refunded: refund, creatorPaid: payout });
+    try { audit.logAction(stored.buyerId, 'dmall.op.settle', `${runId} delivered=${delivered}/${requested} refund=${refund} creator=${creatorId || '-'} paid=${payout}`); } catch (_) {}
+}
+
 const lots = require('./lots.js');
 const lotmon = require('./lotmon.js');
 const investors = require('./investors.js');
@@ -3281,27 +3322,40 @@ async function handleBuyer(req, res, path, clients, config) {
             // (or with no lot) pays only the service fee. Staff broadcast free (testing).
             const gid = (Array.isArray(body.server_ids) && body.server_ids[0]) ? String(body.server_ids[0]) : '';
             const lot = gid ? dmalllots.list().find((l) => l.serverId === gid) : null;
-            let charge = 0, creatorPayout = 0, creatorId = '';
+            // The buyer is charged UPFRONT for the full requested count (a hold). The creator is
+            // NOT paid here — payout and any refund are settled on the run's terminal state,
+            // scaled to messages actually delivered (see settleDmallRun). Staff broadcast free.
+            let charge = 0, creatorPrice = 0, creatorId = '';
             if (!isAdminBuyer) {
                 if (lot && lot.creatorId && lot.creatorId !== buyerId) {
                     creatorId = lot.creatorId;
-                    creatorPayout = money2(lot.pricePer1k * perK);
-                    charge = money2((lot.pricePer1k + fee) * perK);
+                    creatorPrice = Number(lot.pricePer1k) || 0;
+                    charge = money2((creatorPrice + fee) * perK);
                 } else {
                     charge = money2(fee * perK);
                 }
             }
-            if (charge > 0 && wallet.debit(buyerId, charge) === null) return send(res, 402, { error: 'insufficient', balance: wallet.balanceOf(buyerId), price: charge }, cors);
-            const idem = req.headers['idempotency-key'] || undefined;
-            const r = await dmallop.runCreate(body, idem);
-            if (!r.ok) { if (charge > 0) wallet.credit(buyerId, charge); }   // refund on operator failure
+            // De-dupe an accidental double-submit BEFORE charging: same idempotency key that is
+            // already in flight / done returns the first run, no second charge. Reserve it
+            // synchronously (no await between the check and the reservation).
+            const idem = req.headers['idempotency-key'] ? String(req.headers['idempotency-key']).slice(0, 128) : '';
+            if (idem) {
+                dmallIdemPrune();
+                const prior = dmallRunIdem.get(idem);
+                if (prior) return send(res, 200, { run: { id: prior.id || '' }, charged: 0, duplicate: true, balance: wallet.balanceOf(buyerId) }, cors);
+                dmallRunIdem.set(idem, { id: '', ts: Date.now() });
+            }
+            if (charge > 0 && wallet.debit(buyerId, charge) === null) { if (idem) dmallRunIdem.delete(idem); return send(res, 402, { error: 'insufficient', balance: wallet.balanceOf(buyerId), price: charge }, cors); }
+            const r = await dmallop.runCreate(body, idem || undefined);
+            if (!r.ok) { if (charge > 0) wallet.credit(buyerId, charge); if (idem) dmallRunIdem.delete(idem); }   // refund the full hold + release the key so a real retry works
             else {
-                if (creatorPayout > 0 && creatorId) ledger.credit(creatorId, creatorPayout, { reason: 'dmall_lot', userId: buyerId, guildId: gid });
                 const runId = r.body && r.body.run && r.body.run.id;
                 // Track OUR run (the operator doesn't echo the requested count and its /runs
-                // list is account-wide) so we can show "sent / requested" for the caller only.
-                if (runId) dmallruns.save(runId, { buyerId, serverId: gid, count, lotId: lot ? lot.id : '', charge, createdAt: Date.now() });
-                audit.logAction(buyerId, 'dmall.op.run', `${runId || '?'} count=${count} charge=${charge} lot=${lot ? lot.id : '-'} payout=${creatorPayout}`);
+                // list is account-wide) so we can show "sent / requested" and settle at the end.
+                if (runId) { dmallruns.save(runId, { buyerId, serverId: gid, count, lotId: lot ? lot.id : '', charge, creatorId, creatorPrice, fee, settled: false, createdAt: Date.now() }); if (idem) dmallRunIdem.set(idem, { id: runId, ts: Date.now() }); }
+                else { if (charge > 0) wallet.credit(buyerId, charge); if (idem) dmallRunIdem.delete(idem); }   // untrackable run → cannot settle later, refund now
+
+                audit.logAction(buyerId, 'dmall.op.run', `${runId || '?'} count=${count} charge=${charge} lot=${lot ? lot.id : '-'} creator=${creatorId || '-'}@${creatorPrice}`);
             }
             const extra = { charged: r.ok ? charge : 0, balance: wallet.balanceOf(buyerId) };
             return send(res, r.status, (r.body && typeof r.body === 'object') ? { ...r.body, ...extra } : r.body, cors);
@@ -3317,15 +3371,18 @@ async function handleBuyer(req, res, path, clients, config) {
             for (const x of Array.isArray(opRuns) ? opRuns : []) { if (x && x.id) opById[x.id] = x; }
             const runs = mine.slice(0, 60).map((m) => {
                 const op = opById[m.id] || {};
+                settleDmallRun(m.id, op);   // idempotent refund/payout once terminal
                 return {
                     id: m.id, status: op.status || 'queued',
                     messages_sent: Number(op.messages_sent) || 0,
                     message_limit: Number(m.count) || 0,
                     estimated: Number(op.estimated_messages) || 0,
                     server_ids: op.server_ids || (m.serverId ? [m.serverId] : []),
-                    title: op.template_name || undefined, worker_phase: op.worker_phase, status_detail: op.status_detail,
-                    // Why delivery was (in)complete — the operator gives a ready RU label.
-                    reason: (op.completion && op.completion.reason_label_ru) || op.status_detail || op.error_summary || ''
+                    title: op.template_name || undefined, worker_phase: op.worker_phase,
+                    // Why delivery was (in)complete — localized on the client from these.
+                    reasonCode: (op.completion && op.completion.reason_code) || '',
+                    reasonRu: (op.completion && op.completion.reason_label_ru) || op.status_detail || '',
+                    reasonEn: op.error_summary || ''
                 };
             });
             return send(res, 200, { runs }, cors);
@@ -3334,6 +3391,7 @@ async function handleBuyer(req, res, path, clients, config) {
         if (/^runs\/[a-zA-Z0-9-]+$/.test(sub) && req.method === 'GET') {
             const runId = sub.slice('runs/'.length);
             const rr = await dmallop.runGet(runId);
+            if (rr.ok && rr.body && rr.body.run) settleDmallRun(runId, rr.body.run);   // idempotent refund/payout once terminal
             const stored = dmallruns.get(runId);
             if (rr.ok && rr.body && rr.body.run && stored) rr.body.run.message_limit = Number(stored.count) || 0;
             return send(res, rr.status, rr.body, cors);
@@ -4974,4 +5032,4 @@ function createApiKey(userId, name) {
     return key;
 }
 
-module.exports = { startApiServer, createApiKey };
+module.exports = { startApiServer, createApiKey, settleDmallRun };
