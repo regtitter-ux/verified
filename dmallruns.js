@@ -34,4 +34,15 @@ function statsByServer() {
 }
 function forServer(gid) { return statsByServer()[String(gid || '')] || { runs: 0, delivered: 0 }; }
 
-module.exports = { FILE, load, save, get, forBuyer, statsByServer, forServer };
+// Settled-run outcomes for one server: ok = delivered ≥1, failed = delivered 0. Used to decide
+// if a server is "dead" (repeatedly failed, never delivered) vs simply new/untested.
+function serverOutcomes(gid) {
+    const o = load(); let ok = 0, failed = 0;
+    for (const r of Object.values(o)) {
+        if (!r || String(r.serverId || '') !== String(gid || '') || !r.settled) continue;
+        if ((Number(r.delivered) || 0) > 0) ok++; else failed++;
+    }
+    return { ok, failed };
+}
+
+module.exports = { FILE, load, save, get, forBuyer, statsByServer, forServer, serverOutcomes };

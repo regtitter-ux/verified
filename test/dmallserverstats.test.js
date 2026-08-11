@@ -23,3 +23,17 @@ test('statsByServer counts successful broadcasts + total delivered per server', 
     assert.deepEqual(dmallruns.forServer(G1), { runs: 3, delivered: 600 });
     assert.deepEqual(dmallruns.forServer('999'), { runs: 0, delivered: 0 }, 'unknown server → zeros');
 });
+
+test('serverOutcomes splits settled runs into ok (delivered≥1) vs failed (0) — the dead-server signal', () => {
+    seed({ 'dmallruns.json': {
+        A1: { id: 'A1', serverId: G1, delivered: 0, settled: true },
+        A2: { id: 'A2', serverId: G1, delivered: 0, settled: true },
+        A3: { id: 'A3', serverId: G1, delivered: 5, settled: true },
+        A4: { id: 'A4', serverId: G1 },   // unsettled → ignored
+        B1: { id: 'B1', serverId: G2, delivered: 0, settled: true },
+        B2: { id: 'B2', serverId: G2, delivered: 0, settled: true },
+    } });
+    assert.deepEqual(dmallruns.serverOutcomes(G1), { ok: 1, failed: 2 }, 'has a success → not dead');
+    assert.deepEqual(dmallruns.serverOutcomes(G2), { ok: 0, failed: 2 }, '≥2 failed, 0 ok → dead');
+    assert.deepEqual(dmallruns.serverOutcomes('999'), { ok: 0, failed: 0 }, 'new server → zeros → allowed');
+});

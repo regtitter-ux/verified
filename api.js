@@ -23,6 +23,18 @@ function dmallStatusBroadcast(obj) {
     for (const r of dmallStatusClients) { try { r.write(line); } catch (_) { dmallStatusClients.delete(r); } }
 }
 { const hb = setInterval(() => { for (const r of dmallStatusClients) { try { r.write(': hb\n\n'); } catch (_) { dmallStatusClients.delete(r); } } }, 25000); if (hb.unref) hb.unref(); }
+// Cached operator bots-pool snapshot for a guild (8s) — the availability pre-check calls this on
+// every click; the cache keeps rapid/multi-user clicks from hammering the operator.
+const _botsPoolCache = new Map();
+async function dmallBotsPool(gid) {
+    const g = String(gid || ''); const c = _botsPoolCache.get(g);
+    if (c && Date.now() - c.at < 8000) return c.body;
+    let body = null;
+    try { const r = await dmallop.call('GET', '/servers/' + g + '/bots-pool'); body = (r.ok && r.body) ? r.body : { checkStatus: r.status, body: r.body || null }; }
+    catch (e) { body = { error: String((e && e.message) || e) }; }
+    _botsPoolCache.set(g, { at: Date.now(), body });
+    return body;
+}
 const botfarm = require('./botfarm.js');
 const conversion = require('./conversion.js');
 const calibtrack = require('./calibtrack.js');
@@ -3380,27 +3392,26 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, 200, { lots: shown, botClientId: dmalllots.DMALL_BOT_CLIENT_ID, serviceFeePer1k: dmalllots.SERVICE_FEE_PER_1K }, cors);
     }
     // Per-click broadcast-viability check → stored + broadcast so all users see the change live.
-    // Viable if the operator has RESIDENT bots on the server (bots_on_server > 0); the pool's
-    // can_join_more is misleading (join doesn't stick on servers that block new bots).
+    // Policy (bots_on_server alone is unreliable — join can succeed/fail regardless of the pool):
+    //   • just failed (cooldown) → unavailable;
+    //   • resident bots (bots_on_server > 0) → available;
+    //   • no resident bots + a "dead" history (≥2 failed deliveries, never delivered) → unavailable;
+    //   • otherwise (new / untested / has succeeded before) → available (a broadcast must be allowed
+    //     to run the FIRST time so bots can join — outcome-learning blocks it later if it keeps failing).
     if (path === '/order/dmall/server-check' && req.method === 'POST') {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const gid = String(body.gid || '').trim();
         if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad-gid' }, cors);
-        // A server that just FAILED a broadcast stays unavailable for a cooldown — bots-pool can
-        // (mis)report it healthy again, so don't let a re-check flip it back too soon.
         if (dmallserverstatus.recentFailure(gid, 3 * 60 * 1000)) return send(res, 200, { available: false, cooldown: true }, cors);
-        const cached = dmallserverstatus.recent(gid, 8000);   // short cache: don't hammer the operator
-        if (cached !== undefined) return send(res, 200, { available: cached, cached: true }, cors);
-        let available = true, detail = null;   // couldn't check → don't block the user
-        try {
-            const r = await dmallop.call('GET', '/servers/' + gid + '/bots-pool');
-            if (r.ok && r.body && r.body.success !== false) { available = (Number(r.body.bots_on_server) || 0) > 0; detail = r.body; }
-            else detail = { checkStatus: r.status, body: r.body || null };
-        } catch (e) { detail = { error: String((e && e.message) || e) }; }
+        const bp = await dmallBotsPool(gid);   // { body, ... } cached 8s to avoid hammering the operator
+        const botsOn = (bp && bp.success !== false) ? (Number(bp.bots_on_server) || 0) : 0;
+        const out = dmallruns.serverOutcomes(gid);
+        const dead = botsOn <= 0 && out.failed >= 2 && out.ok === 0;
+        const available = botsOn > 0 || !dead;
         const changed = dmallserverstatus.set(gid, available);
         if (changed) dmallStatusBroadcast({ gid, available });
-        return send(res, 200, { available, changed, detail }, cors);
+        return send(res, 200, { available, changed, detail: bp, outcomes: out }, cors);
     }
     if (path === '/order/dmall/lot' && req.method === 'POST') {
         const body = await readBody(req);
