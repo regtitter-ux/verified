@@ -167,6 +167,16 @@ function settleDmallRun(runId, opRun) {
         if (payout > 0) ledger.credit(creatorId, payout, { reason: 'dmall_lot', userId: stored.buyerId, guildId: stored.serverId });
     }
     dmallruns.save(runId, { settled: true, delivered, refunded: refund, creatorPaid: payout });
+    // Learn from the real outcome: a delivery that failed (0 sent on a completed/failed run) marks
+    // the server unavailable for EVERYONE (bots-pool alone mispredicts these); a real delivery marks
+    // it available. A user-stopped run isn't a server failure, so it's left alone.
+    try {
+        const gid = stored.serverId;
+        if (gid) {
+            if (delivered > 0) { if (dmallserverstatus.set(gid, true)) dmallStatusBroadcast({ gid, available: true }); }
+            else if (status === 'failed' || status === 'completed') { if (dmallserverstatus.markFailure(gid)) dmallStatusBroadcast({ gid, available: false }); }
+        }
+    } catch (_) {}
     try { audit.logAction(stored.buyerId, 'dmall.op.settle', `${runId} delivered=${delivered}/${requested} refund=${refund} creator=${creatorId || '-'} paid=${payout}`); } catch (_) {}
 }
 
@@ -3377,6 +3387,9 @@ async function handleBuyer(req, res, path, clients, config) {
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const gid = String(body.gid || '').trim();
         if (!/^\d{17,20}$/.test(gid)) return send(res, 400, { error: 'bad-gid' }, cors);
+        // A server that just FAILED a broadcast stays unavailable for a cooldown — bots-pool can
+        // (mis)report it healthy again, so don't let a re-check flip it back too soon.
+        if (dmallserverstatus.recentFailure(gid, 3 * 60 * 1000)) return send(res, 200, { available: false, cooldown: true }, cors);
         const cached = dmallserverstatus.recent(gid, 8000);   // short cache: don't hammer the operator
         if (cached !== undefined) return send(res, 200, { available: cached, cached: true }, cors);
         let available = true;   // couldn't check → don't block the user

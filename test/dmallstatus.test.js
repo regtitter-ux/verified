@@ -22,3 +22,14 @@ test('recent returns the cached value within the TTL, undefined after', () => {
     assert.equal(status.recent(G, 0), undefined, 'past TTL → re-check');
     assert.equal(status.recent('999', 60000), undefined, 'unknown server → undefined');
 });
+
+test('markFailure blocks the server + recentFailure holds the cooldown', () => {
+    assert.equal(status.markFailure(G), true, 'goes unavailable');
+    assert.equal(status.isAvailable(G), false);
+    assert.equal(status.recentFailure(G, 60000), true, 'within cooldown → still failed');
+    assert.equal(status.recentFailure(G, 0), false, 'past cooldown → re-checkable');
+    assert.equal(status.recentFailure('999', 60000), false, 'never failed → false');
+    // A real delivery clears it.
+    assert.equal(status.set(G, true), true);
+    assert.equal(status.isAvailable(G), true);
+});

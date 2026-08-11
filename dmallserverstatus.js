@@ -20,6 +20,15 @@ function set(gid, available) {
     return changed;
 }
 
+// A broadcast actually FAILED to deliver on this server → mark unavailable + stamp failedAt, so
+// a cooldown keeps it blocked even if a bots-pool re-check would (misleadingly) say it's fine.
+function markFailure(gid) {
+    const g = String(gid || ''); let changed = false;
+    mutate(FILE, (o) => { const prev = o[g] ? !!o[g].available : null; if (prev !== false) changed = true; o[g] = { available: false, checkedAt: Date.now(), failedAt: Date.now() }; });
+    return changed;
+}
+function recentFailure(gid, ttlMs) { const s = load()[String(gid || '')]; return !!(s && s.failedAt && (Date.now() - s.failedAt < ttlMs)); }
+
 function availabilityMap() { const o = load(); const m = {}; for (const [k, v] of Object.entries(o)) m[k] = !!(v && v.available); return m; }
 
-module.exports = { FILE, isAvailable, recent, set, availabilityMap };
+module.exports = { FILE, isAvailable, recent, set, markFailure, recentFailure, availabilityMap };
