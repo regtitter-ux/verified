@@ -29,6 +29,14 @@ function dmallStatusBroadcast(obj) {
 // Open SSE connections for the public DMALL chat (messages are public → any origin, no auth).
 // New/deleted messages are pushed to every open client in real time.
 const dmallChatClients = new Set();
+// Who's currently typing: userId → { name, until }. Pushed live over SSE AND surfaced in the
+// chat list poll, so the "typing…" indicator shows even when the SSE stream is buffered.
+const dmallTypers = new Map();
+function dmallActiveTypers() {
+    const now = Date.now(); const out = [];
+    for (const [userId, v] of dmallTypers) { if (v.until > now) out.push({ userId, name: v.name }); else dmallTypers.delete(userId); }
+    return out;
+}
 function dmallChatBroadcast(obj) {
     const line = 'data: ' + JSON.stringify(obj) + '\n\n';
     for (const r of dmallChatClients) { try { r.write(line); } catch (_) { dmallChatClients.delete(r); } }
@@ -3531,9 +3539,11 @@ async function handleBuyer(req, res, path, clients, config) {
         if (out.error) return send(res, out.status || 400, { error: out.error, limitMb: out.limitMb }, cors);
         return send(res, 200, out, cors);
     }
-    // Typing indicator: broadcast "<name> is typing" to everyone (no storage, fire-and-forget).
+    // Typing indicator: record the typer (surfaced in /list) AND push live over SSE.
     if (path === '/order/dmall/chat/typing' && req.method === 'POST') {
-        dmallChatBroadcast({ type: 'typing', userId: buyerId, name: userNameOf(clients, buyerId) || 'user' });
+        const nm = userNameOf(clients, buyerId) || 'user';
+        dmallTypers.set(String(buyerId), { name: nm, until: Date.now() + 5000 });
+        dmallChatBroadcast({ type: 'typing', userId: buyerId, name: nm });
         return send(res, 200, { ok: true }, cors);
     }
     if (path.startsWith('/order/dmall/chat/') && req.method === 'DELETE') {
@@ -5069,9 +5079,9 @@ function startApiServer(clients, config) {
                 req.on('close', () => dmallChatClients.delete(res));
                 return;
             }
-            // Public: chat backlog (polling fallback when the SSE stream is blocked/buffered).
+            // Public: chat backlog + who's typing (polling fallback when SSE is blocked/buffered).
             if (req.method === 'GET' && p === '/order/dmall/chat/list') {
-                return send(res, 200, { messages: dmallchat.list() }, { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+                return send(res, 200, { messages: dmallchat.list(), typers: dmallActiveTypers() }, { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
             }
             // Public: custom-emoji + sticker catalog from the servers our bots are on.
             if (req.method === 'GET' && p === '/order/dmall/chat/catalog') {
