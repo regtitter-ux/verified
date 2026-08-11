@@ -166,7 +166,7 @@ function settleDmallRun(runId, opRun) {
         payout = money2(creatorPrice * delivered / 1000);
         if (payout > 0) ledger.credit(creatorId, payout, { reason: 'dmall_lot', userId: stored.buyerId, guildId: stored.serverId });
     }
-    dmallruns.save(runId, { settled: true, delivered, refunded: refund, creatorPaid: payout });
+    dmallruns.save(runId, { settled: true, delivered, refunded: refund, creatorPaid: payout, finalStatus: status });
     // Learn from the real outcome: a delivery that failed (0 sent on a completed/failed run) marks
     // the server unavailable for EVERYONE (bots-pool alone mispredicts these); a real delivery marks
     // it available. A user-stopped run isn't a server failure, so it's left alone.
@@ -3526,9 +3526,15 @@ async function handleBuyer(req, res, path, clients, config) {
             const runs = mine.slice(0, 60).map((m) => {
                 const op = opById[m.id] || {};
                 settleDmallRun(m.id, op);   // idempotent refund/payout once terminal
+                const stored = dmallruns.get(m.id) || m;
+                // The operator's /runs list only holds the recent ~100 (account-wide), so an older
+                // finished run of ours won't be there. Fall back to OUR record instead of defaulting
+                // to 'queued' — otherwise old completed runs wrongly resurface as Active · 0/100.
+                const status = op.status || stored.finalStatus || (stored.settled ? 'completed' : 'queued');
+                const sent = Number(op.messages_sent) || Number(stored.delivered) || 0;
                 return {
-                    id: m.id, status: op.status || 'queued',
-                    messages_sent: Number(op.messages_sent) || 0,
+                    id: m.id, status,
+                    messages_sent: sent,
                     message_limit: Number(m.count) || 0,
                     estimated: Number(op.estimated_messages) || 0,
                     server_ids: op.server_ids || (m.serverId ? [m.serverId] : []),
