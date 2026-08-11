@@ -161,6 +161,54 @@ function settleDmallRun(runId, opRun) {
     try { audit.logAction(stored.buyerId, 'dmall.op.settle', `${runId} delivered=${delivered}/${requested} refund=${refund} creator=${creatorId || '-'} paid=${payout}`); } catch (_) {}
 }
 
+// Create a DMALL run for `buyerId` from `body` (the ONLY money path). Charges the wallet
+// upfront (non-staff), de-dupes on the idempotency key, tracks the run for settlement, and
+// persists the run body so "Repeat" can re-launch it later. Returns { status, payload }.
+async function performDmallRunCreate(buyerId, isAdminBuyer, body, idemHeader) {
+    const money2 = (x) => +((Number(x) || 0)).toFixed(2);
+    const count = Math.max(0, Math.floor(Number(body.message_limit) || 0));
+    const perK = count / 1000;
+    const fee = dmalllots.SERVICE_FEE_PER_1K;
+    // Lot target → buyer pays creatorPrice + fee, creator earns their price (settled per delivered).
+    // Own lot / no lot → fee only. Staff → free.
+    const gid = (Array.isArray(body.server_ids) && body.server_ids[0]) ? String(body.server_ids[0]) : '';
+    const lot = gid ? dmalllots.list().find((l) => l.serverId === gid) : null;
+    let charge = 0, creatorPrice = 0, creatorId = '';
+    if (!isAdminBuyer) {
+        if (lot && lot.creatorId && lot.creatorId !== buyerId) {
+            creatorId = lot.creatorId;
+            creatorPrice = Number(lot.pricePer1k) || 0;
+            charge = money2((creatorPrice + fee) * perK);
+        } else {
+            charge = money2(fee * perK);
+        }
+    }
+    // De-dupe an accidental double-submit BEFORE charging; reserve the key synchronously.
+    const idem = idemHeader ? String(idemHeader).slice(0, 128) : '';
+    if (idem) {
+        dmallIdemPrune();
+        const prior = dmallRunIdem.get(idem);
+        if (prior) return { status: 200, payload: { run: { id: prior.id || '' }, charged: 0, duplicate: true, balance: wallet.balanceOf(buyerId) } };
+        dmallRunIdem.set(idem, { id: '', ts: Date.now() });
+    }
+    if (charge > 0 && wallet.debit(buyerId, charge) === null) { if (idem) dmallRunIdem.delete(idem); return { status: 402, payload: { error: 'insufficient', balance: wallet.balanceOf(buyerId), price: charge } }; }
+    const r = await dmallop.runCreate(body, idem || undefined);
+    if (!r.ok) { if (charge > 0) wallet.credit(buyerId, charge); if (idem) dmallRunIdem.delete(idem); }   // refund the full hold + release the key so a real retry works
+    else {
+        const runId = r.body && r.body.run && r.body.run.id;
+        if (runId) {
+            // Persist the run body (template ref + targeting + count) so "Repeat" can re-launch
+            // the exact same broadcast without the browser holding the settings.
+            const repeatBody = { template_id: body.template_id, server_ids: body.server_ids, message_limit: count, targeting: body.targeting, options: body.options, destination_link: body.destination_link };
+            dmallruns.save(runId, { buyerId, serverId: gid, count, lotId: lot ? lot.id : '', charge, creatorId, creatorPrice, fee, settled: false, body: repeatBody, createdAt: Date.now() });
+            if (idem) dmallRunIdem.set(idem, { id: runId, ts: Date.now() });
+        } else { if (charge > 0) wallet.credit(buyerId, charge); if (idem) dmallRunIdem.delete(idem); }   // untrackable run → cannot settle later, refund now
+        try { audit.logAction(buyerId, 'dmall.op.run', `${runId || '?'} count=${count} charge=${charge} lot=${lot ? lot.id : '-'} creator=${creatorId || '-'}@${creatorPrice}`); } catch (_) {}
+    }
+    const extra = { charged: r.ok ? charge : 0, balance: wallet.balanceOf(buyerId) };
+    return { status: r.status, payload: (r.body && typeof r.body === 'object') ? { ...r.body, ...extra } : r.body };
+}
+
 const lots = require('./lots.js');
 const lotmon = require('./lotmon.js');
 const investors = require('./investors.js');
@@ -3313,52 +3361,19 @@ async function handleBuyer(req, res, path, clients, config) {
         if (sub === 'runs' && req.method === 'POST') {
             const body = await readBody(req);
             if (body === null) return send(res, 400, { error: 'bad json' }, cors);
-            const count = Math.max(0, Math.floor(Number(body.message_limit) || 0));
-            const money2 = (x) => +((Number(x) || 0)).toFixed(2);
-            const perK = count / 1000;
-            const fee = dmalllots.SERVICE_FEE_PER_1K;
-            // If the target server is a LOT, the buyer pays the creator's price + the $1/1k
-            // service fee, and the creator earns their price. Broadcasting to your OWN lot
-            // (or with no lot) pays only the service fee. Staff broadcast free (testing).
-            const gid = (Array.isArray(body.server_ids) && body.server_ids[0]) ? String(body.server_ids[0]) : '';
-            const lot = gid ? dmalllots.list().find((l) => l.serverId === gid) : null;
-            // The buyer is charged UPFRONT for the full requested count (a hold). The creator is
-            // NOT paid here — payout and any refund are settled on the run's terminal state,
-            // scaled to messages actually delivered (see settleDmallRun). Staff broadcast free.
-            let charge = 0, creatorPrice = 0, creatorId = '';
-            if (!isAdminBuyer) {
-                if (lot && lot.creatorId && lot.creatorId !== buyerId) {
-                    creatorId = lot.creatorId;
-                    creatorPrice = Number(lot.pricePer1k) || 0;
-                    charge = money2((creatorPrice + fee) * perK);
-                } else {
-                    charge = money2(fee * perK);
-                }
-            }
-            // De-dupe an accidental double-submit BEFORE charging: same idempotency key that is
-            // already in flight / done returns the first run, no second charge. Reserve it
-            // synchronously (no await between the check and the reservation).
-            const idem = req.headers['idempotency-key'] ? String(req.headers['idempotency-key']).slice(0, 128) : '';
-            if (idem) {
-                dmallIdemPrune();
-                const prior = dmallRunIdem.get(idem);
-                if (prior) return send(res, 200, { run: { id: prior.id || '' }, charged: 0, duplicate: true, balance: wallet.balanceOf(buyerId) }, cors);
-                dmallRunIdem.set(idem, { id: '', ts: Date.now() });
-            }
-            if (charge > 0 && wallet.debit(buyerId, charge) === null) { if (idem) dmallRunIdem.delete(idem); return send(res, 402, { error: 'insufficient', balance: wallet.balanceOf(buyerId), price: charge }, cors); }
-            const r = await dmallop.runCreate(body, idem || undefined);
-            if (!r.ok) { if (charge > 0) wallet.credit(buyerId, charge); if (idem) dmallRunIdem.delete(idem); }   // refund the full hold + release the key so a real retry works
-            else {
-                const runId = r.body && r.body.run && r.body.run.id;
-                // Track OUR run (the operator doesn't echo the requested count and its /runs
-                // list is account-wide) so we can show "sent / requested" and settle at the end.
-                if (runId) { dmallruns.save(runId, { buyerId, serverId: gid, count, lotId: lot ? lot.id : '', charge, creatorId, creatorPrice, fee, settled: false, createdAt: Date.now() }); if (idem) dmallRunIdem.set(idem, { id: runId, ts: Date.now() }); }
-                else { if (charge > 0) wallet.credit(buyerId, charge); if (idem) dmallRunIdem.delete(idem); }   // untrackable run → cannot settle later, refund now
-
-                audit.logAction(buyerId, 'dmall.op.run', `${runId || '?'} count=${count} charge=${charge} lot=${lot ? lot.id : '-'} creator=${creatorId || '-'}@${creatorPrice}`);
-            }
-            const extra = { charged: r.ok ? charge : 0, balance: wallet.balanceOf(buyerId) };
-            return send(res, r.status, (r.body && typeof r.body === 'object') ? { ...r.body, ...extra } : r.body, cors);
+            const out = await performDmallRunCreate(buyerId, isAdminBuyer, body, req.headers['idempotency-key']);
+            return send(res, out.status, out.payload, cors);
+        }
+        // "Repeat" — re-launch a past run with its stored settings (a fresh, billable run).
+        if (/^runs\/[^/]+\/repeat$/.test(sub) && req.method === 'POST') {
+            const runId = sub.slice('runs/'.length).replace(/\/repeat$/, '');
+            const stored = dmallruns.get(runId);
+            if (!stored || String(stored.buyerId || '') !== String(buyerId)) return send(res, 404, { error: 'run-not-found' }, cors);
+            if (!stored.body || !stored.body.template_id) return send(res, 400, { error: 'no-stored-settings' }, cors);
+            // Fresh 5s-bucket key so a double-click can't spawn two, but distinct from the original.
+            const idem = 'repeat-' + runId + '-' + Math.floor(Date.now() / 5000);
+            const out = await performDmallRunCreate(buyerId, isAdminBuyer, { ...stored.body }, idem);
+            return send(res, out.status, out.payload, cors);
         }
         // Runs LIST → only the caller's OWN runs (the operator list is account-wide),
         // each with message_limit = the count they requested + live status merged.
@@ -5032,4 +5047,4 @@ function createApiKey(userId, name) {
     return key;
 }
 
-module.exports = { startApiServer, createApiKey, settleDmallRun };
+module.exports = { startApiServer, createApiKey, settleDmallRun, performDmallRunCreate };
