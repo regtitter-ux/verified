@@ -170,18 +170,18 @@ async function performDmallRunCreate(buyerId, isAdminBuyer, body, idemHeader) {
     const perK = count / 1000;
     const fee = dmalllots.SERVICE_FEE_PER_1K;
     // Lot target → buyer pays creatorPrice + fee, creator earns their price (settled per delivered).
-    // Own lot / no lot → fee only. Staff → free.
+    // Own lot / no lot → fee only. STAFF only get the $1/1k service fee waived — they still pay
+    // the lot creator's price (credited to the creator); on own/no lot that leaves $0 (free).
     const gid = (Array.isArray(body.server_ids) && body.server_ids[0]) ? String(body.server_ids[0]) : '';
     const lot = gid ? dmalllots.list().find((l) => l.serverId === gid) : null;
+    const feeDue = isAdminBuyer ? 0 : fee;   // staff: service fee waived
     let charge = 0, creatorPrice = 0, creatorId = '';
-    if (!isAdminBuyer) {
-        if (lot && lot.creatorId && lot.creatorId !== buyerId) {
-            creatorId = lot.creatorId;
-            creatorPrice = Number(lot.pricePer1k) || 0;
-            charge = money2((creatorPrice + fee) * perK);
-        } else {
-            charge = money2(fee * perK);
-        }
+    if (lot && lot.creatorId && lot.creatorId !== buyerId) {
+        creatorId = lot.creatorId;
+        creatorPrice = Number(lot.pricePer1k) || 0;
+        charge = money2((creatorPrice + feeDue) * perK);
+    } else {
+        charge = money2(feeDue * perK);
     }
     // De-dupe an accidental double-submit BEFORE charging; reserve the key synchronously.
     const idem = idemHeader ? String(idemHeader).slice(0, 128) : '';

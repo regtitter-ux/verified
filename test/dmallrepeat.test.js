@@ -57,10 +57,25 @@ test('a repeated idempotency key returns the first run without a second charge',
 });
 
 // Staff broadcast free — no charge, but the body is still stored so they can repeat.
-test('staff run is free and still stores the repeat body', async () => {
+test('staff run with no lot is free (own/no lot: only the waived service fee)', async () => {
     seed({ 'wallets.json': { [BUYER]: { balance: 3, topups: [] } } });
     const out = await performDmallRunCreate(BUYER, true, runBody(), 'idem-staff');
     assert.equal(out.payload.charged, 0);
     assert.equal(wallet.balanceOf(BUYER), 3, 'staff not charged');
     assert.ok(dmallruns.get('RUN1').body.template_id === 'TPL1');
+});
+
+// Staff only get the $1/1k service fee waived — on someone else's lot they still pay the
+// creator's price, which is credited to the creator.
+test('staff on another lot pays the creator price (fee waived), credited to the creator', async () => {
+    seed({
+        'wallets.json': { [BUYER]: { balance: 20, topups: [] } },
+        'dmalllots.json': { L1: { id: 'L1', creatorId: CREATOR, serverId: GID, serverName: 'S', pricePer1k: 5, createdAt: 1 } },
+    });
+    const out = await performDmallRunCreate(BUYER, true, runBody(), 'idem-staff-lot');
+    assert.equal(out.payload.charged, 5, 'creator price $5/1k, no $1 service fee');
+    assert.equal(wallet.balanceOf(BUYER), 15);
+    const stored = dmallruns.get('RUN1');
+    assert.equal(stored.creatorId, CREATOR);
+    assert.equal(stored.creatorPrice, 5, 'creator still earns their price on settlement');
 });
