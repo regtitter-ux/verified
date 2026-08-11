@@ -51,8 +51,9 @@ function create(creatorId, { serverId, serverName, memberCount, pricePer1k }) {
     return view(lot);
 }
 
-// Update a lot's price and/or privacy — only its creator (or staff) may. The server can't
-// change (it's the lot's identity). Returns the updated view, or null if not found/allowed.
+// Update a lot's price / privacy / owner — only its creator (or staff) may. The server can't
+// change (it's the lot's identity). creatorId hands the lot to another user (its own creator can
+// give it away; staff can reassign any lot). Returns the updated view, or null if not found/allowed.
 function update(id, byId, isStaff, patch) {
     const g = String(id || '');
     let out = null;
@@ -62,6 +63,7 @@ function update(id, byId, isStaff, patch) {
         if (!isStaff && String(l.creatorId || '') !== String(byId || '')) return false;
         if (patch && patch.pricePer1k != null) l.pricePer1k = Math.max(0, Number(patch.pricePer1k) || 0);
         if (patch && patch.private != null) l.private = Boolean(patch.private);
+        if (patch && patch.creatorId != null && /^\d{17,20}$/.test(String(patch.creatorId))) l.creatorId = String(patch.creatorId);
         out = { ...l };
     });
     return out ? view(out) : null;
@@ -111,7 +113,7 @@ async function guildInfo(gid) {
     const tok = (process.env.AUTH_BOT_TOKEN || '').trim();
     if (!tok || !/^\d{17,20}$/.test(g)) return null;
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 12000);
+    const timer = setTimeout(() => ctrl.abort(), 7000);   // don't let one slow guild stall the whole lot list
     let info = null;
     try {
         const r = await fetch(`https://discord.com/api/v10/guilds/${g}?with_counts=true`, { headers: { Authorization: 'Bot ' + tok }, signal: ctrl.signal });

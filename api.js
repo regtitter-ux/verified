@@ -3422,11 +3422,12 @@ async function handleBuyer(req, res, path, clients, config) {
     if (path === '/order/dmall/lot' && req.method === 'POST') {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
-        // Update an existing lot (price / privacy) — creator or staff only, no bot re-check.
+        // Update an existing lot (price / privacy / owner) — creator or staff only, no bot re-check.
         if (body.id) {
             const patch = {};
             if (body.pricePer1k != null) patch.pricePer1k = Math.max(0, Number(body.pricePer1k) || 0);
             if (body.private != null) patch.private = Boolean(body.private);
+            if (body.creatorId != null) { if (!/^\d{17,20}$/.test(String(body.creatorId).trim())) return send(res, 400, { error: 'bad-owner-id' }, cors); patch.creatorId = String(body.creatorId).trim(); }
             const upd = dmalllots.update(String(body.id), buyerId, isAdminBuyer, patch);
             if (!upd) return send(res, 404, { error: 'not found' }, cors);
             audit.logAction(buyerId, 'dmall.lot.update', `${body.id} ${JSON.stringify(patch)}`);
@@ -3550,15 +3551,23 @@ async function handleBuyer(req, res, path, clients, config) {
                 // to 'queued' — otherwise old completed runs wrongly resurface as Active · 0/100.
                 const status = op.status || stored.finalStatus || (stored.settled ? 'completed' : 'queued');
                 const sent = Number(op.messages_sent) || Number(stored.delivered) || 0;
+                // The run is STRICTLY tied to the server it was placed on (OUR stored serverId),
+                // never the operator's server_ids/servers — those can disagree and mis-attribute a
+                // run to another server's card. Use the operator's name/icon only if it's for THIS id.
+                const sid = String(m.serverId || (Array.isArray(op.server_ids) && op.server_ids[0]) || '');
+                let sName = '', sIcon = '';
+                const os = Array.isArray(op.servers) ? op.servers.find((x) => String(x.guild_id) === sid) : null;
+                if (os) { if (os.guild_name && os.guild_name !== sid) sName = os.guild_name; sIcon = normalizeGuildIcon(os.guild_icon, sid) || ''; }
+                if (!sName) sName = guildNameOf(clients, sid) || '';
+                if (!sIcon) sIcon = guildIconOf(clients, sid) || '';
                 return {
                     id: m.id, status,
                     messages_sent: sent,
                     message_limit: Number(m.count) || 0,
                     estimated: Number(op.estimated_messages) || 0,
-                    server_ids: op.server_ids || (m.serverId ? [m.serverId] : []),
-                    // "From" servers (avatar + name) and the "to" destination (name + invite,
-                    // no avatar — our bot isn't in the destination) for the run card.
-                    servers: dmallSourceServers(op, m.serverId, clients),
+                    server_ids: sid ? [sid] : [],
+                    // "From" server (avatar + name, from OUR serverId) and the "to" destination.
+                    servers: sid ? [{ id: sid, name: sName || sid, icon: sIcon || null }] : [],
                     destination: (op.destination && (op.destination.guild_name || op.destination.url))
                         ? { name: op.destination.guild_name || '', url: op.destination.url || op.destination.input || '', members: Number(op.destination.approximate_member_count) || 0 }
                         : null,
