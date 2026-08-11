@@ -3374,6 +3374,31 @@ async function handleBuyer(req, res, path, clients, config) {
         return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'not found' }, cors);
     }
 
+    // DMALL cabinet — the buyer's own dashboard: top stats, order history (their runs) and
+    // earnings journal (credits they got as a lot creator). Read-only aggregation.
+    if (path === '/order/dmall/cabinet' && req.method === 'GET') {
+        const money2 = (x) => +((Number(x) || 0)).toFixed(2);
+        const runs = dmallruns.forBuyer(buyerId);   // newest first
+        let spent = 0, delivered = 0;
+        const orders = runs.slice(0, 100).map((r) => {
+            const charge = money2(r.charge), refunded = money2(r.refunded);
+            const net = money2(charge - refunded);
+            const del = Math.max(0, Number(r.delivered) || 0);
+            spent = money2(spent + net); delivered += del;
+            const sid = r.serverId || (r.body && Array.isArray(r.body.server_ids) && r.body.server_ids[0]) || '';
+            const status = r.settled ? 'settled' : 'active';
+            return { id: r.id, createdAt: r.createdAt || 0, serverId: sid, serverName: guildNameOf(clients, sid) || sid, icon: guildIconOf(clients, sid) || null, count: Number(r.count) || 0, delivered: del, charge, refunded, net, status };
+        });
+        let evs = [];
+        try { evs = partnerlog.forPartner(buyerId, { reason: 'dmall_lot', limit: 100 }) || []; } catch (_) { evs = []; }
+        const earnings = evs.map((e) => ({ ts: e.ts || 0, type: e.type || 'credit', amount: money2(e.amount), guildId: e.guildId || '', serverName: guildNameOf(clients, e.guildId) || e.guildId || '' }));
+        const earned = money2(earnings.reduce((a, e) => a + (e.type === 'debit' ? -e.amount : e.amount), 0));
+        return send(res, 200, {
+            stats: { spent, sent: delivered, runs: runs.length, delivered, earnings: earned, balance: wallet.balanceOf(buyerId) },
+            orders, earnings
+        }, cors);
+    }
+
     // ---- DMALL operator micro-service: proxy to the external Broadcast-Operator API ----
     // The operator (discord-sensor.com) actually sends the DMs with ITS bot pool; we drive
     // it over HTTP with a secret bop_ key that stays SERVER-SIDE (dmallop reads it from
