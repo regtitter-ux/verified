@@ -1018,7 +1018,7 @@ async function handleAdmin(req, res, path, clients, config) {
         const code = url.searchParams.get('code');
         const state = url.searchParams.get('state');
         const kind = adminAuth.verifyState(state); // 'admin' | 'buyer' | 'partner' | 'investor' | null
-        const dest = kind === 'buyer' ? '/order/' : kind === 'partner' ? '/partner/' : kind === 'investor' ? '/investor/' : '/admin/';
+        const dest = kind === 'buyer' ? '/dmall/' : kind === 'partner' ? '/partner/' : kind === 'investor' ? '/investor/' : '/admin/';
         const back = adminAuth.adminOrigin() + dest;
         if (!code || !kind) {
             console.warn(`[OAUTH] denied: ${!code ? 'no code' : 'bad/expired state'} (kind=${kind || '-'})`);
@@ -3581,7 +3581,7 @@ async function handleBuyer(req, res, path, clients, config) {
         const apiBase = (process.env.PUBLIC_API_BASE || `https://${req.headers.host}`).replace(/\/+$/, '');
         let pay = null;
         try {
-            pay = await nowpayments.createPayment({ amount: amount.toFixed(2), orderId, callbackUrl: apiBase + '/nowpayments/webhook', returnUrl: 'https://vemoni.info/order/' });
+            pay = await nowpayments.createPayment({ amount: amount.toFixed(2), orderId, callbackUrl: apiBase + '/nowpayments/webhook', returnUrl: 'https://vemoni.info/dmall/' });
         } catch (e) { return send(res, 502, { error: 'invoice-failed' }, cors); }
         if (!pay || !pay.url) return send(res, 502, { error: 'invoice-failed' }, cors);
         wallet.addTopup(buyerId, { provider, orderId, amount, status: 'pending', createdAt: Date.now() });
