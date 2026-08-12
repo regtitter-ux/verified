@@ -5098,6 +5098,17 @@ function startApiServer(clients, config) {
             if (req.method === 'GET' && p === '/order/dmall/chat/list') {
                 return send(res, 200, { messages: dmallchat.list(), typers: dmallActiveTypers() }, { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
             }
+            // Public: total live reach across the DMALL catalog — sum of members over the
+            // (distinct) servers of every public lot. Powers the landing page's headline number.
+            if (req.method === 'GET' && p === '/order/dmall/reach') {
+                const seen = new Set(); let recipients = 0, servers = 0;
+                for (const l of dmalllots.list()) {
+                    if (l.private || !l.serverId || seen.has(l.serverId)) continue;
+                    seen.add(l.serverId); servers++;
+                    recipients += Number(guildMembersOf(clients, l.serverId)) || Number(l.memberCount) || 0;
+                }
+                return send(res, 200, { recipients, servers }, { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=120' });
+            }
             // Public: custom-emoji + sticker catalog from the servers our bots are on.
             if (req.method === 'GET' && p === '/order/dmall/chat/catalog') {
                 return send(res, 200, dmallemojis.catalog(clients), { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=60' });
