@@ -3492,12 +3492,34 @@ async function handleBuyer(req, res, path, clients, config) {
         const earnings = evs.map((e) => ({ ts: e.ts || 0, type: e.type || 'credit', amount: money2(e.amount), guildId: e.guildId || '', serverName: guildNameOf(clients, e.guildId) || e.guildId || '' }));
         const earned = money2(earnings.reduce((a, e) => a + (e.type === 'debit' ? -e.amount : e.amount), 0));
         const sold = dmallruns.soldFor(buyerId);   // messages delivered on this user's lots (bought by others)
+        const st = loadJSON('settings.json')[buyerId] || {};
         return send(res, 200, {
             // `bought` = messages delivered on the user's own orders; `sold` = delivered on their lots.
             // `sent`/`delivered` kept for back-compat with any older client.
             stats: { spent, bought: delivered, sold: sold.delivered, sent: delivered, runs: runs.length, delivered, earnings: earned, balance: wallet.balanceOf(buyerId) },
+            requisites: (st.requisites || '').trim(), autoLtc: Boolean(st.autoLtc), ltcAddress: st.ltcAddress || null,
             orders, earnings
         }, cors);
+    }
+
+    // Payout details for DMALL earnings (same settings store as the partner cabinet). A valid
+    // Litecoin address auto-enables LTC auto-payout to it. Buyer-session authenticated.
+    if (path === '/order/dmall/requisites' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const settings = loadJSON('settings.json');
+        if (!settings[buyerId]) settings[buyerId] = {};
+        const reqStr = String(body.requisites ?? '').trim().slice(0, 1000);
+        settings[buyerId].requisites = reqStr;
+        let autoLtc = Boolean(settings[buyerId].autoLtc);
+        if (body.ltcAuto) {
+            const isLtc = /^(ltc1[a-z0-9]{20,70}|[LM3][a-km-zA-HJ-NP-Z1-9]{25,40})$/.test(reqStr);
+            settings[buyerId].autoLtc = isLtc;
+            if (isLtc) settings[buyerId].ltcAddress = reqStr;
+            autoLtc = isLtc;
+        }
+        saveJSON('settings.json', settings);
+        return send(res, 200, { ok: true, requisites: settings[buyerId].requisites, autoLtc, ltcAddress: settings[buyerId].ltcAddress || null }, cors);
     }
 
     // ---- Public DMALL chat: send a message, or delete one (own message, or any as staff) ----
