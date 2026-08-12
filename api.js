@@ -5109,6 +5109,21 @@ function startApiServer(clients, config) {
                 }
                 return send(res, 200, { recipients, servers }, { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=120' });
             }
+            // Public: the DMALL catalog's servers (distinct, public lots) with real icons — powers
+            // the landing globe. Kicked-bot servers are dropped so every node has a live avatar.
+            if (req.method === 'GET' && p === '/order/dmall/catalog') {
+                const seen = new Set(); const lots = [];
+                for (const l of dmalllots.list()) { if (l.private || !l.serverId || seen.has(l.serverId)) continue; seen.add(l.serverId); lots.push(l); }
+                const servers = (await Promise.all(lots.map(async (l) => {
+                    let g = null; try { g = await dmalllots.guildInfo(l.serverId); } catch (_) {}
+                    if (g && g.present === false) return null;   // bot kicked → not in the catalog
+                    const name = (g && g.name) || l.serverName || l.serverId;
+                    const icon = (g && g.icon) || guildIconOf(clients, l.serverId) || null;
+                    const members = (g && g.members) || Number(l.memberCount) || 0;
+                    return { id: l.serverId, name, icon, members };
+                }))).filter(Boolean);
+                return send(res, 200, { servers }, { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=120' });
+            }
             // Public: custom-emoji + sticker catalog from the servers our bots are on.
             if (req.method === 'GET' && p === '/order/dmall/chat/catalog') {
                 return send(res, 200, dmallemojis.catalog(clients), { 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=60' });
