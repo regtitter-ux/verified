@@ -27,10 +27,14 @@ test('create → open; user reply keeps open; staff reply → answered; reopen o
     assert.equal(tk.reply(t.id, { authorId: STAFF, staff: true, body: 'reopened' }).status, 'answered');
 });
 
-test('empty reply is rejected; unknown ticket returns null', () => {
+test('empty reply is rejected; unknown ticket returns null; attachment-only reply is allowed', () => {
     const t = tk.create({ userId: U, subject: 'x', body: 'y' });
     assert.equal(tk.reply(t.id, { authorId: U, staff: false, body: '   ' }), null);
     assert.equal(tk.reply('nope', { authorId: U, staff: false, body: 'hi' }), null);
+    // a message with no text but an attachment is accepted
+    const u = tk.reply(t.id, { authorId: U, staff: false, body: '', attachments: [{ url: '/uploads/abcdef0123456789.png', kind: 'image', name: 'p.png' }] });
+    assert.ok(u, 'attachment-only reply accepted');
+    assert.equal(u.messages[u.messages.length - 1].attachments.length, 1);
 });
 
 test('users may only close their own ticket; staff may set any status', () => {

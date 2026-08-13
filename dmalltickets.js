@@ -14,8 +14,13 @@ const BODY_MAX = 4000;
 function load() { const d = database.loadJSON(FILE, {}); return (d && typeof d === 'object' && !Array.isArray(d)) ? d : {}; }
 const clip = (s, n) => String(s == null ? '' : s).replace(/\r\n/g, '\n').trim().slice(0, n);
 
-function msg(authorId, authorName, staff, body) {
-    return { id: crypto.randomUUID(), authorId: String(authorId || ''), authorName: authorName || null, staff: !!staff, body: clip(body, BODY_MAX), at: new Date().toISOString() };
+const ATT_MAX = 6;
+function msg(authorId, authorName, staff, body, attachments) {
+    return {
+        id: crypto.randomUUID(), authorId: String(authorId || ''), authorName: authorName || null, staff: !!staff,
+        body: clip(body, BODY_MAX), attachments: Array.isArray(attachments) ? attachments.slice(0, ATT_MAX) : [],
+        at: new Date().toISOString(),
+    };
 }
 
 // Public view of a ticket (optionally without the full message list, for lists).
@@ -40,13 +45,13 @@ function raw(id) { return load()[String(id || '')] || null; }
 function list(withMessages) { return Object.values(load()).map((t) => view(t, withMessages)).filter(Boolean).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)); }
 function forUser(userId) { return list().filter((t) => String(t.userId) === String(userId)); }
 
-function create({ userId, userName, subject, body }) {
+function create({ userId, userName, subject, body, attachments }) {
     const now = Date.now();
     const t = {
         id: crypto.randomUUID(), userId: String(userId || ''), userName: userName || null,
         subject: clip(subject, SUBJECT_MAX) || 'Ticket', status: 'open',
         createdAt: now, updatedAt: now, staffReadAt: 0, userReadAt: now,
-        messages: [msg(userId, userName, false, body)],
+        messages: [msg(userId, userName, false, body, attachments)],
     };
     database.mutate(FILE, (d) => { d[t.id] = t; });
     return view(t, true);
@@ -54,13 +59,15 @@ function create({ userId, userName, subject, body }) {
 
 // Append a reply. staff=true when a staff member answers. Reopens a closed ticket.
 // Returns the updated ticket view, or null if not found.
-function reply(id, { authorId, authorName, staff, body }) {
-    const b = clip(body, BODY_MAX); if (!b) return null;
+function reply(id, { authorId, authorName, staff, body, attachments }) {
+    const b = clip(body, BODY_MAX);
+    const att = Array.isArray(attachments) ? attachments.slice(0, ATT_MAX) : [];
+    if (!b && !att.length) return null;   // a message must carry text or an attachment
     let out = null;
     database.mutate(FILE, (d) => {
         const t = d[String(id || '')]; if (!t) return false;
         if (!Array.isArray(t.messages)) t.messages = [];
-        t.messages.push(msg(authorId, authorName, staff, b));
+        t.messages.push(msg(authorId, authorName, staff, b, att));
         if (t.messages.length > MAX_MSGS) t.messages = t.messages.slice(-MAX_MSGS);
         t.status = staff ? 'answered' : 'open';   // a reply reopens a closed ticket
         t.updatedAt = Date.now();

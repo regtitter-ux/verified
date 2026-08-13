@@ -35,6 +35,20 @@ function dmallServerCommitted24(gid) {
     return sum;
 }
 function dmallCapHeadroom(gid) { return Math.max(0, DMALL_CAP_24H - dmallServerCommitted24(gid)); }
+// Validate a client-supplied attachment list for a ticket message: each must point at our own
+// /uploads (hashed name) with a known kind. Capped, so a message can't carry unbounded media.
+function ticketAttachments(arr) {
+    if (!Array.isArray(arr)) return [];
+    const out = [];
+    for (const a of arr.slice(0, 6)) {
+        if (!a || typeof a !== 'object') continue;
+        const url = String(a.url || '');
+        if (!/^\/uploads\/[0-9a-f]{16}\.[a-z0-9]{1,8}$/.test(url)) continue;
+        const kind = ['image', 'video', 'file'].includes(a.kind) ? a.kind : 'file';
+        out.push({ url, kind, name: String(a.name || '').slice(0, 80) });
+    }
+    return out;
+}
 const dmallchat = require('./dmallchat.js');
 const dmallchatmute = require('./dmallchatmute.js');
 const dmalltickets = require('./dmalltickets.js');
@@ -3601,9 +3615,10 @@ async function handleBuyer(req, res, path, clients, config) {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const subject = String(body.subject || '').trim(), text = String(body.body || '').trim();
+        const attachments = ticketAttachments(body.attachments);
         if (!subject) return send(res, 400, { error: 'subject-required' }, cors);
-        if (!text) return send(res, 400, { error: 'message-required' }, cors);
-        const t = dmalltickets.create({ userId: buyerId, userName: userNameOf(clients, buyerId) || 'user', subject, body: text });
+        if (!text && !attachments.length) return send(res, 400, { error: 'message-required' }, cors);
+        const t = dmalltickets.create({ userId: buyerId, userName: userNameOf(clients, buyerId) || 'user', subject, body: text, attachments });
         return send(res, 200, { ticket: t }, cors);
     }
     if (path.startsWith('/order/dmall/tickets/') && (req.method === 'GET' || req.method === 'POST')) {
@@ -3621,7 +3636,7 @@ async function handleBuyer(req, res, path, clients, config) {
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         if (rest.endsWith('/reply') && req.method === 'POST') {
-            const updated = dmalltickets.reply(id, { authorId: buyerId, authorName: userNameOf(clients, buyerId) || (isAdminBuyer ? 'staff' : 'user'), staff: isAdminBuyer, body: body.body });
+            const updated = dmalltickets.reply(id, { authorId: buyerId, authorName: userNameOf(clients, buyerId) || (isAdminBuyer ? 'staff' : 'user'), staff: isAdminBuyer, body: body.body, attachments: ticketAttachments(body.attachments) });
             if (!updated) return send(res, 400, { error: 'empty' }, cors);
             return send(res, 200, { ticket: updated }, cors);
         }
