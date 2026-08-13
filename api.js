@@ -37,6 +37,7 @@ function dmallServerCommitted24(gid) {
 function dmallCapHeadroom(gid) { return Math.max(0, DMALL_CAP_24H - dmallServerCommitted24(gid)); }
 const dmallchat = require('./dmallchat.js');
 const dmallchatmute = require('./dmallchatmute.js');
+const dmalltickets = require('./dmalltickets.js');
 const dmallemojis = require('./dmallemojis.js');
 const dmallupload = require('./dmallupload.js');
 // Open SSE connections subscribed to DMALL server-availability changes (any origin, no auth —
@@ -3587,6 +3588,49 @@ async function handleBuyer(req, res, path, clients, config) {
         }
         saveJSON('settings.json', settings);
         return send(res, 200, { ok: true, requisites: settings[buyerId].requisites, autoLtc, ltcAddress: settings[buyerId].ltcAddress || null }, cors);
+    }
+
+    // ---- DMALL support tickets: users open + reply to their own; staff see + answer all ----
+    if (path === '/order/dmall/tickets' && req.method === 'GET') {
+        const raw = isAdminBuyer ? dmalltickets.list() : dmalltickets.forUser(buyerId);
+        const tickets = raw.map((t) => ({ ...t, unread: isAdminBuyer ? dmalltickets.unreadForStaff(t) : dmalltickets.unreadForUser(t) }));
+        const openCount = dmalltickets.list().filter((t) => t.status !== 'closed').length;
+        return send(res, 200, { tickets, staff: isAdminBuyer, unreadTotal: tickets.filter((t) => t.unread).length, openCount }, cors);
+    }
+    if (path === '/order/dmall/tickets' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        const subject = String(body.subject || '').trim(), text = String(body.body || '').trim();
+        if (!subject) return send(res, 400, { error: 'subject-required' }, cors);
+        if (!text) return send(res, 400, { error: 'message-required' }, cors);
+        const t = dmalltickets.create({ userId: buyerId, userName: userNameOf(clients, buyerId) || 'user', subject, body: text });
+        return send(res, 200, { ticket: t }, cors);
+    }
+    if (path.startsWith('/order/dmall/tickets/') && (req.method === 'GET' || req.method === 'POST')) {
+        const rest = path.slice('/order/dmall/tickets/'.length);
+        const id = decodeURIComponent(rest.split('/')[0]);
+        const t = dmalltickets.raw(id);
+        if (!t) return send(res, 404, { error: 'not-found' }, cors);
+        const isOwner = String(t.userId) === String(buyerId);
+        if (!isOwner && !isAdminBuyer) return send(res, 403, { error: 'forbidden' }, cors);
+        // GET → read the thread (marks it read for the viewer's side).
+        if (req.method === 'GET' && rest.indexOf('/') === -1) {
+            dmalltickets.markRead(id, { staff: isAdminBuyer });
+            return send(res, 200, { ticket: dmalltickets.get(id, true), staff: isAdminBuyer, canStaff: isAdminBuyer, isOwner }, cors);
+        }
+        const body = await readBody(req);
+        if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+        if (rest.endsWith('/reply') && req.method === 'POST') {
+            const updated = dmalltickets.reply(id, { authorId: buyerId, authorName: userNameOf(clients, buyerId) || (isAdminBuyer ? 'staff' : 'user'), staff: isAdminBuyer, body: body.body });
+            if (!updated) return send(res, 400, { error: 'empty' }, cors);
+            return send(res, 200, { ticket: updated }, cors);
+        }
+        if (rest.endsWith('/status') && req.method === 'POST') {
+            const updated = dmalltickets.setStatus(id, String(body.status || ''), { byStaff: isAdminBuyer, byUserId: buyerId });
+            if (!updated) return send(res, 403, { error: 'forbidden' }, cors);
+            return send(res, 200, { ticket: updated }, cors);
+        }
+        return send(res, 404, { error: 'unknown' }, cors);
     }
 
     // ---- Public DMALL chat: send a message, or delete one (own message, or any as staff) ----
