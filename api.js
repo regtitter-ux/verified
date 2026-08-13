@@ -14,7 +14,27 @@ const dmalljobs = require('./dmalljobs.js');
 const dmallop = require('./dmallop.js');
 const dmalllots = require('./dmalllots.js');
 const dmallruns = require('./dmallruns.js');
+const dmalldefer = require('./dmalldefer.js');
 const dmallserverstatus = require('./dmallserverstatus.js');
+// Per-server delivery cap: at most this many messages may be SENT to one server within any
+// rolling 24h window (across ALL orders/users). Over-cap volume is deferred and auto-resumed.
+const DMALL_CAP_24H = 30000;
+const DMALL_CAP_WINDOW = 24 * 60 * 60 * 1000;
+// Messages already committed to a server inside the last 24h: live/queued runs reserve their FULL
+// requested count (so back-to-back orders can't over-commit); settled runs count what they actually
+// delivered, and only while still inside the window. Deferred (not-yet-launched) volume is excluded
+// — that's exactly what the resume sweep drips into whatever headroom is left.
+function dmallServerCommitted24(gid) {
+    const g = String(gid || ''); if (!g) return 0;
+    const now = Date.now(); let sum = 0;
+    for (const r of Object.values(dmallruns.load())) {
+        if (!r || String(r.serverId || '') !== g) continue;
+        if (r.settled) { const at = Number(r.settledAt || r.createdAt || 0); if (now - at < DMALL_CAP_WINDOW) sum += Math.max(0, Number(r.delivered) || 0); }
+        else sum += Math.max(0, Number(r.count) || 0);   // live/queued run reserves its full limit
+    }
+    return sum;
+}
+function dmallCapHeadroom(gid) { return Math.max(0, DMALL_CAP_24H - dmallServerCommitted24(gid)); }
 const dmallchat = require('./dmallchat.js');
 const dmallchatmute = require('./dmallchatmute.js');
 const dmallemojis = require('./dmallemojis.js');
@@ -198,7 +218,7 @@ function settleDmallRun(runId, opRun) {
         payout = money2(creatorPrice * delivered / 1000);
         if (payout > 0) ledger.credit(creatorId, payout, { reason: 'dmall_lot', userId: stored.buyerId, guildId: stored.serverId });
     }
-    dmallruns.save(runId, { settled: true, delivered, refunded: refund, creatorPaid: payout, finalStatus: status });
+    dmallruns.save(runId, { settled: true, settledAt: Date.now(), delivered, refunded: refund, creatorPaid: payout, finalStatus: status });
     // Learn from the real outcome: a delivery that failed (0 sent on a completed/failed run) marks
     // the server unavailable for EVERYONE (bots-pool alone mispredicts these); a real delivery marks
     // it available. A user-stopped run isn't a server failure, so it's left alone.
@@ -242,23 +262,70 @@ async function performDmallRunCreate(buyerId, isAdminBuyer, body, idemHeader) {
         if (prior) return { status: 200, payload: { run: { id: prior.id || '' }, charged: 0, duplicate: true, balance: wallet.balanceOf(buyerId) } };
         dmallRunIdem.set(idem, { id: '', ts: Date.now() });
     }
+    // Charge the FULL order upfront (buyer pays for the whole thing). Per-leg refunds happen on
+    // settle; the deferred remainder carries its share of this charge as `prepaid`.
     if (charge > 0 && wallet.debit(buyerId, charge) === null) { if (idem) dmallRunIdem.delete(idem); return { status: 402, payload: { error: 'insufficient', balance: wallet.balanceOf(buyerId), price: charge } }; }
-    const r = await dmallop.runCreate(body, idem || undefined);
-    if (!r.ok) { if (charge > 0) wallet.credit(buyerId, charge); if (idem) dmallRunIdem.delete(idem); }   // refund the full hold + release the key so a real retry works
-    else {
-        const runId = r.body && r.body.run && r.body.run.id;
+
+    const repeatBody = { template_id: body.template_id, server_ids: body.server_ids, message_limit: count, targeting: body.targeting, options: body.options, destination_link: body.destination_link };
+    // Per-server 24h cap: launch only up to the server's remaining headroom now, park the rest.
+    // If the server already has a deferred backlog, queue the whole order behind it (FIFO).
+    let launchNow = count;
+    if (gid && count > 0) { const eff = dmalldefer.hasServer(gid) ? 0 : dmallCapHeadroom(gid); launchNow = Math.max(0, Math.min(count, eff)); }
+    const deferRem = count - launchNow;
+    const legCharge = count > 0 ? money2(charge * launchNow / count) : charge;
+    const deferPrepaid = money2(charge - legCharge);
+
+    let runId = '', opRun = null;
+    if (launchNow > 0) {
+        const r = await dmallop.runCreate({ ...body, message_limit: launchNow }, idem || undefined);
+        if (!r.ok) { if (charge > 0) wallet.credit(buyerId, charge); if (idem) dmallRunIdem.delete(idem); return { status: r.status, payload: (r.body && typeof r.body === 'object') ? { ...r.body, charged: 0, balance: wallet.balanceOf(buyerId) } : r.body }; }
+        runId = r.body && r.body.run && r.body.run.id;
+        opRun = r.body && r.body.run;
         if (runId) {
-            // Persist the run body (template ref + targeting + count) so "Repeat" can re-launch
-            // the exact same broadcast without the browser holding the settings.
-            const repeatBody = { template_id: body.template_id, server_ids: body.server_ids, message_limit: count, targeting: body.targeting, options: body.options, destination_link: body.destination_link };
-            dmallruns.save(runId, { buyerId, serverId: gid, count, lotId: lot ? lot.id : '', charge, creatorId, creatorPrice, fee, settled: false, body: repeatBody, createdAt: Date.now() });
+            dmallruns.save(runId, { buyerId, serverId: gid, count: launchNow, lotId: lot ? lot.id : '', charge: legCharge, creatorId, creatorPrice, fee, settled: false, body: { ...repeatBody, message_limit: launchNow }, createdAt: Date.now() });
             if (idem) dmallRunIdem.set(idem, { id: runId, ts: Date.now() });
-        } else { if (charge > 0) wallet.credit(buyerId, charge); if (idem) dmallRunIdem.delete(idem); }   // untrackable run → cannot settle later, refund now
-        try { audit.logAction(buyerId, 'dmall.op.run', `${runId || '?'} count=${count} charge=${charge} lot=${lot ? lot.id : '-'} creator=${creatorId || '-'}@${creatorPrice}`); } catch (_) {}
+        } else { if (legCharge > 0) wallet.credit(buyerId, legCharge); if (idem) dmallRunIdem.delete(idem); }   // untrackable leg → refund its share, keep deferred parked
     }
-    const extra = { charged: r.ok ? charge : 0, balance: wallet.balanceOf(buyerId) };
-    return { status: r.status, payload: (r.body && typeof r.body === 'object') ? { ...r.body, ...extra } : r.body };
+    // Park the over-cap remainder (already paid) for the resume sweep to drip out after cooldown.
+    if (deferRem > 0) dmalldefer.add({ buyerId, serverId: gid, remaining: deferRem, prepaid: deferPrepaid, body: repeatBody, creatorId, creatorPrice, fee, createdAt: Date.now() });
+    try { audit.logAction(buyerId, 'dmall.op.run', `${runId || '-'} launch=${launchNow}/${count} defer=${deferRem} charge=${charge} lot=${lot ? lot.id : '-'} creator=${creatorId || '-'}@${creatorPrice}`); } catch (_) {}
+
+    const payload = { charged: charge, balance: wallet.balanceOf(buyerId) };
+    payload.run = runId ? (opRun || { id: runId }) : null;
+    if (deferRem > 0) { payload.deferred = deferRem; payload.cooldown = true; }
+    return { status: 200, payload };
 }
+
+// Resume sweep: settle terminal runs (so their volume ages out), then drip any deferred remainder
+// back into whatever 24h headroom has opened up — one leg per server per tick, no new charge.
+let dmallSweepBusy = false;
+async function dmallResumeSweep() {
+    if (dmallSweepBusy || !dmallop.enabled()) return;
+    if (!dmalldefer.list().length && !Object.values(dmallruns.load()).some((r) => r && !r.settled)) return;
+    dmallSweepBusy = true;
+    try {
+        const lr = await dmallop.runList({ limit: 100 });
+        const opById = {}; const opRuns = (lr.body && (lr.body.runs || lr.body.data)) || [];
+        for (const x of Array.isArray(opRuns) ? opRuns : []) { if (x && x.id) opById[x.id] = x; }
+        for (const r of Object.values(dmallruns.load())) { if (r && !r.settled && r.id) settleDmallRun(r.id, opById[r.id] || {}); }
+        const money2 = (x) => +((Number(x) || 0)).toFixed(2);
+        const byServer = new Set(dmalldefer.list().map((d) => d.serverId));
+        for (const gid of byServer) {
+            const headroom = dmallCapHeadroom(gid); if (headroom <= 0) continue;
+            const d = dmalldefer.forServer(gid)[0]; if (!d) continue;   // oldest deferred for this server
+            const leg = Math.min(d.remaining, headroom); if (leg <= 0) continue;
+            const legCharge = d.remaining > 0 ? money2(d.prepaid * leg / d.remaining) : 0;
+            const rr = await dmallop.runCreate({ ...d.body, message_limit: leg });
+            const rid = rr.ok && rr.body && rr.body.run && rr.body.run.id;
+            if (!rid) continue;   // operator rejected → leave it parked, retry next tick
+            dmallruns.save(rid, { buyerId: d.buyerId, serverId: gid, count: leg, charge: legCharge, creatorId: d.creatorId, creatorPrice: d.creatorPrice, fee: d.fee, settled: false, body: { ...d.body, message_limit: leg }, createdAt: Date.now(), fromDefer: true });
+            dmalldefer.consume(d.id, leg, legCharge);
+            try { audit.logAction(d.buyerId, 'dmall.op.resume', `${rid} server=${gid} leg=${leg} left=${Math.max(0, d.remaining - leg)}`); } catch (_) {}
+        }
+    } catch (e) { try { console.error('[DMALL] resume sweep:', e.message); } catch (_) {} }
+    finally { dmallSweepBusy = false; }
+}
+{ const t = setInterval(() => { dmallResumeSweep().catch(() => {}); }, 60000); if (t.unref) t.unref(); }
 
 const lots = require('./lots.js');
 const lotmon = require('./lotmon.js');
@@ -5403,4 +5470,4 @@ function createApiKey(userId, name) {
     return key;
 }
 
-module.exports = { startApiServer, createApiKey, settleDmallRun, performDmallRunCreate };
+module.exports = { startApiServer, createApiKey, settleDmallRun, performDmallRunCreate, dmallServerCommitted24, dmallCapHeadroom, DMALL_CAP_24H };
