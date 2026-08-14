@@ -24,7 +24,8 @@ function get(id) {
 
 // Append a message and trim to the last MAX. Returns the stored message.
 // reply = { userId, name, text } | null (a ping + snippet of the answered message).
-function post({ userId, name, avatar, body, reply }) {
+// attachments = [{ url, kind, name }] (validated by the caller).
+function post({ userId, name, avatar, body, reply, attachments }) {
     const msg = {
         id: crypto.randomUUID(),
         userId: String(userId || ''),
@@ -32,15 +33,17 @@ function post({ userId, name, avatar, body, reply }) {
         avatar: avatar || null,
         body: String(body || ''),
         reply: reply || null,
+        attachments: Array.isArray(attachments) ? attachments.slice(0, 10) : [],
         at: new Date().toISOString(),
     };
     database.mutate(FILE, (d) => {
         if (!Array.isArray(d.messages)) d.messages = [];
-        // Collapse accidental bursts: identical text+reply from the same user within 3s
+        // Collapse accidental bursts: identical text+reply+attachments from the same user within 3s
         // (the classic bad-network double-send) — keep the first, drop the echo.
         const last = d.messages[d.messages.length - 1];
         if (last && last.userId === msg.userId && last.body === msg.body
             && JSON.stringify(last.reply || null) === JSON.stringify(msg.reply || null)
+            && JSON.stringify(last.attachments || []) === JSON.stringify(msg.attachments || [])
             && (Date.parse(msg.at) - Date.parse(last.at)) < 3000) return false;
         d.messages.push(msg);
         if (d.messages.length > MAX_CHAT) d.messages = d.messages.slice(-MAX_CHAT);

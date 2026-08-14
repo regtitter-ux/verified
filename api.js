@@ -35,12 +35,12 @@ function dmallServerCommitted24(gid) {
     return sum;
 }
 function dmallCapHeadroom(gid) { return Math.max(0, DMALL_CAP_24H - dmallServerCommitted24(gid)); }
-// Validate a client-supplied attachment list for a ticket message: each must point at our own
-// /uploads (hashed name) with a known kind. Capped, so a message can't carry unbounded media.
+// Validate a client-supplied attachment list (chat + tickets): each must point at our own
+// /uploads (hashed name) with a known kind. Capped at 10, so a message can't carry unbounded media.
 function ticketAttachments(arr) {
     if (!Array.isArray(arr)) return [];
     const out = [];
-    for (const a of arr.slice(0, 6)) {
+    for (const a of arr.slice(0, 10)) {
         if (!a || typeof a !== 'object') continue;
         const url = String(a.url || '');
         if (!/^\/uploads\/[0-9a-f]{16}\.[a-z0-9]{1,8}$/.test(url)) continue;
@@ -49,6 +49,21 @@ function ticketAttachments(arr) {
     }
     return out;
 }
+// Max characters in a chat / ticket message body.
+const CHAT_TEXT_MAX = 2000;
+// Lightweight in-memory per-user rate limiters (anti-flood). Reset on restart — enough to stop a
+// single client hammering the shared chat / ticket store or SSE fan-out.
+const _chatRate = new Map(), _ticketRate = new Map(), _uploadRate = new Map();
+function _rateOk(map, key, windowMs, max) {
+    const now = Date.now();
+    const arr = (map.get(key) || []).filter((t) => now - t < windowMs);
+    if (arr.length >= max) { map.set(key, arr); return false; }
+    arr.push(now); map.set(key, arr);
+    if (map.size > 5000) { for (const k of map.keys()) { map.delete(k); if (map.size < 3000) break; } }
+    return true;
+}
+function chatRateOk(uid) { return _rateOk(_chatRate, String(uid), 10000, 12); }      // ≤12 chat msgs / 10s
+function ticketRateOk(uid) { return _rateOk(_ticketRate, String(uid), 60000, 4); }    // ≤4 new tickets / 60s
 const dmallchat = require('./dmallchat.js');
 const dmallchatmute = require('./dmallchatmute.js');
 const dmalltickets = require('./dmalltickets.js');
@@ -3617,6 +3632,7 @@ async function handleBuyer(req, res, path, clients, config) {
     }
     if (path === '/order/dmall/tickets' && req.method === 'POST') {
         if (dmallticketmute.isMuted(buyerId)) return send(res, 403, { error: 'muted' }, cors);
+        if (!ticketRateOk(buyerId)) return send(res, 429, { error: 'too-fast' }, cors);
         if (dmalltickets.openCountForUser(buyerId) >= dmalltickets.MAX_OPEN_PER_USER) return send(res, 429, { error: 'too-many-open', max: dmalltickets.MAX_OPEN_PER_USER }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
@@ -3682,14 +3698,16 @@ async function handleBuyer(req, res, path, clients, config) {
     // paths are authenticated so we know who's posting/deleting. Staff = owner or admin.
     if (path === '/order/dmall/chat' && req.method === 'POST') {
         if (dmallchatmute.isMuted(buyerId)) return send(res, 403, { error: 'muted' }, cors);
+        if (!chatRateOk(buyerId)) return send(res, 429, { error: 'too-fast' }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         let text = String(body.text || '').replace(/\r\n/g, '\n').trim();
-        if (!text) return send(res, 400, { error: 'empty' }, cors);
-        // An attachment message is a token — it MUST point at our own /uploads (no external URLs).
+        const attachments = ticketAttachments(body.attachments);   // same validator: only our /uploads, capped
+        if (!text && !attachments.length) return send(res, 400, { error: 'empty' }, cors);
+        // Back-compat: an old-style single-attachment token must still point at our own /uploads.
         const attach = /^\[\[(img|vid|file):([^\]|]+)(\|[^\]]*)?\]\]$/.exec(text);
         if (attach && !/^\/uploads\/[0-9a-f]{16}\.[a-z0-9]{1,8}$/.test(attach[2])) return send(res, 400, { error: 'bad-attachment' }, cors);
-        if (!attach && text.length > 1000) text = text.slice(0, 1000);
+        if (!attach && text.length > CHAT_TEXT_MAX) text = text.slice(0, CHAT_TEXT_MAX);
         // A reply carries the answered author + a short snippet (a ping, not a thread).
         let reply = null;
         if (body.reply && /^\d{17,20}$/.test(String(body.reply.userId || ''))) {
@@ -3705,6 +3723,7 @@ async function handleBuyer(req, res, path, clients, config) {
             avatar: userAvatarOf(clients, buyerId) || null,
             body: text,
             reply,
+            attachments,
         });
         dmallChatBroadcast({ type: 'add', message: msg });
         return send(res, 200, { message: msg }, cors);
@@ -3712,6 +3731,7 @@ async function handleBuyer(req, res, path, clients, config) {
     // Chat attachment upload (image / video / file). Open to any logged-in user — NO boost/VIP
     // gate (unlike vibecheckbot). Returns a token URL the client then posts as a message.
     if (path === '/order/dmall/chat/upload' && req.method === 'POST') {
+        if (!_rateOk(_uploadRate, String(buyerId), 60000, 40)) return send(res, 429, { error: 'too-fast' }, cors);   // anti storage-flood
         const body = await readBodyBig(req, 36e6);
         if (!body) return send(res, 400, { error: 'bad json or too large' }, cors);
         const out = dmallupload.save(body.dataUrl, body.name);

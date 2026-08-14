@@ -9,12 +9,12 @@ const database = require('./database.js');
 const FILE = 'dmalltickets.json';
 const MAX_MSGS = 300;
 const SUBJECT_MAX = 140;
-const BODY_MAX = 4000;
+const BODY_MAX = 2000;
 
 function load() { const d = database.loadJSON(FILE, {}); return (d && typeof d === 'object' && !Array.isArray(d)) ? d : {}; }
 const clip = (s, n) => String(s == null ? '' : s).replace(/\r\n/g, '\n').trim().slice(0, n);
 
-const ATT_MAX = 6;
+const ATT_MAX = 10;
 function msg(authorId, authorName, staff, body, attachments) {
     return {
         id: crypto.randomUUID(), authorId: String(authorId || ''), authorName: authorName || null, staff: !!staff,
