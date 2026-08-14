@@ -60,6 +60,30 @@ test('unread flags: new user message is unread for staff until they read it', ()
     assert.equal(tk.unreadForUser(tk.get(t.id)), false);
 });
 
+test('deleteMessage: only the author may delete their own message', () => {
+    const t = tk.create({ userId: U, subject: 'x', body: 'first' });
+    const u = tk.reply(t.id, { authorId: STAFF, staff: true, body: 'staff msg' });
+    const mid = u.messages[1].id;
+    assert.equal(tk.deleteMessage(t.id, mid, U), null, 'user cannot delete staff message');
+    const ok = tk.deleteMessage(t.id, mid, STAFF);
+    assert.ok(ok, 'author (staff) deletes own message');
+    assert.equal(ok.messages.length, 1);
+    assert.equal(tk.deleteMessage('nope', 'x', U), null);
+});
+
+test('remove deletes a ticket; openCountForUser counts non-closed', () => {
+    const a = tk.create({ userId: U, subject: 'a', body: '1' });
+    tk.create({ userId: U, subject: 'b', body: '2' });
+    const c = tk.create({ userId: U, subject: 'c', body: '3' });
+    assert.equal(tk.openCountForUser(U), 3);
+    tk.setStatus(c.id, 'closed', { byStaff: true });
+    assert.equal(tk.openCountForUser(U), 2, 'closed no longer counts');
+    assert.equal(tk.remove(a.id), true);
+    assert.equal(tk.remove(a.id), false, 'already gone');
+    assert.equal(tk.openCountForUser(U), 1);
+    assert.equal(tk.MAX_OPEN_PER_USER, 3);
+});
+
 test('list is newest-activity first; forUser filters to the owner', () => {
     const a = tk.create({ userId: U, subject: 'a', body: '1' });
     const b = tk.create({ userId: STAFF, subject: 'b', body: '2' });

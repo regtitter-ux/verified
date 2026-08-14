@@ -52,6 +52,7 @@ function ticketAttachments(arr) {
 const dmallchat = require('./dmallchat.js');
 const dmallchatmute = require('./dmallchatmute.js');
 const dmalltickets = require('./dmalltickets.js');
+const dmallticketmute = require('./dmallticketmute.js');
 const dmallemojis = require('./dmallemojis.js');
 const dmallupload = require('./dmallupload.js');
 // Open SSE connections subscribed to DMALL server-availability changes (any origin, no auth —
@@ -3609,9 +3610,14 @@ async function handleBuyer(req, res, path, clients, config) {
         const raw = isAdminBuyer ? dmalltickets.list() : dmalltickets.forUser(buyerId);
         const tickets = raw.map((t) => ({ ...t, unread: isAdminBuyer ? dmalltickets.unreadForStaff(t) : dmalltickets.unreadForUser(t) }));
         const openCount = dmalltickets.list().filter((t) => t.status !== 'closed').length;
-        return send(res, 200, { tickets, staff: isAdminBuyer, unreadTotal: tickets.filter((t) => t.unread).length, openCount }, cors);
+        return send(res, 200, {
+            tickets, staff: isAdminBuyer, unreadTotal: tickets.filter((t) => t.unread).length, openCount,
+            muted: dmallticketmute.isMuted(buyerId), myOpen: dmalltickets.openCountForUser(buyerId), maxOpen: dmalltickets.MAX_OPEN_PER_USER,
+        }, cors);
     }
     if (path === '/order/dmall/tickets' && req.method === 'POST') {
+        if (dmallticketmute.isMuted(buyerId)) return send(res, 403, { error: 'muted' }, cors);
+        if (dmalltickets.openCountForUser(buyerId) >= dmalltickets.MAX_OPEN_PER_USER) return send(res, 429, { error: 'too-many-open', max: dmalltickets.MAX_OPEN_PER_USER }, cors);
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         const subject = String(body.subject || '').trim(), text = String(body.body || '').trim();
@@ -3621,7 +3627,17 @@ async function handleBuyer(req, res, path, clients, config) {
         const t = dmalltickets.create({ userId: buyerId, userName: userNameOf(clients, buyerId) || 'user', subject, body: text, attachments });
         return send(res, 200, { ticket: t }, cors);
     }
-    if (path.startsWith('/order/dmall/tickets/') && (req.method === 'GET' || req.method === 'POST')) {
+    // Ticket moderation: mute/unmute a user (staff only). Placed before the :id routes so the
+    // literal "mute"/"unmute" segments aren't treated as ticket ids.
+    if ((path === '/order/dmall/tickets/mute' || path === '/order/dmall/tickets/unmute') && req.method === 'POST') {
+        if (!isAdminBuyer) return send(res, 403, { error: 'forbidden' }, cors);
+        const body = await readBody(req);
+        const uid = body && String(body.userId || '');
+        if (!/^\d{17,20}$/.test(uid || '')) return send(res, 400, { error: 'bad user id' }, cors);
+        if (path.endsWith('/mute')) dmallticketmute.mute(uid, Number(body.minutes) || 0); else dmallticketmute.unmute(uid);
+        return send(res, 200, { ok: true }, cors);
+    }
+    if (path.startsWith('/order/dmall/tickets/') && (req.method === 'GET' || req.method === 'POST' || req.method === 'DELETE')) {
         const rest = path.slice('/order/dmall/tickets/'.length);
         const id = decodeURIComponent(rest.split('/')[0]);
         const t = dmalltickets.raw(id);
@@ -3633,11 +3649,24 @@ async function handleBuyer(req, res, path, clients, config) {
             dmalltickets.markRead(id, { staff: isAdminBuyer });
             return send(res, 200, { ticket: dmalltickets.get(id, true), staff: isAdminBuyer, canStaff: isAdminBuyer, isOwner }, cors);
         }
+        // DELETE the whole ticket — staff only.
+        if (req.method === 'DELETE' && rest.indexOf('/') === -1) {
+            if (!isAdminBuyer) return send(res, 403, { error: 'forbidden' }, cors);
+            dmalltickets.remove(id);
+            return send(res, 200, { ok: true }, cors);
+        }
         const body = await readBody(req);
         if (body === null) return send(res, 400, { error: 'bad json' }, cors);
         if (rest.endsWith('/reply') && req.method === 'POST') {
+            if (dmallticketmute.isMuted(buyerId)) return send(res, 403, { error: 'muted' }, cors);
             const updated = dmalltickets.reply(id, { authorId: buyerId, authorName: userNameOf(clients, buyerId) || (isAdminBuyer ? 'staff' : 'user'), staff: isAdminBuyer, body: body.body, attachments: ticketAttachments(body.attachments) });
             if (!updated) return send(res, 400, { error: 'empty' }, cors);
+            return send(res, 200, { ticket: updated }, cors);
+        }
+        // Delete one of YOUR OWN messages (staff or user; never someone else's).
+        if (rest.endsWith('/delmsg') && req.method === 'POST') {
+            const updated = dmalltickets.deleteMessage(id, String(body.messageId || ''), buyerId);
+            if (!updated) return send(res, 403, { error: 'forbidden' }, cors);
             return send(res, 200, { ticket: updated }, cors);
         }
         if (rest.endsWith('/status') && req.method === 'POST') {

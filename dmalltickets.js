@@ -90,6 +90,33 @@ function setStatus(id, status, { byStaff, byUserId }) {
     return ok ? get(id, true) : null;
 }
 
+// Delete a single message — only the author may delete their own (staff included; nobody may
+// delete someone else's). Returns the updated ticket, or null if not found / not allowed.
+function deleteMessage(ticketId, messageId, byUserId) {
+    let out = null;
+    database.mutate(FILE, (d) => {
+        const t = d[String(ticketId || '')]; if (!t || !Array.isArray(t.messages)) return false;
+        const m = t.messages.find((x) => x.id === String(messageId));
+        if (!m || String(m.authorId) !== String(byUserId)) return false;   // own messages only
+        t.messages = t.messages.filter((x) => x.id !== String(messageId));
+        t.updatedAt = Date.now();
+        out = t.id;
+    });
+    return out ? get(out, true) : null;
+}
+
+// Delete a whole ticket (staff moderation). Returns true if it existed.
+function remove(id) {
+    let ok = false;
+    database.mutate(FILE, (d) => { if (d[String(id || '')]) { delete d[String(id || '')]; ok = true; } });
+    return ok;
+}
+
+// How many NON-closed tickets a user currently has (open + answered) — for the per-user cap.
+function openCountForUser(userId) {
+    return Object.values(load()).filter((t) => t && String(t.userId) === String(userId) && t.status !== 'closed').length;
+}
+
 // Mark a ticket read for the viewer (staff or the owner).
 function markRead(id, { staff }) {
     database.mutate(FILE, (d) => { const t = d[String(id || '')]; if (!t) return false; if (staff) t.staffReadAt = Date.now(); else t.userReadAt = Date.now(); });
@@ -99,4 +126,5 @@ function markRead(id, { staff }) {
 function unreadForStaff(t) { return t.status !== 'closed' && !t.lastStaff && new Date(t.lastAt).getTime() > (t.staffReadAt || 0); }
 function unreadForUser(t) { return t.lastStaff && new Date(t.lastAt).getTime() > (t.userReadAt || 0); }
 
-module.exports = { FILE, load, get, raw, list, forUser, create, reply, setStatus, markRead, view, unreadForStaff, unreadForUser, SUBJECT_MAX, BODY_MAX };
+const MAX_OPEN_PER_USER = 3;
+module.exports = { FILE, load, get, raw, list, forUser, create, reply, setStatus, markRead, deleteMessage, remove, openCountForUser, view, unreadForStaff, unreadForUser, SUBJECT_MAX, BODY_MAX, MAX_OPEN_PER_USER };
