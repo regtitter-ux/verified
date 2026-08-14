@@ -58,10 +58,15 @@ function logEvent(creatorId, entry) {
     save(all);
 }
 
-// All of one partner's events, newest-first (the partner cabinet view).
-function forPartner(creatorId) {
+// All of one partner's events, newest-first (the partner cabinet view). With an
+// optional `opts` (same shape as applyFilters: { type, reason, server, user,
+// since, sort, limit }) the result is filtered — callers that pass a `reason`
+// (e.g. the DMALL cabinet's 'dmall_lot' earnings journal) get ONLY those events,
+// not the partner's whole ledger. Without opts, returns everything (unchanged).
+function forPartner(creatorId, opts) {
     const arr = load()[String(creatorId || '')];
-    return (Array.isArray(arr) ? arr : []).slice().reverse();
+    const evs = (Array.isArray(arr) ? arr : []).slice().reverse();
+    return opts ? applyFilters(evs, opts) : evs;
 }
 
 // Every partner's events flattened, newest-first, each tagged with its partner
