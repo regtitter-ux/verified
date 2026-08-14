@@ -4480,6 +4480,31 @@ async function handlePartner(req, res, path, clients, config) {
         const verified = loadJSON('verified.json', []);
         return send(res, 200, { account: investors.accountOf(userId, verified), topups: investors.recentTopups(userId, 15) }, cors);
     }
+    // Owner-only DMALL profile of the acting-as user — same aggregation as the buyer's
+    // own /order/dmall/cabinet, but for `userId`. Read-only.
+    if (path === '/partner/x-dmall' && req.method === 'GET') {
+        if (!actorIsAdmin) return send(res, 403, { error: 'owner only' }, cors);
+        const money2 = (x) => +((Number(x) || 0)).toFixed(2);
+        const runs = dmallruns.forBuyer(userId);
+        let spent = 0, delivered = 0;
+        const orders = runs.slice(0, 100).map((r) => {
+            const charge = money2(r.charge), refunded = money2(r.refunded);
+            const net = money2(charge - refunded);
+            const del = Math.max(0, Number(r.delivered) || 0);
+            spent = money2(spent + net); delivered += del;
+            const sid = r.serverId || (r.body && Array.isArray(r.body.server_ids) && r.body.server_ids[0]) || '';
+            return { id: r.id, createdAt: r.createdAt || 0, serverId: sid, serverName: guildNameOf(clients, sid) || sid, icon: guildIconOf(clients, sid) || null, count: Number(r.count) || 0, delivered: del, charge, refunded, net, status: r.settled ? 'settled' : 'active' };
+        });
+        let evs = [];
+        try { evs = partnerlog.forPartner(userId, { reason: 'dmall_lot', limit: 100 }) || []; } catch (_) { evs = []; }
+        const earnings = evs.map((e) => ({ ts: e.ts || 0, type: e.type || 'credit', amount: money2(e.amount), guildId: e.guildId || '', serverName: guildNameOf(clients, e.guildId) || e.guildId || '' }));
+        const earned = money2(earnings.reduce((a, e) => a + (e.type === 'debit' ? -e.amount : e.amount), 0));
+        const sold = dmallruns.soldFor(userId);
+        return send(res, 200, {
+            stats: { spent, bought: delivered, sold: sold.delivered, runs: runs.length, earnings: earned, balance: wallet.balanceOf(userId) },
+            orders, earnings
+        }, cors);
+    }
     if (path === '/partner/x-balance' && req.method === 'POST') {
         if (!actorIsAdmin) return send(res, 403, { error: 'owner only' }, cors);
         const body = await readBody(req);
