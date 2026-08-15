@@ -39,6 +39,13 @@ function view(l) {
 function list() { return Object.values(load()).map(view).filter(Boolean).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)); }
 function get(id) { return view(load()[String(id || '')]); }
 
+// Is a lot for this server already listed? A server may be listed by exactly ONE lot —
+// enforced at create so the same server can't spawn multiple cards.
+function serverListed(serverId) {
+    const sid = String(serverId || '');
+    return Object.values(load()).some((l) => l && String(l.serverId || '') === sid);
+}
+
 // Create a lot (the caller has already been verified: bot present on the server).
 function create(creatorId, { serverId, serverName, memberCount, pricePer1k }) {
     const id = newId();
@@ -145,4 +152,4 @@ async function guildInfo(gid) {
 function primeGuild(gid, info) { _guildCache.set(String(gid || ''), { at: Date.now(), info }); }
 function invalidateGuild(gid) { _guildCache.delete(String(gid || '')); }
 
-module.exports = { FILE, SERVICE_FEE_PER_1K, DMALL_BOT_CLIENT_ID, userPricePer1k, list, get, create, update, remove, botOnGuild, guildInfo, primeGuild, invalidateGuild, view };
+module.exports = { FILE, SERVICE_FEE_PER_1K, DMALL_BOT_CLIENT_ID, userPricePer1k, list, get, serverListed, create, update, remove, botOnGuild, guildInfo, primeGuild, invalidateGuild, view };

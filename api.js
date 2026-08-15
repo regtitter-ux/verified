@@ -3486,9 +3486,12 @@ async function handleBuyer(req, res, path, clients, config) {
     // marks the caller's own. Creating a lot verifies the DMALL bot is on the server.
     if (path === '/order/dmall/lots' && req.method === 'GET') {
         // Private lots are visible only to their creator (or staff).
-        const lots = dmalllots.list()
+        const seenSrv = new Set();
+        const lots = dmalllots.list()   // sorted oldest-first, so the kept card is the earliest
             .filter((l) => !l.private || l.creatorId === buyerId || isAdminBuyer)
-            .map((l) => ({ ...l, mine: l.creatorId === buyerId }));
+            .map((l) => ({ ...l, mine: l.creatorId === buyerId }))
+            // One card per server: collapse any pre-existing duplicate lots for the same serverId.
+            .filter((l) => { const s = String(l.serverId || ''); if (seenSrv.has(s)) return false; seenSrv.add(s); return true; });
         // Lifetime per-server stats (keyed by serverId, so they persist across lot recreation).
         const stats = dmallruns.statsByServer();
         // Live server icon/banner/member count (cached), so cards show real avatars/banners.
@@ -3555,6 +3558,8 @@ async function handleBuyer(req, res, path, clients, config) {
         if (!/^\d{17,20}$/.test(serverId)) return send(res, 400, { error: 'bad-server-id' }, cors);
         const pricePer1k = Math.max(0, Number(body?.pricePer1k) || 0);
         // Verify the DMALL bot is actually on the server (it auto-adds the service account).
+        // One lot per server: reject a second card for a server that's already listed.
+        if (dmalllots.serverListed(serverId)) return send(res, 409, { error: 'server-already-listed' }, cors);
         const chk = await dmalllots.botOnGuild(serverId);
         if (!chk.ok) return send(res, 400, { error: 'bot-not-on-server', reason: chk.reason, botClientId: dmalllots.DMALL_BOT_CLIENT_ID }, cors);
         // Drop any stale `present:false` in the guild cache (from a check before the bot was added),
