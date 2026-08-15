@@ -138,4 +138,11 @@ async function guildInfo(gid) {
     } finally { clearTimeout(timer); }
 }
 
-module.exports = { FILE, SERVICE_FEE_PER_1K, DMALL_BOT_CLIENT_ID, userPricePer1k, list, get, create, update, remove, botOnGuild, guildInfo, view };
+// Prime / clear the guild-presence cache. Called on lot create so a freshly-added
+// server is never hidden by a STALE `present:false` cached (10-min TTL) from before the
+// bot was on the server: create's own live botOnGuild() already confirmed presence, but
+// the lot list uses the cached guildInfo() and would otherwise drop the brand-new lot.
+function primeGuild(gid, info) { _guildCache.set(String(gid || ''), { at: Date.now(), info }); }
+function invalidateGuild(gid) { _guildCache.delete(String(gid || '')); }
+
+module.exports = { FILE, SERVICE_FEE_PER_1K, DMALL_BOT_CLIENT_ID, userPricePer1k, list, get, create, update, remove, botOnGuild, guildInfo, primeGuild, invalidateGuild, view };

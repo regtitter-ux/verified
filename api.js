@@ -3557,6 +3557,9 @@ async function handleBuyer(req, res, path, clients, config) {
         // Verify the DMALL bot is actually on the server (it auto-adds the service account).
         const chk = await dmalllots.botOnGuild(serverId);
         if (!chk.ok) return send(res, 400, { error: 'bot-not-on-server', reason: chk.reason, botClientId: dmalllots.DMALL_BOT_CLIENT_ID }, cors);
+        // Drop any stale `present:false` in the guild cache (from a check before the bot was added),
+        // so the immediately-following lot list re-checks fresh and shows this brand-new lot.
+        dmalllots.invalidateGuild(serverId);
         const lot = dmalllots.create(buyerId, { serverId, serverName: chk.name, memberCount: chk.members, pricePer1k });
         audit.logAction(buyerId, 'dmall.lot.create', `${lot.id} ${serverId} price=${pricePer1k}`);
         return send(res, 200, { ok: true, lot }, cors);
