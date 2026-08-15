@@ -266,8 +266,31 @@ function settleDmallRun(runId, opRun) {
 // Create a DMALL run for `buyerId` from `body` (the ONLY money path). Charges the wallet
 // upfront (non-staff), de-dupes on the idempotency key, tracks the run for settlement, and
 // persists the run body so "Repeat" can re-launch it later. Returns { status, payload }.
+// Bound the client-sent message copy stored on an order (display-only): trim strings, cap the
+// number of embeds/fields/components and their sizes, so a crafted payload can't bloat the store.
+function dmSanitizeMsg(m) {
+    if (!m || typeof m !== 'object') return null;
+    const s = (v, n) => (v == null ? '' : String(v)).slice(0, n);
+    const embeds = Array.isArray(m.embeds) ? m.embeds.slice(0, 10).map((e) => ({
+        title: s(e && e.title, 256), description: s(e && e.description, 4000),
+        color: (e && (typeof e.color === 'number' || typeof e.color === 'string')) ? e.color : undefined,
+        image: s(e && (e.image && (e.image.url || e.image)), 1024) || undefined,
+        thumbnail: s(e && (e.thumbnail && (e.thumbnail.url || e.thumbnail)), 1024) || undefined,
+        author: e && e.author ? { name: s(e.author.name, 256), icon_url: s(e.author.icon_url, 1024) || undefined } : undefined,
+        footer: e && e.footer ? { text: s(e.footer.text, 2048), icon_url: s(e.footer.icon_url, 1024) || undefined } : undefined,
+        fields: Array.isArray(e && e.fields) ? e.fields.slice(0, 25).map((f) => ({ name: s(f && f.name, 256), value: s(f && f.value, 1024), inline: !!(f && f.inline) })) : undefined,
+    })) : [];
+    const components = Array.isArray(m.components) ? m.components.slice(0, 25).map((c) => ({ label: s(c && c.label, 80), url: s(c && c.url, 1024) })) : [];
+    return { content: s(m.content, 4000), embeds, components };
+}
+
 async function performDmallRunCreate(buyerId, isAdminBuyer, body, idemHeader) {
     const money2 = (x) => +((Number(x) || 0)).toFixed(2);
+    // The client sends the composed message alongside the run so we can store it with the order
+    // (for the "order details" view). It's NOT forwarded to the operator (which keys off template_id) —
+    // strip it here and keep a bounded copy on the run record.
+    const messagePayload = dmSanitizeMsg(body && body._msg);
+    if (body && '_msg' in body) { body = { ...body }; delete body._msg; }
     const count = Math.max(0, Math.floor(Number(body.message_limit) || 0));
     const perK = count / 1000;
     const fee = dmalllots.SERVICE_FEE_PER_1K;
@@ -313,12 +336,12 @@ async function performDmallRunCreate(buyerId, isAdminBuyer, body, idemHeader) {
         runId = r.body && r.body.run && r.body.run.id;
         opRun = r.body && r.body.run;
         if (runId) {
-            dmallruns.save(runId, { buyerId, serverId: gid, count: launchNow, lotId: lot ? lot.id : '', charge: legCharge, creatorId, creatorPrice, fee, settled: false, body: { ...repeatBody, message_limit: launchNow }, createdAt: Date.now() });
+            dmallruns.save(runId, { buyerId, serverId: gid, count: launchNow, lotId: lot ? lot.id : '', charge: legCharge, creatorId, creatorPrice, fee, settled: false, body: { ...repeatBody, message_limit: launchNow }, messagePayload, createdAt: Date.now() });
             if (idem) dmallRunIdem.set(idem, { id: runId, ts: Date.now() });
         } else { if (legCharge > 0) wallet.credit(buyerId, legCharge); if (idem) dmallRunIdem.delete(idem); }   // untrackable leg → refund its share, keep deferred parked
     }
     // Park the over-cap remainder (already paid) for the resume sweep to drip out after cooldown.
-    if (deferRem > 0) dmalldefer.add({ buyerId, serverId: gid, remaining: deferRem, prepaid: deferPrepaid, body: repeatBody, creatorId, creatorPrice, fee, createdAt: Date.now() });
+    if (deferRem > 0) dmalldefer.add({ buyerId, serverId: gid, remaining: deferRem, prepaid: deferPrepaid, body: repeatBody, creatorId, creatorPrice, fee, messagePayload, createdAt: Date.now() });
     try { audit.logAction(buyerId, 'dmall.op.run', `${runId || '-'} launch=${launchNow}/${count} defer=${deferRem} charge=${charge} lot=${lot ? lot.id : '-'} creator=${creatorId || '-'}@${creatorPrice}`); } catch (_) {}
 
     const payload = { charged: charge, balance: wallet.balanceOf(buyerId) };
@@ -349,7 +372,7 @@ async function dmallResumeSweep() {
             const rr = await dmallop.runCreate({ ...d.body, message_limit: leg });
             const rid = rr.ok && rr.body && rr.body.run && rr.body.run.id;
             if (!rid) continue;   // operator rejected → leave it parked, retry next tick
-            dmallruns.save(rid, { buyerId: d.buyerId, serverId: gid, count: leg, charge: legCharge, creatorId: d.creatorId, creatorPrice: d.creatorPrice, fee: d.fee, settled: false, body: { ...d.body, message_limit: leg }, createdAt: Date.now(), fromDefer: true });
+            dmallruns.save(rid, { buyerId: d.buyerId, serverId: gid, count: leg, charge: legCharge, creatorId: d.creatorId, creatorPrice: d.creatorPrice, fee: d.fee, settled: false, body: { ...d.body, message_limit: leg }, messagePayload: d.messagePayload || null, createdAt: Date.now(), fromDefer: true });
             dmalldefer.consume(d.id, leg, legCharge);
             try { audit.logAction(d.buyerId, 'dmall.op.resume', `${rid} server=${gid} leg=${leg} left=${Math.max(0, d.remaining - leg)}`); } catch (_) {}
         }
@@ -3608,6 +3631,39 @@ async function handleBuyer(req, res, path, clients, config) {
         }, cors);
     }
 
+    // Full details of ONE order (broadcast run): settings, the composed message, the orderer,
+    // the money breakdown. Visible to the run's buyer, and to staff (owner/admin) for any run.
+    if (path === '/order/dmall/order' && req.method === 'GET') {
+        const money2 = (x) => +((Number(x) || 0)).toFixed(2);
+        const id = String((() => { try { return new URL(req.url, 'http://x').searchParams.get('id') || ''; } catch { return ''; } })()).trim();
+        const run = dmallruns.get(id);
+        if (!run) return send(res, 404, { error: 'order-not-found' }, cors);
+        if (String(run.buyerId || '') !== String(buyerId) && !isAdminBuyer) return send(res, 403, { error: 'forbidden' }, cors);
+        const b = run.body || {};
+        const sid = run.serverId || (Array.isArray(b.server_ids) && b.server_ids[0]) || '';
+        const charge = money2(run.charge), refunded = money2(run.refunded);
+        const orderer = await userMiniLive(clients, run.buyerId).catch(() => null);
+        const creator = run.creatorId ? await userMiniLive(clients, run.creatorId).catch(() => null) : null;
+        return send(res, 200, {
+            order: {
+                id: run.id, createdAt: run.createdAt || 0, settledAt: run.settledAt || 0,
+                status: run.settled ? 'settled' : 'active', finalStatus: run.finalStatus || '', fromDefer: !!run.fromDefer,
+                server: { id: sid, name: guildNameOf(clients, sid) || sid, icon: guildIconOf(clients, sid) || null },
+                orderer: { id: run.buyerId || '', name: (orderer && (orderer.name || orderer.username)) || null, avatar: (orderer && orderer.avatar) || null },
+                requested: Number(run.count) || 0, delivered: Math.max(0, Number(run.delivered) || 0),
+                charge, refunded, net: money2(charge - refunded),
+                fee: money2(run.fee), creatorPrice: money2(run.creatorPrice), creatorPaid: money2(run.creatorPaid),
+                lot: run.lotId || b.lotId || '', creator: run.creatorId ? { id: run.creatorId, name: (creator && (creator.name || creator.username)) || null } : null,
+                settings: {
+                    messageLimit: Number(b.message_limit) || Number(run.count) || 0,
+                    targeting: b.targeting || null, options: b.options || null,
+                    destinationLink: b.destination_link || '', templateId: b.template_id || '',
+                },
+                message: run.messagePayload || null,
+            }
+        }, cors);
+    }
+
     // Payout details for DMALL earnings (same settings store as the partner cabinet). A valid
     // Litecoin address auto-enables LTC auto-payout to it. Buyer-session authenticated.
     if (path === '/order/dmall/requisites' && req.method === 'PUT') {
@@ -3828,7 +3884,7 @@ async function handleBuyer(req, res, path, clients, config) {
             if (!body || !body.template_id) return send(res, 400, { error: 'no-stored-settings' }, cors);
             // Fresh 5s-bucket key so a double-click can't spawn two, but distinct from the original.
             const idem = 'repeat-' + runId + '-' + Math.floor(Date.now() / 5000);
-            const out = await performDmallRunCreate(buyerId, isAdminBuyer, { ...body }, idem);
+            const out = await performDmallRunCreate(buyerId, isAdminBuyer, { ...body, _msg: stored.messagePayload || undefined }, idem);
             return send(res, out.status, out.payload, cors);
         }
         // Runs LIST → only the caller's OWN runs (the operator list is account-wide),
@@ -5611,4 +5667,4 @@ function createApiKey(userId, name) {
     return key;
 }
 
-module.exports = { startApiServer, createApiKey, settleDmallRun, performDmallRunCreate, dmallServerCommitted24, dmallCapHeadroom, DMALL_CAP_24H };
+module.exports = { startApiServer, createApiKey, settleDmallRun, performDmallRunCreate, dmSanitizeMsg, dmallServerCommitted24, dmallCapHeadroom, DMALL_CAP_24H };

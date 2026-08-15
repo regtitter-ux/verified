@@ -15,11 +15,12 @@ function forServer(gid) { return list().filter((x) => String(x.serverId) === Str
 function hasServer(gid) { return forServer(gid).length > 0; }
 
 // Park a remainder. `prepaid` is the buyer's already-charged money for these messages.
-function add({ buyerId, serverId, remaining, prepaid, body, creatorId, creatorPrice, fee, createdAt }) {
+function add({ buyerId, serverId, remaining, prepaid, body, creatorId, creatorPrice, fee, createdAt, messagePayload }) {
     const item = {
         id: crypto.randomUUID(), buyerId: String(buyerId || ''), serverId: String(serverId || ''),
         remaining: Math.max(0, Math.floor(Number(remaining) || 0)), prepaid: +((Number(prepaid) || 0)).toFixed(2),
         body: body || null, creatorId: creatorId || '', creatorPrice: Number(creatorPrice) || 0, fee: Number(fee) || 0,
+        messagePayload: messagePayload || null,
         createdAt: createdAt || Date.now(),
     };
     if (item.remaining <= 0) return item;
