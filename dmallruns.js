@@ -59,4 +59,12 @@ function soldFor(creatorId) {
     return { delivered, runs };
 }
 
-module.exports = { FILE, load, save, get, forBuyer, statsByServer, forServer, serverOutcomes, soldFor };
+// Has this buyer ever ordered a broadcast to this server? (Eligibility to leave a review —
+// "bought any amount of messages on this server", regardless of how many were delivered.)
+function boughtOn(serverId, buyerId) {
+    const sid = String(serverId || ''), uid = String(buyerId || '');
+    if (!sid || !uid) return false;
+    return Object.values(load()).some((r) => r && String(r.serverId || '') === sid && String(r.buyerId || '') === uid);
+}
+
+module.exports = { FILE, load, save, get, forBuyer, statsByServer, forServer, serverOutcomes, soldFor, boughtOn };

@@ -68,6 +68,7 @@ const dmallchat = require('./dmallchat.js');
 const dmallchatmute = require('./dmallchatmute.js');
 const dmalltickets = require('./dmalltickets.js');
 const dmallticketmute = require('./dmallticketmute.js');
+const dmallreviews = require('./dmallreviews.js');
 const dmallemojis = require('./dmallemojis.js');
 const dmallupload = require('./dmallupload.js');
 // Open SSE connections subscribed to DMALL server-availability changes (any origin, no auth —
@@ -3521,6 +3522,7 @@ async function handleBuyer(req, res, path, clients, config) {
         await Promise.all(lots.map(async (l) => {
             const st = stats[String(l.serverId)] || { runs: 0, delivered: 0 };
             l.runsDone = st.runs; l.delivered = st.delivered;
+            l.rating = dmallreviews.summary(l.serverId);   // { count, average } for the card badge
             // Shared availability (false = a check found the broadcast can't run; unknown → available).
             l.available = dmallserverstatus.isAvailable(l.serverId) !== false;
             try {
@@ -3662,6 +3664,49 @@ async function handleBuyer(req, res, path, clients, config) {
                 message: run.messagePayload || null,
             }
         }, cors);
+    }
+
+    // ---- Server reviews (product-card comments). Keyed by serverId → survive lot recreation.
+    // Read is open to any logged-in user; posting a review needs a purchase on that server; the
+    // lot owner (or an admin) can reply; the author or an admin can delete. ----
+    if (path.startsWith('/order/dmall/reviews')) {
+        const reviewOwnerOf = (sid) => { const l = dmalllots.list().find((x) => String(x.serverId) === String(sid)); return l ? String(l.creatorId || '') : ''; };
+        if (path === '/order/dmall/reviews' && req.method === 'GET') {
+            const sid = String((() => { try { return new URL(req.url, 'http://x').searchParams.get('serverId') || ''; } catch { return ''; } })()).trim();
+            if (!/^\d{17,20}$/.test(sid)) return send(res, 400, { error: 'bad-server-id' }, cors);
+            const isOwner = reviewOwnerOf(sid) === String(buyerId);
+            return send(res, 200, {
+                reviews: dmallreviews.listFor(sid, { viewerId: buyerId, isOwner, isAdmin: isAdminBuyer }),
+                summary: dmallreviews.summary(sid), mine: dmallreviews.mineFor(sid, buyerId),
+                canReview: dmallruns.boughtOn(sid, buyerId), isOwner, isAdmin: isAdminBuyer,
+            }, cors);
+        }
+        if (path === '/order/dmall/reviews' && req.method === 'POST') {
+            const body = await readBody(req); if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+            const sid = String(body.serverId || '').trim();
+            if (!/^\d{17,20}$/.test(sid)) return send(res, 400, { error: 'bad-server-id' }, cors);
+            if (!dmallruns.boughtOn(sid, buyerId)) return send(res, 403, { error: 'not-a-buyer' }, cors);
+            const stars = Math.round(Number(body.stars) || 0);
+            if (stars < 1 || stars > 5) return send(res, 400, { error: 'stars-required' }, cors);
+            const mini = await userMiniLive(clients, buyerId).catch(() => ({}));
+            const r = dmallreviews.upsert(sid, { userId: buyerId, name: (mini && (mini.name || mini.username)) || null, avatar: (mini && mini.avatar) || null, stars, text: body.text });
+            if (!r) return send(res, 400, { error: 'failed' }, cors);
+            return send(res, 200, { ok: true, review: r }, cors);
+        }
+        if (path === '/order/dmall/reviews' && req.method === 'DELETE') {
+            const body = await readBody(req); if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+            const sid = String(body.serverId || '').trim();
+            const ok = dmallreviews.remove(sid, String(body.reviewId || ''), { byUserId: buyerId, isAdmin: isAdminBuyer });
+            return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'not-found-or-forbidden' }, cors);
+        }
+        if (path === '/order/dmall/reviews/reply' && req.method === 'POST') {
+            const body = await readBody(req); if (body === null) return send(res, 400, { error: 'bad json' }, cors);
+            const sid = String(body.serverId || '').trim();
+            if (!(reviewOwnerOf(sid) === String(buyerId) || isAdminBuyer)) return send(res, 403, { error: 'owner-only' }, cors);
+            const r = dmallreviews.setReply(sid, String(body.reviewId || ''), body.text);
+            return send(res, r ? 200 : 404, r ? { ok: true, review: r } : { error: 'not-found' }, cors);
+        }
+        return send(res, 404, { error: 'unknown' }, cors);
     }
 
     // Payout details for DMALL earnings (same settings store as the partner cabinet). A valid
