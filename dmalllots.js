@@ -13,7 +13,9 @@ const { loadJSON, mutate } = require('./database.js');
 const { round2 } = require('./round.js');
 
 const FILE = 'dmalllots.json';
-const SERVICE_FEE_PER_1K = Number(process.env.DMALL_SERVICE_FEE_PER_1K) || 1;   // $ per 1000 messages
+// Service fee ($ per 1000 messages) — read LIVE from the env so the admin panel's
+// runtime-config override (DMALL_SERVICE_FEE_PER_1K) applies WITHOUT a restart.
+function serviceFeePer1k() { const v = Number(process.env.DMALL_SERVICE_FEE_PER_1K); return (Number.isFinite(v) && v >= 0) ? v : 1; }
 // The bot the user adds to their server; on join it auto-adds the DMALL service account.
 const DMALL_BOT_CLIENT_ID = (process.env.DMALL_BOT_CLIENT_ID || '1525863543310651442').trim();
 
@@ -21,7 +23,7 @@ function load() { const r = loadJSON(FILE, {}); return r && typeof r === 'object
 function newId() { return 'lot_' + crypto.randomBytes(6).toString('hex'); }
 
 // Total price a DMALL user pays per 1000 messages to broadcast to this lot's server.
-function userPricePer1k(creatorPrice) { return round2((Number(creatorPrice) || 0) + SERVICE_FEE_PER_1K); }
+function userPricePer1k(creatorPrice) { return round2((Number(creatorPrice) || 0) + serviceFeePer1k()); }
 
 function view(l) {
     if (!l) return null;
@@ -30,7 +32,7 @@ function view(l) {
         memberCount: Number(l.memberCount) || 0,
         pricePer1k: Math.max(0, Number(l.pricePer1k) || 0),
         userPricePer1k: userPricePer1k(l.pricePer1k),
-        serviceFeePer1k: SERVICE_FEE_PER_1K,
+        serviceFeePer1k: serviceFeePer1k(),
         private: Boolean(l.private),   // private lots are visible only to their creator
         createdAt: l.createdAt || 0
     };
@@ -152,4 +154,6 @@ async function guildInfo(gid) {
 function primeGuild(gid, info) { _guildCache.set(String(gid || ''), { at: Date.now(), info }); }
 function invalidateGuild(gid) { _guildCache.delete(String(gid || '')); }
 
-module.exports = { FILE, SERVICE_FEE_PER_1K, DMALL_BOT_CLIENT_ID, userPricePer1k, list, get, serverListed, create, update, remove, botOnGuild, guildInfo, primeGuild, invalidateGuild, view };
+module.exports = { FILE, serviceFeePer1k, DMALL_BOT_CLIENT_ID, userPricePer1k, list, get, serverListed, create, update, remove, botOnGuild, guildInfo, primeGuild, invalidateGuild, view };
+// Live getter so existing `dmalllots.SERVICE_FEE_PER_1K` readers pick up runtime-config changes.
+Object.defineProperty(module.exports, 'SERVICE_FEE_PER_1K', { enumerable: true, get: serviceFeePer1k });

@@ -270,6 +270,33 @@ function settleDmallRun(runId, opRun) {
 // persists the run body so "Repeat" can re-launch it later. Returns { status, payload }.
 // Bound the client-sent message copy stored on an order (display-only): trim strings, cap the
 // number of embeds/fields/components and their sizes, so a crafted payload can't bloat the store.
+// Full public detail of ONE broadcast run (order): settings, composed message, orderer, money
+// breakdown. Shared by the buyer's own /order/dmall/order and the owner's /partner/x-dmall-order.
+async function dmallOrderDetail(run, clients) {
+    const money2 = (x) => +((Number(x) || 0)).toFixed(2);
+    const b = run.body || {};
+    const sid = run.serverId || (Array.isArray(b.server_ids) && b.server_ids[0]) || '';
+    const charge = money2(run.charge), refunded = money2(run.refunded);
+    const orderer = await userMiniLive(clients, run.buyerId).catch(() => null);
+    const creator = run.creatorId ? await userMiniLive(clients, run.creatorId).catch(() => null) : null;
+    return {
+        id: run.id, createdAt: run.createdAt || 0, settledAt: run.settledAt || 0,
+        status: run.settled ? 'settled' : 'active', finalStatus: run.finalStatus || '', fromDefer: !!run.fromDefer,
+        server: { id: sid, name: guildNameOf(clients, sid) || sid, icon: guildIconOf(clients, sid) || null },
+        orderer: { id: run.buyerId || '', name: (orderer && (orderer.name || orderer.username)) || null, avatar: (orderer && orderer.avatar) || null },
+        requested: Number(run.count) || 0, delivered: Math.max(0, Number(run.delivered) || 0),
+        charge, refunded, net: money2(charge - refunded),
+        fee: money2(run.fee), creatorPrice: money2(run.creatorPrice), creatorPaid: money2(run.creatorPaid),
+        lot: run.lotId || b.lotId || '', creator: run.creatorId ? { id: run.creatorId, name: (creator && (creator.name || creator.username)) || null } : null,
+        settings: {
+            messageLimit: Number(b.message_limit) || Number(run.count) || 0,
+            targeting: b.targeting || null, options: b.options || null,
+            destinationLink: b.destination_link || '', templateId: b.template_id || '',
+        },
+        message: run.messagePayload || null,
+    };
+}
+
 function dmSanitizeMsg(m) {
     if (!m || typeof m !== 'object') return null;
     const s = (v, n) => (v == null ? '' : String(v)).slice(0, n);
@@ -3637,34 +3664,11 @@ async function handleBuyer(req, res, path, clients, config) {
     // Full details of ONE order (broadcast run): settings, the composed message, the orderer,
     // the money breakdown. Visible to the run's buyer, and to staff (owner/admin) for any run.
     if (path === '/order/dmall/order' && req.method === 'GET') {
-        const money2 = (x) => +((Number(x) || 0)).toFixed(2);
         const id = String((() => { try { return new URL(req.url, 'http://x').searchParams.get('id') || ''; } catch { return ''; } })()).trim();
         const run = dmallruns.get(id);
         if (!run) return send(res, 404, { error: 'order-not-found' }, cors);
         if (String(run.buyerId || '') !== String(buyerId) && !isAdminBuyer) return send(res, 403, { error: 'forbidden' }, cors);
-        const b = run.body || {};
-        const sid = run.serverId || (Array.isArray(b.server_ids) && b.server_ids[0]) || '';
-        const charge = money2(run.charge), refunded = money2(run.refunded);
-        const orderer = await userMiniLive(clients, run.buyerId).catch(() => null);
-        const creator = run.creatorId ? await userMiniLive(clients, run.creatorId).catch(() => null) : null;
-        return send(res, 200, {
-            order: {
-                id: run.id, createdAt: run.createdAt || 0, settledAt: run.settledAt || 0,
-                status: run.settled ? 'settled' : 'active', finalStatus: run.finalStatus || '', fromDefer: !!run.fromDefer,
-                server: { id: sid, name: guildNameOf(clients, sid) || sid, icon: guildIconOf(clients, sid) || null },
-                orderer: { id: run.buyerId || '', name: (orderer && (orderer.name || orderer.username)) || null, avatar: (orderer && orderer.avatar) || null },
-                requested: Number(run.count) || 0, delivered: Math.max(0, Number(run.delivered) || 0),
-                charge, refunded, net: money2(charge - refunded),
-                fee: money2(run.fee), creatorPrice: money2(run.creatorPrice), creatorPaid: money2(run.creatorPaid),
-                lot: run.lotId || b.lotId || '', creator: run.creatorId ? { id: run.creatorId, name: (creator && (creator.name || creator.username)) || null } : null,
-                settings: {
-                    messageLimit: Number(b.message_limit) || Number(run.count) || 0,
-                    targeting: b.targeting || null, options: b.options || null,
-                    destinationLink: b.destination_link || '', templateId: b.template_id || '',
-                },
-                message: run.messagePayload || null,
-            }
-        }, cors);
+        return send(res, 200, { order: await dmallOrderDetail(run, clients) }, cors);
     }
 
     // ---- Server reviews (product-card comments). Keyed by serverId → survive lot recreation.
@@ -4616,6 +4620,14 @@ async function handlePartner(req, res, path, clients, config) {
             stats: { spent, bought: delivered, sold: sold.delivered, runs: runs.length, earnings: earned, balance: wallet.balanceOf(userId) },
             orders, earnings
         }, cors);
+    }
+    // Owner-only detail of ONE of the viewed user's orders (same shape as /order/dmall/order).
+    if (path === '/partner/x-dmall-order' && req.method === 'GET') {
+        if (!actorIsAdmin) return send(res, 403, { error: 'owner only' }, cors);
+        const id = String((() => { try { return new URL(req.url, 'http://x').searchParams.get('id') || ''; } catch { return ''; } })()).trim();
+        const run = dmallruns.get(id);
+        if (!run || String(run.buyerId || '') !== String(userId)) return send(res, 404, { error: 'order-not-found' }, cors);
+        return send(res, 200, { order: await dmallOrderDetail(run, clients) }, cors);
     }
     if (path === '/partner/x-balance' && req.method === 'POST') {
         if (!actorIsAdmin) return send(res, 403, { error: 'owner only' }, cors);

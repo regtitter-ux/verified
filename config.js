@@ -21,6 +21,7 @@ const REGISTRY = [
     { cat: 'Цены и заходы', key: 'MANAGER_PRICE', label: 'Цена для менеджера, $ / 100', type: 'number', def: '9' },
     { cat: 'Цены и заходы', key: 'MANAGER_COMMISSION_RATE', label: 'Маржа менеджера (доля, напр. 0.10)', type: 'number', def: '0.10' },
     { cat: 'Цены и заходы', key: 'MIN_ORDER_JOINS', label: 'Мин. заходов в заказе', type: 'number', def: '1' },
+    { cat: 'Цены и заходы', key: 'DMALL_SERVICE_FEE_PER_1K', label: 'Сервисный сбор DMALL, $ / 1000 сообщений', type: 'number', def: '1' },
 
     { cat: 'Балансы / пополнения', key: 'MIN_TOPUP', label: 'Мин. пополнение кошелька, $', type: 'number', def: '5' },
     { cat: 'Балансы / пополнения', key: 'MANAGER_MIN_TOPUP', label: 'Мин. пополнение (менеджер), $', type: 'number', def: '9' },
