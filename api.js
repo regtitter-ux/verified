@@ -53,7 +53,7 @@ function ticketAttachments(arr) {
 const CHAT_TEXT_MAX = 2000;
 // Lightweight in-memory per-user rate limiters (anti-flood). Reset on restart — enough to stop a
 // single client hammering the shared chat / ticket store or SSE fan-out.
-const _chatRate = new Map(), _ticketRate = new Map(), _uploadRate = new Map();
+const _chatRate = new Map(), _ticketRate = new Map(), _uploadRate = new Map(), _reviewRate = new Map();
 function _rateOk(map, key, windowMs, max) {
     const now = Date.now();
     const arr = (map.get(key) || []).filter((t) => now - t < windowMs);
@@ -64,6 +64,7 @@ function _rateOk(map, key, windowMs, max) {
 }
 function chatRateOk(uid) { return _rateOk(_chatRate, String(uid), 10000, 12); }      // ≤12 chat msgs / 10s
 function ticketRateOk(uid) { return _rateOk(_ticketRate, String(uid), 60000, 4); }    // ≤4 new tickets / 60s
+function reviewRateOk(uid) { return _rateOk(_reviewRate, String(uid), 60000, 8); }    // ≤8 review writes / 60s
 const dmallchat = require('./dmallchat.js');
 const dmallchatmute = require('./dmallchatmute.js');
 const dmalltickets = require('./dmalltickets.js');
@@ -3682,6 +3683,7 @@ async function handleBuyer(req, res, path, clients, config) {
             }, cors);
         }
         if (path === '/order/dmall/reviews' && req.method === 'POST') {
+            if (!reviewRateOk(buyerId)) return send(res, 429, { error: 'too-fast' }, cors);
             const body = await readBody(req); if (body === null) return send(res, 400, { error: 'bad json' }, cors);
             const sid = String(body.serverId || '').trim();
             if (!/^\d{17,20}$/.test(sid)) return send(res, 400, { error: 'bad-server-id' }, cors);
@@ -3700,6 +3702,7 @@ async function handleBuyer(req, res, path, clients, config) {
             return send(res, ok ? 200 : 404, ok ? { ok: true } : { error: 'not-found-or-forbidden' }, cors);
         }
         if (path === '/order/dmall/reviews/reply' && req.method === 'POST') {
+            if (!reviewRateOk(buyerId)) return send(res, 429, { error: 'too-fast' }, cors);
             const body = await readBody(req); if (body === null) return send(res, 400, { error: 'bad json' }, cors);
             const sid = String(body.serverId || '').trim();
             if (!(reviewOwnerOf(sid) === String(buyerId) || isAdminBuyer)) return send(res, 403, { error: 'owner-only' }, cors);

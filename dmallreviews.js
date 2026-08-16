@@ -12,11 +12,13 @@ const crypto = require('node:crypto');
 const database = require('./database.js');
 
 const FILE = 'dmallreviews.json';
-const TEXT_MAX = 1000;
-const REPLY_MAX = 1000;
+const TEXT_MAX = 200;    // hard cap on a review body (anti-abuse)
+const REPLY_MAX = 500;   // owner replies can be a bit longer
 
 function load() { const d = database.loadJSON(FILE, {}); return (d && typeof d === 'object' && !Array.isArray(d)) ? d : {}; }
-const clip = (s, n) => String(s == null ? '' : s).replace(/\r\n/g, '\n').trim().slice(0, n);
+// Normalize + bound a body: strip all control chars (incl. newlines/tabs) to spaces,
+// collapse runs of whitespace, trim, then hard-cap the length. No abuse via hidden chars.
+const clip = (s, n) => String(s == null ? '' : s).replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
 const clampStars = (n) => Math.max(1, Math.min(5, Math.round(Number(n) || 0)));
 
 // Public view of one review (safe shape). `viewerId`/`isOwner`/`isAdmin` decorate per-request
