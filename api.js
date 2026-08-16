@@ -328,6 +328,11 @@ async function performDmallRunCreate(buyerId, isAdminBuyer, body, idemHeader) {
     // the lot creator's price (credited to the creator); on own/no lot that leaves $0 (free).
     const gid = (Array.isArray(body.server_ids) && body.server_ids[0]) ? String(body.server_ids[0]) : '';
     const lot = gid ? dmalllots.list().find((l) => l.serverId === gid) : null;
+    // Lot owner's minimum order size — a purchase from someone else's lot must meet it (the owner
+    // broadcasting to their own server is exempt).
+    if (lot && lot.creatorId && lot.creatorId !== buyerId && Number(lot.minOrder) > 0 && count < Number(lot.minOrder)) {
+        return { status: 400, payload: { error: 'below-min', min: Number(lot.minOrder) } };
+    }
     const feeDue = isAdminBuyer ? 0 : fee;   // staff: service fee waived
     let charge = 0, creatorPrice = 0, creatorId = '';
     if (lot && lot.creatorId && lot.creatorId !== buyerId) {
@@ -3600,6 +3605,7 @@ async function handleBuyer(req, res, path, clients, config) {
         if (body.id) {
             const patch = {};
             if (body.pricePer1k != null) patch.pricePer1k = Math.max(0, Number(body.pricePer1k) || 0);
+            if (body.minOrder != null) patch.minOrder = Math.max(0, Math.floor(Number(body.minOrder) || 0));
             if (body.private != null) patch.private = Boolean(body.private);
             if (body.creatorId != null) { if (!/^\d{17,20}$/.test(String(body.creatorId).trim())) return send(res, 400, { error: 'bad-owner-id' }, cors); patch.creatorId = String(body.creatorId).trim(); }
             const upd = dmalllots.update(String(body.id), buyerId, isAdminBuyer, patch);
@@ -3610,6 +3616,7 @@ async function handleBuyer(req, res, path, clients, config) {
         const serverId = String(body?.serverId || '').trim();
         if (!/^\d{17,20}$/.test(serverId)) return send(res, 400, { error: 'bad-server-id' }, cors);
         const pricePer1k = Math.max(0, Number(body?.pricePer1k) || 0);
+        const minOrder = Math.max(0, Math.floor(Number(body?.minOrder) || 0));
         // Verify the DMALL bot is actually on the server (it auto-adds the service account).
         // One lot per server: reject a second card for a server that's already listed.
         if (dmalllots.serverListed(serverId)) return send(res, 409, { error: 'server-already-listed' }, cors);
@@ -3618,8 +3625,8 @@ async function handleBuyer(req, res, path, clients, config) {
         // Drop any stale `present:false` in the guild cache (from a check before the bot was added),
         // so the immediately-following lot list re-checks fresh and shows this brand-new lot.
         dmalllots.invalidateGuild(serverId);
-        const lot = dmalllots.create(buyerId, { serverId, serverName: chk.name, memberCount: chk.members, pricePer1k });
-        audit.logAction(buyerId, 'dmall.lot.create', `${lot.id} ${serverId} price=${pricePer1k}`);
+        const lot = dmalllots.create(buyerId, { serverId, serverName: chk.name, memberCount: chk.members, pricePer1k, minOrder });
+        audit.logAction(buyerId, 'dmall.lot.create', `${lot.id} ${serverId} price=${pricePer1k} min=${minOrder}`);
         return send(res, 200, { ok: true, lot }, cors);
     }
     if (path === '/order/dmall/lot' && req.method === 'DELETE') {

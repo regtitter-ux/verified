@@ -33,6 +33,7 @@ function view(l) {
         pricePer1k: Math.max(0, Number(l.pricePer1k) || 0),
         userPricePer1k: userPricePer1k(l.pricePer1k),
         serviceFeePer1k: serviceFeePer1k(),
+        minOrder: Math.max(0, Math.floor(Number(l.minOrder) || 0)),   // 0 = no minimum
         private: Boolean(l.private),   // private lots are visible only to their creator
         createdAt: l.createdAt || 0
     };
@@ -49,12 +50,12 @@ function serverListed(serverId) {
 }
 
 // Create a lot (the caller has already been verified: bot present on the server).
-function create(creatorId, { serverId, serverName, memberCount, pricePer1k }) {
+function create(creatorId, { serverId, serverName, memberCount, pricePer1k, minOrder }) {
     const id = newId();
     const lot = {
         id, creatorId: String(creatorId || ''), serverId: String(serverId || ''),
         serverName: String(serverName || ''), memberCount: Math.max(0, Math.floor(Number(memberCount) || 0)),
-        pricePer1k: Math.max(0, Number(pricePer1k) || 0), createdAt: Date.now()
+        pricePer1k: Math.max(0, Number(pricePer1k) || 0), minOrder: Math.max(0, Math.floor(Number(minOrder) || 0)), createdAt: Date.now()
     };
     mutate(FILE, (o) => { o[id] = lot; });
     return view(lot);
@@ -71,6 +72,7 @@ function update(id, byId, isStaff, patch) {
         if (!l) return false;
         if (!isStaff && String(l.creatorId || '') !== String(byId || '')) return false;
         if (patch && patch.pricePer1k != null) l.pricePer1k = Math.max(0, Number(patch.pricePer1k) || 0);
+        if (patch && patch.minOrder != null) l.minOrder = Math.max(0, Math.floor(Number(patch.minOrder) || 0));
         if (patch && patch.private != null) l.private = Boolean(patch.private);
         if (patch && patch.creatorId != null && /^\d{17,20}$/.test(String(patch.creatorId))) l.creatorId = String(patch.creatorId);
         out = { ...l };
