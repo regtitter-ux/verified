@@ -4611,6 +4611,11 @@ async function handlePartner(req, res, path, clients, config) {
             const sid = r.serverId || (r.body && Array.isArray(r.body.server_ids) && r.body.server_ids[0]) || '';
             return { id: r.id, createdAt: r.createdAt || 0, serverId: sid, serverName: guildNameOf(clients, sid) || sid, icon: guildIconOf(clients, sid) || null, count: Number(r.count) || 0, delivered: del, charge, refunded, net, status: r.settled ? 'settled' : 'active' };
         });
+        // Sales: broadcasts OTHERS bought against this user's servers (they're the lot owner).
+        const sales = dmallruns.forCreator(userId).slice(0, 100).map((r) => {
+            const sid = r.serverId || (r.body && Array.isArray(r.body.server_ids) && r.body.server_ids[0]) || '';
+            return { id: r.id, createdAt: r.createdAt || 0, serverId: sid, serverName: guildNameOf(clients, sid) || sid, icon: guildIconOf(clients, sid) || null, count: Number(r.count) || 0, delivered: Math.max(0, Number(r.delivered) || 0), earned: money2(r.creatorPaid), status: r.settled ? 'settled' : 'active' };
+        });
         let evs = [];
         try { evs = partnerlog.forPartner(userId, { reason: 'dmall_lot', limit: 100 }) || []; } catch (_) { evs = []; }
         const earnings = evs.map((e) => ({ ts: e.ts || 0, type: e.type || 'credit', amount: money2(e.amount), guildId: e.guildId || '', serverName: guildNameOf(clients, e.guildId) || e.guildId || '' }));
@@ -4618,7 +4623,7 @@ async function handlePartner(req, res, path, clients, config) {
         const sold = dmallruns.soldFor(userId);
         return send(res, 200, {
             stats: { spent, bought: delivered, sold: sold.delivered, runs: runs.length, earnings: earned, balance: wallet.balanceOf(userId) },
-            orders, earnings
+            orders, sales, earnings
         }, cors);
     }
     // Owner-only detail of ONE of the viewed user's orders (same shape as /order/dmall/order).
@@ -4626,7 +4631,8 @@ async function handlePartner(req, res, path, clients, config) {
         if (!actorIsAdmin) return send(res, 403, { error: 'owner only' }, cors);
         const id = String((() => { try { return new URL(req.url, 'http://x').searchParams.get('id') || ''; } catch { return ''; } })()).trim();
         const run = dmallruns.get(id);
-        if (!run || String(run.buyerId || '') !== String(userId)) return send(res, 404, { error: 'order-not-found' }, cors);
+        // The viewed user is either the buyer (their own order) or the lot owner (a sale on their server).
+        if (!run || (String(run.buyerId || '') !== String(userId) && String(run.creatorId || '') !== String(userId))) return send(res, 404, { error: 'order-not-found' }, cors);
         return send(res, 200, { order: await dmallOrderDetail(run, clients) }, cors);
     }
     if (path === '/partner/x-balance' && req.method === 'POST') {

@@ -16,6 +16,13 @@ function forBuyer(buyerId) {
     return Object.values(o).filter((v) => v && String(v.buyerId || '') === String(buyerId || ''))
         .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 }
+// Runs where this user is the LOT OWNER (someone else bought a broadcast to their server) —
+// their "sales", newest first. creatorId is stamped only when buyer ≠ lot owner.
+function forCreator(creatorId) {
+    const o = load();
+    return Object.values(o).filter((v) => v && String(v.creatorId || '') === String(creatorId || ''))
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
 
 // Per-SERVER lifetime stats, keyed by guildId (serverId) — so they survive lot delete/recreate
 // (dmallruns rows are keyed by runId and carry serverId). A "successful" broadcast delivered ≥1.
@@ -67,4 +74,4 @@ function boughtOn(serverId, buyerId) {
     return Object.values(load()).some((r) => r && String(r.serverId || '') === sid && String(r.buyerId || '') === uid);
 }
 
-module.exports = { FILE, load, save, get, forBuyer, statsByServer, forServer, serverOutcomes, soldFor, boughtOn };
+module.exports = { FILE, load, save, get, forBuyer, forCreator, statsByServer, forServer, serverOutcomes, soldFor, boughtOn };
