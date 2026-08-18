@@ -1437,6 +1437,38 @@ async function handleAdmin(req, res, path, clients, config) {
         }
         return send(res, 200, { ok: true, categories: runtimeConfig.adminView() }, cors);
     }
+    // ---- AllanService proxy: forward /admin/allan/<sub> → ALLAN_URL/api/v1/<sub> with the
+    // X-API-Secret header. URL + secret stay SERVER-SIDE (env / runtime-config), like the
+    // DMALL operator. Owner-only. A thin authenticated passthrough (tokens, orders, events, …). ----
+    if (path === '/admin/allan' || path.startsWith('/admin/allan/')) {
+        if (!isOwner) return ownerOnly();
+        const base = (process.env.ALLAN_URL || '').trim().replace(/\/+$/, '');
+        const secret = (process.env.ALLAN_SECRET || '').trim();
+        if (!base || !secret) return send(res, 503, { error: 'allan-not-configured', hint: 'set ALLAN_URL + ALLAN_SECRET (Настройки → AllanService)' }, cors);
+        const sub = path === '/admin/allan' ? '' : path.slice('/admin/allan/'.length).replace(/^\/+/, '');
+        if (sub.includes('..')) return send(res, 400, { error: 'bad path' }, cors);
+        const qs = (() => { const i = req.url.indexOf('?'); return i >= 0 ? req.url.slice(i) : ''; })();
+        let payload = undefined;
+        if (['POST', 'PUT', 'PATCH'].includes(req.method)) { payload = await readBody(req); if (payload === null) payload = {}; }
+        try {
+            const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 20000);
+            let r;
+            try {
+                r = await fetch(`${base}/api/v1/${sub}${qs}`, {
+                    method: req.method,
+                    headers: { 'X-API-Secret': secret, ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+                    body: payload !== undefined ? JSON.stringify(payload) : undefined,
+                    signal: ctrl.signal,
+                });
+            } finally { clearTimeout(timer); }
+            const text = await r.text();
+            let data; try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+            if (req.method !== 'GET') auditDo('admin.allan', `${req.method} ${sub}`);
+            return send(res, r.status, data, cors);
+        } catch (e) {
+            return send(res, 502, { error: 'allan-unreachable', detail: (e && e.name === 'AbortError') ? 'timeout' : (e && e.message) || 'error' }, cors);
+        }
+    }
     if (path === '/admin/config/restart' && req.method === 'POST') {
         if (!isOwner) return ownerOnly();
         auditDo('config.restart', '');

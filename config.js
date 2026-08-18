@@ -72,6 +72,11 @@ const REGISTRY = [
     { cat: 'Лоты', key: 'LOT_WIN_MS', label: 'Окно без перебивания до победы, мс', type: 'number', def: '900000' },
     { cat: 'Лоты', key: 'LOT_SLOWMODE', label: 'Slowmode в канале лота, сек', type: 'number', def: '10' },
 
+    { cat: 'AllanService', key: 'ALLAN_URL', label: 'URL сервиса AllanService (напр. https://…railway.app)', type: 'text', live: true,
+        help: 'Публичный адрес микросервиса мониторинга заходов (пул user-токенов). Админка Vemoni проксирует к нему запросы server-side.' },
+    { cat: 'AllanService', key: 'ALLAN_SECRET', label: 'X-API-Secret AllanService', type: 'secret', live: true,
+        help: 'Секрет из .env AllanService (API_SECRET). Не показывается обратно; хранится только на сервере.' },
+
     { cat: 'Прочее', key: 'BOT_INVITE_URL', label: 'Ссылка «добавить бота»', type: 'text' },
     { cat: 'Прочее', key: 'JOIN_CHECK_GUILDS', label: 'Ограничить проверку заходов серверами (ID через запятую)', type: 'text' },
     { cat: 'Прочее', key: 'SPONSOR_SHOW_STALE_MS', label: 'Окно «реклама показывается», мс', type: 'number', def: '1800000' }
